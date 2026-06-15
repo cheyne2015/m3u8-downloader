@@ -1,0 +1,194 @@
+"""工具函数模块：进度条、文件大小格式化、时间格式化、HTTP Session 管理."""
+
+import sys
+import time
+from typing import Optional
+
+import requests
+
+
+def format_file_size(size_bytes: float) -> str:
+    """将字节数格式化为人类可读的文件大小字符串.
+
+    Args:
+        size_bytes: 字节数.
+
+    Returns:
+        格式化后的文件大小字符串，如 "1.23 MB".
+    """
+    if size_bytes < 0:
+        return "0 B"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    unit_index = 0
+    size = float(size_bytes)
+    while size >= 1024.0 and unit_index < len(units) - 1:
+        size /= 1024.0
+        unit_index += 1
+    return f"{size:.2f} {units[unit_index]}"
+
+
+def format_duration(seconds: float) -> str:
+    """将秒数格式化为人类可读的时间字符串.
+
+    Args:
+        seconds: 秒数.
+
+    Returns:
+        格式化后的时间字符串，如 "01:23:45".
+    """
+    if seconds < 0:
+        seconds = 0
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def format_speed(speed_bytes_per_sec: float) -> str:
+    """格式化下载速度.
+
+    Args:
+        speed_bytes_per_sec: 每秒字节数.
+
+    Returns:
+        格式化后的速度字符串，如 "1.23 MB/s".
+    """
+    return f"{format_file_size(speed_bytes_per_sec)}/s"
+
+
+class ProgressBar:
+    """简单的命令行进度条（tqdm 风格）.
+
+    当 tqdm 可用时使用 tqdm，否则使用内置简单实现。
+    """
+
+    def __init__(
+        self,
+        total: int,
+        desc: str = "",
+        unit: str = "个",
+        disable: bool = False,
+    ) -> None:
+        """初始化进度条.
+
+        Args:
+            total: 总数量.
+            desc: 描述前缀.
+            unit: 单位名称.
+            disable: 是否禁用进度条.
+        """
+        self._total = total
+        self._desc = desc
+        self._unit = unit
+        self._disable = disable
+        self._count = 0
+        self._start_time = time.time()
+        self._last_update_time = 0.0
+
+        try:
+            from tqdm import tqdm  # noqa: F811
+
+            self._tqdm = tqdm(
+                total=total,
+                desc=desc,
+                unit=unit,
+                disable=disable,
+                ncols=80,
+            )
+        except ImportError:
+            self._tqdm = None
+
+    def update(self, n: int = 1) -> None:
+        """更新进度.
+
+        Args:
+            n: 增加的数量.
+        """
+        self._count += n
+        if self._tqdm is not None:
+            self._tqdm.update(n)
+        elif not self._disable:
+            now = time.time()
+            # 每 0.5 秒刷新一次，避免输出过频
+            if now - self._last_update_time < 0.5 and self._count < self._total:
+                return
+            self._last_update_time = now
+            elapsed = now - self._start_time
+            speed = self._count / elapsed if elapsed > 0 else 0
+            eta = (self._total - self._count) / speed if speed > 0 else 0
+            percent = self._count / self._total * 100 if self._total > 0 else 0
+
+            bar_width = 30
+            filled = int(bar_width * self._count / self._total) if self._total > 0 else 0
+            bar = "█" * filled + "░" * (bar_width - filled)
+
+            line = (
+                f"\r{self._desc} |{bar}| {percent:.1f}% "
+                f"{self._count}/{self._total}{self._unit} "
+                f"[{format_speed(speed)} ETA {format_duration(eta)}]"
+            )
+            sys.stderr.write(line)
+            if self._count >= self._total:
+                sys.stderr.write("\n")
+            sys.stderr.flush()
+
+    def close(self) -> None:
+        """关闭进度条."""
+        if self._tqdm is not None:
+            self._tqdm.close()
+        elif not self._disable and self._count < self._total:
+            sys.stderr.write("\n")
+
+
+def create_http_session(
+    timeout: int = 30,
+    headers: Optional[dict] = None,
+) -> requests.Session:
+    """创建带默认配置的 HTTP Session.
+
+    Args:
+        timeout: 默认超时时间（秒）.
+        headers: 自定义请求头.
+
+    Returns:
+        配置好的 requests.Session.
+    """
+    session = requests.Session()
+    default_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "*/*",
+        "Accept-Encoding": "identity",
+        "Connection": "keep-alive",
+    }
+    if headers:
+        default_headers.update(headers)
+    session.headers.update(default_headers)
+    # 将 timeout 绑定到 session 上供后续使用
+    session._default_timeout = timeout  # type: ignore[attr-defined]
+    return session
+
+
+def is_ffmpeg_available() -> bool:
+    """检测系统是否安装了 ffmpeg.
+
+    Returns:
+        True 如果 ffmpeg 可用.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
