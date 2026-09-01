@@ -152,16 +152,21 @@ pip install pyinstaller
 pyinstaller build.spec --clean --noconfirm
 ```
 
-打包完成后，EXE 文件位于 `dist/m3u8-dl.exe`。
+打包完成后，`dist/` 目录下生成 `m3u8-dl.exe`（命令行版）与 `m3u8-dl-gui.exe`（图形界面版，无控制台窗口）。
 
 ### EXE 使用
 
-```bash
-# 命令行模式
-m3u8-dl.exe https://example.com/index.m3u8 -o video.mp4
+打包后 `dist/` 目录会生成两个 EXE：
 
-# GUI 模式
-m3u8-dl.exe --gui
+- **`m3u8-dl-gui.exe`** —— 图形界面版，**双击即可运行且不会弹出黑色终端窗口**（推荐日常 GUI 使用）。
+- **`m3u8-dl.exe`** —— 命令行版，保留控制台窗口用于实时进度输出（适合在终端/批处理中调用）。
+
+```bash
+# GUI 模式（双击 m3u8-dl-gui.exe，无黑窗口）
+m3u8-dl-gui.exe
+
+# 命令行模式（保留进度输出）
+m3u8-dl.exe https://example.com/index.m3u8 -o video.mp4
 ```
 
 ## 项目结构
@@ -170,7 +175,8 @@ m3u8-dl.exe --gui
 m3u8-downloader/
 ├── m3u8_downloader/        # 核心包
 │   ├── __init__.py         # 包初始化
-│   ├── __main__.py         # 模块运行入口
+│   ├── __main__.py         # 模块运行入口（CLI）
+│   ├── gui_launcher.py      # GUI 专用启动入口（无控制台 EXE）
 │   ├── cli.py              # CLI 入口
 │   ├── gui.py              # GUI 图形界面
 │   ├── downloader.py       # 核心下载逻辑
