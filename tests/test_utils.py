@@ -165,15 +165,16 @@ class TestCreateHttpSession:
         session = create_http_session(timeout=60)
         assert session._default_timeout == 60
 
-    def test_no_proxy_sets_none_proxies(self):
-        # 开启 no_proxy 时，proxies 应被显式设为 None，覆盖环境代理
+    def test_no_proxy_sets_trust_env_false(self):
+        # 开启 no_proxy 时，必须关闭 trust_env 才能真正绕过环境代理
+        # （proxies={"http": None} 在 requests 2.34 不生效）
         session = create_http_session(no_proxy=True)
-        assert session.proxies == {"http": None, "https": None}
+        assert session.trust_env is False
 
-    def test_default_no_proxy_not_set(self):
-        # 默认不应出现 None 值（空字典或仅含正常代理）
+    def test_default_trust_env_true(self):
+        # 默认应保留环境代理读取
         session = create_http_session()
-        assert not any(v is None for v in session.proxies.values())
+        assert session.trust_env is True
 
 
 # ---------------------------------------------------------------------------

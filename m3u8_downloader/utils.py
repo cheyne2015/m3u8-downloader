@@ -153,10 +153,9 @@ def create_http_session(
     Args:
         timeout: 默认超时时间（秒）.
         headers: 自定义请求头.
-        no_proxy: 为 True 时显式绕过系统代理环境变量（HTTPS_PROXY / HTTP_PROXY /
-            ALL_PROXY 等），所有请求走直连。内部通过给 session 设置
-            ``proxies = {"http": None, "https": None}`` 实现，
-            不会改动全局 ``os.environ``。
+        no_proxy: 为 True 时绕过系统代理环境变量（HTTPS_PROXY / HTTP_PROXY /
+            ALL_PROXY 等），所有请求走直连。内部设置 ``session.trust_env = False``
+            以禁用环境代理读取（不影响其他 session），不会改动全局 ``os.environ``。
 
     Returns:
         配置好的 requests.Session.
@@ -177,9 +176,11 @@ def create_http_session(
     session.headers.update(default_headers)
     # 将 timeout 绑定到 session 上供后续使用
     session._default_timeout = timeout  # type: ignore[attr-defined]
-    # 直连/跳过代理：显式把代理置为 None，覆盖环境代理变量
+    # 直连/跳过代理：关闭 session 对环境代理（HTTPS_PROXY/HTTP_PROXY 等）的读取，
+    # 所有请求走直连。注意 proxies={"http": None} 在 requests 2.34 会被环境代理覆盖，
+    # 必须用 trust_env=False 才能真正绕过。
     if no_proxy:
-        session.proxies = {"http": None, "https": None}
+        session.trust_env = False
     return session
 
 
