@@ -1,0 +1,482 @@
+117 INFO: PyInstaller: 6.22.2, contrib hooks: 2026.7
+117 INFO: Python: 3.13.12
+143 INFO: Platform: Windows-11-10.0.26100-SP0
+143 INFO: Python environment: C:\Users\cheyn\AppData\Local\Programs\Python\Python313
+152 INFO: Removing temporary files and cleaning cache in C:\Users\cheyn\AppData\Local\pyinstaller
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_pkcs1_15.py:70: UserWarning: Warning: skipping extended tests for Signature Verification 186-3
+  test_vectors_verify = load_test_vectors(("Signature", "PKCS1-v1.5"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_pkcs1_15.py:117: UserWarning: Warning: skipping extended tests for Signature Generation 186-2
+  test_vectors_sign  = load_test_vectors(("Signature", "PKCS1-v1.5"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_pkcs1_15.py:122: UserWarning: Warning: skipping extended tests for Signature Generation 186-3
+  test_vectors_sign += load_test_vectors(("Signature", "PKCS1-v1.5"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_pss.py:117: UserWarning: Warning: skipping extended tests for Signature Verification 186-3
+  test_vectors_verify = load_test_vectors(("Signature", "PKCS1-PSS"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_pss.py:169: UserWarning: Warning: skipping extended tests for Signature Generation 186-2
+  test_vectors_sign = load_test_vectors(("Signature", "PKCS1-PSS"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_pss.py:174: UserWarning: Warning: skipping extended tests for Signature Generation 186-3
+  test_vectors_sign += load_test_vectors(("Signature", "PKCS1-PSS"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_dss.py:159: UserWarning: Warning: skipping extended tests for Signature Verification 186-3
+  test_vectors_verify = load_test_vectors(("Signature", "DSA"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_dss.py:197: UserWarning: Warning: skipping extended tests for Signature Creation 186-3
+  test_vectors_sign = load_test_vectors(("Signature", "DSA"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_dss.py:307: UserWarning: Warning: skipping extended tests for ECDSA Signature Verification 186-3
+  test_vectors_verify = load_test_vectors(("Signature", "ECDSA"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_dss.py:314: UserWarning: Warning: skipping extended tests for ECDSA Signature Verification 186-3
+  test_vectors_verify += load_test_vectors(("Signature", "ECDSA"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_dss.py:357: UserWarning: Warning: skipping extended tests for ECDSA Signature Verification 186-3
+  test_vectors_sign = load_test_vectors(("Signature", "ECDSA"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\PublicKey\test_ECC_NIST.py:779: UserWarning: Warning: skipping extended tests for P-192 tests from point-at-infinity.org
+  tv_pai = load_test_vectors(("PublicKey", "ECC"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\PublicKey\test_ECC_NIST.py:800: UserWarning: Warning: skipping extended tests for P-224 tests from point-at-infinity.org
+  tv_pai = load_test_vectors(("PublicKey", "ECC"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\PublicKey\test_ECC_NIST.py:821: UserWarning: Warning: skipping extended tests for P-256 tests from point-at-infinity.org
+  tv_pai = load_test_vectors(("PublicKey", "ECC"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\PublicKey\test_ECC_NIST.py:842: UserWarning: Warning: skipping extended tests for P-384 tests from point-at-infinity.org
+  tv_pai = load_test_vectors(("PublicKey", "ECC"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\PublicKey\test_ECC_NIST.py:863: UserWarning: Warning: skipping extended tests for P-521 tests from point-at-infinity.org
+  tv_pai = load_test_vectors(("PublicKey", "ECC"),
+2226 INFO: Module search paths (PYTHONPATH):
+['C:\\Users\\cheyn\\WorkBuddy\\2026-06-15-13-47-25',
+ 'D:\\Program '
+ 'Files\\WorkBuddy\\resources\\app.asar.unpacked\\cli\\vendor\\shim',
+ 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\python313.zip',
+ 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\DLLs',
+ 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib',
+ 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313',
+ 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages',
+ 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\win32',
+ 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\win32\\lib',
+ 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\pythonwin',
+ 'C:\\Users\\cheyn\\WorkBuddy\\2026-06-15-13-47-25\\m3u8-downloader']
+2719 INFO: checking Analysis
+2719 INFO: Building Analysis because Analysis-00.toc is non existent
+2719 INFO: Looking for Python shared library...
+2719 INFO: Using Python shared library: C:\Users\cheyn\AppData\Local\Programs\Python\Python313\python313.dll
+2719 INFO: Running Analysis Analysis-00.toc
+2719 INFO: Target bytecode optimization level: 0
+2719 INFO: Initializing module dependency graph...
+2720 INFO: Initializing module graph hook caches...
+2736 INFO: Analyzing modules for base_library.zip ...
+5143 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+5882 INFO: Processing standard module hook 'hook-math.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+6218 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+7874 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+9910 INFO: Caching module dependency graph...
+9966 INFO: Analyzing C:\Users\cheyn\WorkBuddy\2026-06-15-13-47-25\m3u8-downloader\m3u8_downloader\__main__.py
+10127 INFO: Processing standard module hook 'hook-multiprocessing.util.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+10381 INFO: Processing standard module hook 'hook-xml.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+10829 INFO: Processing standard module hook 'hook-sysconfig.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+10835 INFO: Processing standard module hook 'hook-_ctypes.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+10889 INFO: Processing standard module hook 'hook-urllib3.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+11031 INFO: Processing pre-safe-import-module hook 'hook-backports.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+11032 INFO: SetuptoolsInfo: initializing cached setuptools info...
+11823 INFO: Setuptools: 'backports' appears to be a full setuptools-vendored copy - creating alias to 'setuptools._vendor.backports'!
+11829 INFO: Processing standard module hook 'hook-setuptools.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+11874 INFO: Processing standard module hook 'hook-platform.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+11877 INFO: Processing pre-safe-import-module hook 'hook-distutils.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+11911 INFO: Processing pre-safe-import-module hook 'hook-jaraco.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+11912 INFO: Setuptools: 'jaraco' appears to be a full setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco'!
+11930 INFO: Processing pre-safe-import-module hook 'hook-more_itertools.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+11931 INFO: Setuptools: 'more_itertools' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.more_itertools'!
+12141 INFO: Processing standard module hook 'hook-_osx_support.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+12148 INFO: Processing pre-safe-import-module hook 'hook-typing_extensions.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+12828 INFO: Processing pre-safe-import-module hook 'hook-packaging.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+13253 INFO: Processing standard module hook 'hook-setuptools._vendor.jaraco.text.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+13254 INFO: Processing pre-safe-import-module hook 'hook-importlib_resources.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+14127 INFO: Processing pre-safe-import-module hook 'hook-tomli.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+14127 INFO: Setuptools: 'tomli' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.tomli'!
+14760 INFO: Processing pre-safe-import-module hook 'hook-wheel.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+14761 INFO: Setuptools: 'wheel' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.wheel'!
+15377 INFO: Processing standard module hook 'hook-certifi.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+15477 INFO: Processing standard module hook 'hook-charset_normalizer.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+15705 INFO: Processing standard module hook 'hook-cryptography.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+18011 INFO: hook-cryptography: cryptography does not seem to be using dynamically linked OpenSSL.
+18627 INFO: Processing standard module hook 'hook-Crypto.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+20700 INFO: Processing standard module hook 'hook-pycparser.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+21189 INFO: Processing standard module hook 'hook-webbrowser.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+21973 INFO: Processing pre-find-module-path hook 'hook-tkinter.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_find_module_path'
+21974 INFO: TclTkInfo: initializing cached Tcl/Tk info...
+22715 INFO: Processing standard module hook 'hook-_tkinter.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+23263 INFO: Analyzing hidden import 'tqdm.auto'
+23275 INFO: Analyzing hidden import 'Crypto.Cipher.ARC2'
+23280 INFO: Analyzing hidden import 'Crypto.Cipher.ARC4'
+23284 INFO: Analyzing hidden import 'Crypto.Cipher.Blowfish'
+23288 INFO: Analyzing hidden import 'Crypto.Cipher.CAST'
+23292 INFO: Analyzing hidden import 'Crypto.Cipher.ChaCha20'
+23300 INFO: Analyzing hidden import 'Crypto.Cipher.ChaCha20_Poly1305'
+23315 INFO: Analyzing hidden import 'Crypto.Cipher.DES'
+23318 INFO: Analyzing hidden import 'Crypto.Cipher.DES3'
+23323 INFO: Analyzing hidden import 'Crypto.Cipher.PKCS1_OAEP'
+23339 INFO: Analyzing hidden import 'Crypto.Cipher.PKCS1_v1_5'
+23342 INFO: Analyzing hidden import 'Crypto.Cipher.Salsa20'
+23346 INFO: Analyzing hidden import 'Crypto.Cipher._ARC4'
+23346 INFO: Analyzing hidden import 'Crypto.Cipher._Salsa20'
+23347 INFO: Analyzing hidden import 'Crypto.Cipher._chacha20'
+23347 INFO: Analyzing hidden import 'Crypto.Cipher._pkcs1_decode'
+23347 INFO: Analyzing hidden import 'Crypto.Cipher._raw_aes'
+23347 INFO: Analyzing hidden import 'Crypto.Cipher._raw_aesni'
+23347 INFO: Analyzing hidden import 'Crypto.Cipher._raw_arc2'
+23348 INFO: Analyzing hidden import 'Crypto.Cipher._raw_blowfish'
+23348 INFO: Analyzing hidden import 'Crypto.Cipher._raw_cast'
+23348 INFO: Analyzing hidden import 'Crypto.Cipher._raw_cbc'
+23348 INFO: Analyzing hidden import 'Crypto.Cipher._raw_cfb'
+23348 INFO: Analyzing hidden import 'Crypto.Cipher._raw_ctr'
+23349 INFO: Analyzing hidden import 'Crypto.Cipher._raw_des'
+23349 INFO: Analyzing hidden import 'Crypto.Cipher._raw_des3'
+23349 INFO: Analyzing hidden import 'Crypto.Cipher._raw_ecb'
+23349 INFO: Analyzing hidden import 'Crypto.Cipher._raw_eksblowfish'
+23349 INFO: Analyzing hidden import 'Crypto.Cipher._raw_ocb'
+23350 INFO: Analyzing hidden import 'Crypto.Cipher._raw_ofb'
+23350 INFO: Analyzing hidden import 'Crypto.Hash.BLAKE2b'
+23356 INFO: Analyzing hidden import 'Crypto.Hash.KMAC128'
+23364 INFO: Analyzing hidden import 'Crypto.Hash.KMAC256'
+23368 INFO: Analyzing hidden import 'Crypto.Hash.KangarooTwelve'
+23377 INFO: Analyzing hidden import 'Crypto.Hash.MD2'
+23380 INFO: Analyzing hidden import 'Crypto.Hash.MD4'
+23383 INFO: Analyzing hidden import 'Crypto.Hash.RIPEMD'
+23387 INFO: Analyzing hidden import 'Crypto.Hash.SHA'
+23388 INFO: Analyzing hidden import 'Crypto.Hash.SHAKE128'
+23391 INFO: Analyzing hidden import 'Crypto.Hash.SHAKE256'
+23394 INFO: Analyzing hidden import 'Crypto.Hash.TupleHash128'
+23398 INFO: Analyzing hidden import 'Crypto.Hash.TupleHash256'
+23400 INFO: Analyzing hidden import 'Crypto.Hash.TurboSHAKE256'
+23402 INFO: Analyzing hidden import 'Crypto.Hash._BLAKE2b'
+23402 INFO: Analyzing hidden import 'Crypto.Hash._BLAKE2s'
+23402 INFO: Analyzing hidden import 'Crypto.Hash._MD2'
+23403 INFO: Analyzing hidden import 'Crypto.Hash._MD4'
+23403 INFO: Analyzing hidden import 'Crypto.Hash._MD5'
+23403 INFO: Analyzing hidden import 'Crypto.Hash._RIPEMD160'
+23404 INFO: Analyzing hidden import 'Crypto.Hash._SHA1'
+23404 INFO: Analyzing hidden import 'Crypto.Hash._SHA224'
+23404 INFO: Analyzing hidden import 'Crypto.Hash._SHA256'
+23404 INFO: Analyzing hidden import 'Crypto.Hash._SHA384'
+23405 INFO: Analyzing hidden import 'Crypto.Hash._SHA512'
+23405 INFO: Analyzing hidden import 'Crypto.Hash._ghash_clmul'
+23405 INFO: Analyzing hidden import 'Crypto.Hash._ghash_portable'
+23406 INFO: Analyzing hidden import 'Crypto.Hash._keccak'
+23406 INFO: Analyzing hidden import 'Crypto.Hash._poly1305'
+23406 INFO: Analyzing hidden import 'Crypto.IO'
+23407 INFO: Analyzing hidden import 'Crypto.IO.PEM'
+23413 INFO: Analyzing hidden import 'Crypto.IO.PKCS8'
+23450 INFO: Analyzing hidden import 'Crypto.Math'
+23451 INFO: Analyzing hidden import 'Crypto.Math.Numbers'
+23510 INFO: Analyzing hidden import 'Crypto.Math.Primality'
+23517 INFO: Analyzing hidden import 'Crypto.Math._modexp'
+23517 INFO: Analyzing hidden import 'Crypto.Protocol.DH'
+23590 INFO: Analyzing hidden import 'Crypto.Protocol.HPKE'
+23601 INFO: Analyzing hidden import 'Crypto.Protocol.SecretSharing'
+23608 INFO: Analyzing hidden import 'Crypto.Protocol._scrypt'
+23608 INFO: Analyzing hidden import 'Crypto.PublicKey.DSA'
+23626 INFO: Analyzing hidden import 'Crypto.PublicKey.ElGamal'
+23633 INFO: Analyzing hidden import 'Crypto.PublicKey.RSA'
+23653 INFO: Analyzing hidden import 'Crypto.PublicKey._curve25519'
+23653 INFO: Analyzing hidden import 'Crypto.PublicKey._curve448'
+23653 INFO: Analyzing hidden import 'Crypto.PublicKey._ec_ws'
+23653 INFO: Analyzing hidden import 'Crypto.PublicKey._ed25519'
+23654 INFO: Analyzing hidden import 'Crypto.PublicKey._ed448'
+23654 INFO: Analyzing hidden import 'Crypto.SelfTest'
+23753 INFO: Processing standard module hook 'hook-difflib.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+23813 INFO: Analyzing hidden import 'Crypto.SelfTest.Cipher'
+24190 INFO: Analyzing hidden import 'Crypto.SelfTest.Hash'
+24353 INFO: Analyzing hidden import 'Crypto.SelfTest.IO'
+24363 INFO: Analyzing hidden import 'Crypto.SelfTest.Math'
+24432 INFO: Analyzing hidden import 'Crypto.SelfTest.Protocol'
+24520 INFO: Analyzing hidden import 'Crypto.SelfTest.PublicKey'
+24796 INFO: Analyzing hidden import 'Crypto.SelfTest.Random'
+24806 INFO: Analyzing hidden import 'Crypto.SelfTest.Signature'
+24924 INFO: Analyzing hidden import 'Crypto.SelfTest.Util'
+24987 INFO: Analyzing hidden import 'Crypto.SelfTest.__main__'
+24988 INFO: Analyzing hidden import 'Crypto.Util._cpuid_c'
+24989 INFO: Analyzing hidden import 'Crypto.Util._strxor'
+24989 INFO: Processing module hooks (post-graph stage)...
+24989 WARNING: Hidden import "pycparser.lextab" not found!
+24990 WARNING: Hidden import "pycparser.yacctab" not found!
+25079 INFO: Processing standard module hook 'hook-_tkinter.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+25094 INFO: Performing binary vs. data reclassification (981 entries)
+25229 INFO: Looking for ctypes DLLs
+25289 INFO: Analyzing run-time hooks ...
+25293 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+25296 INFO: Including run-time hook 'pyi_rth_pkgutil.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+25298 INFO: Including run-time hook 'pyi_rth_multiprocessing.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+25301 INFO: Including run-time hook 'pyi_rth_setuptools.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+25302 INFO: Including run-time hook 'pyi_rth_cryptography_openssl.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\rthooks'
+25303 INFO: Including run-time hook 'pyi_rth__tkinter.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+25340 INFO: Creating base_library.zip...
+25362 INFO: Looking for dynamic libraries
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_pkcs1_15.py:70: UserWarning: Warning: skipping extended tests for Signature Verification 186-3
+  test_vectors_verify = load_test_vectors(("Signature", "PKCS1-v1.5"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_pkcs1_15.py:117: UserWarning: Warning: skipping extended tests for Signature Generation 186-2
+  test_vectors_sign  = load_test_vectors(("Signature", "PKCS1-v1.5"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_pkcs1_15.py:122: UserWarning: Warning: skipping extended tests for Signature Generation 186-3
+  test_vectors_sign += load_test_vectors(("Signature", "PKCS1-v1.5"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_pss.py:117: UserWarning: Warning: skipping extended tests for Signature Verification 186-3
+  test_vectors_verify = load_test_vectors(("Signature", "PKCS1-PSS"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_pss.py:169: UserWarning: Warning: skipping extended tests for Signature Generation 186-2
+  test_vectors_sign = load_test_vectors(("Signature", "PKCS1-PSS"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_pss.py:174: UserWarning: Warning: skipping extended tests for Signature Generation 186-3
+  test_vectors_sign += load_test_vectors(("Signature", "PKCS1-PSS"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_dss.py:159: UserWarning: Warning: skipping extended tests for Signature Verification 186-3
+  test_vectors_verify = load_test_vectors(("Signature", "DSA"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_dss.py:197: UserWarning: Warning: skipping extended tests for Signature Creation 186-3
+  test_vectors_sign = load_test_vectors(("Signature", "DSA"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_dss.py:307: UserWarning: Warning: skipping extended tests for ECDSA Signature Verification 186-3
+  test_vectors_verify = load_test_vectors(("Signature", "ECDSA"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_dss.py:314: UserWarning: Warning: skipping extended tests for ECDSA Signature Verification 186-3
+  test_vectors_verify += load_test_vectors(("Signature", "ECDSA"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_dss.py:357: UserWarning: Warning: skipping extended tests for ECDSA Signature Verification 186-3
+  test_vectors_sign = load_test_vectors(("Signature", "ECDSA"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\PublicKey\test_ECC_NIST.py:779: UserWarning: Warning: skipping extended tests for P-192 tests from point-at-infinity.org
+  tv_pai = load_test_vectors(("PublicKey", "ECC"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\PublicKey\test_ECC_NIST.py:800: UserWarning: Warning: skipping extended tests for P-224 tests from point-at-infinity.org
+  tv_pai = load_test_vectors(("PublicKey", "ECC"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\PublicKey\test_ECC_NIST.py:821: UserWarning: Warning: skipping extended tests for P-256 tests from point-at-infinity.org
+  tv_pai = load_test_vectors(("PublicKey", "ECC"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\PublicKey\test_ECC_NIST.py:842: UserWarning: Warning: skipping extended tests for P-384 tests from point-at-infinity.org
+  tv_pai = load_test_vectors(("PublicKey", "ECC"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\PublicKey\test_ECC_NIST.py:863: UserWarning: Warning: skipping extended tests for P-521 tests from point-at-infinity.org
+  tv_pai = load_test_vectors(("PublicKey", "ECC"),
+26210 INFO: Extra DLL search directories (AddDllDirectory): []
+26210 INFO: Extra DLL search directories (PATH): []
+27159 INFO: Warnings written to C:\Users\cheyn\WorkBuddy\2026-06-15-13-47-25\m3u8-downloader\build\build\warn-build.txt
+27233 INFO: Graph cross-reference written to C:\Users\cheyn\WorkBuddy\2026-06-15-13-47-25\m3u8-downloader\build\build\xref-build.html
+27274 INFO: Module search paths (PYTHONPATH):
+['C:\\Users\\cheyn\\WorkBuddy\\2026-06-15-13-47-25',
+ 'D:\\Program '
+ 'Files\\WorkBuddy\\resources\\app.asar.unpacked\\cli\\vendor\\shim',
+ 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\python313.zip',
+ 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\DLLs',
+ 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib',
+ 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313',
+ 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages',
+ 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\win32',
+ 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\win32\\lib',
+ 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\pythonwin',
+ 'C:\\Users\\cheyn\\WorkBuddy\\2026-06-15-13-47-25\\m3u8-downloader',
+ 'C:\\Users\\cheyn\\WorkBuddy\\2026-06-15-13-47-25\\m3u8-downloader']
+27781 INFO: checking Analysis
+27781 INFO: Building Analysis because Analysis-01.toc is non existent
+27781 INFO: Looking for Python shared library...
+27781 INFO: Using Python shared library: C:\Users\cheyn\AppData\Local\Programs\Python\Python313\python313.dll
+27781 INFO: Running Analysis Analysis-01.toc
+27781 INFO: Target bytecode optimization level: 0
+27781 INFO: Reusing cached module dependency graph...
+27805 INFO: Initializing module graph hook caches...
+27824 INFO: Analyzing C:\Users\cheyn\WorkBuddy\2026-06-15-13-47-25\m3u8-downloader\m3u8_downloader\gui_launcher.py
+27870 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+27871 INFO: Processing pre-find-module-path hook 'hook-tkinter.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_find_module_path'
+28017 INFO: Processing standard module hook 'hook-_tkinter.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+28190 INFO: Processing standard module hook 'hook-multiprocessing.util.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+28362 INFO: Processing standard module hook 'hook-xml.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+28450 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+28707 INFO: Processing standard module hook 'hook-sysconfig.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+28712 INFO: Processing standard module hook 'hook-_ctypes.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+28759 INFO: Processing standard module hook 'hook-urllib3.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+28880 INFO: Processing pre-safe-import-module hook 'hook-backports.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+28881 INFO: Setuptools: 'backports' appears to be a full setuptools-vendored copy - creating alias to 'setuptools._vendor.backports'!
+28887 INFO: Processing standard module hook 'hook-setuptools.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+28933 INFO: Processing standard module hook 'hook-platform.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+28935 INFO: Processing pre-safe-import-module hook 'hook-distutils.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+28970 INFO: Processing pre-safe-import-module hook 'hook-jaraco.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+28970 INFO: Setuptools: 'jaraco' appears to be a full setuptools-vendored copy - creating alias to 'setuptools._vendor.jaraco'!
+28981 INFO: Processing pre-safe-import-module hook 'hook-more_itertools.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+28981 INFO: Setuptools: 'more_itertools' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.more_itertools'!
+29088 INFO: Processing standard module hook 'hook-math.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+29197 INFO: Processing standard module hook 'hook-_osx_support.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+29202 INFO: Processing pre-safe-import-module hook 'hook-typing_extensions.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+29819 INFO: Processing pre-safe-import-module hook 'hook-packaging.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+30176 INFO: Processing standard module hook 'hook-setuptools._vendor.jaraco.text.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+30177 INFO: Processing pre-safe-import-module hook 'hook-importlib_resources.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+31043 INFO: Processing pre-safe-import-module hook 'hook-tomli.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+31044 INFO: Setuptools: 'tomli' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.tomli'!
+31783 INFO: Processing pre-safe-import-module hook 'hook-wheel.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+31783 INFO: Setuptools: 'wheel' appears to be a setuptools-vendored copy - creating alias to 'setuptools._vendor.wheel'!
+32192 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+32920 INFO: Processing standard module hook 'hook-certifi.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+33021 INFO: Processing standard module hook 'hook-charset_normalizer.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+33233 INFO: Processing standard module hook 'hook-cryptography.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+35269 INFO: hook-cryptography: cryptography does not seem to be using dynamically linked OpenSSL.
+35837 INFO: Processing standard module hook 'hook-Crypto.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+37858 INFO: Processing standard module hook 'hook-pycparser.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+38307 INFO: Processing standard module hook 'hook-webbrowser.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+39460 INFO: Analyzing hidden import 'tqdm.auto'
+39468 INFO: Analyzing hidden import 'm3u8_downloader.cli'
+39481 INFO: Analyzing hidden import 'Crypto.Cipher.ARC2'
+39483 INFO: Analyzing hidden import 'Crypto.Cipher.ARC4'
+39486 INFO: Analyzing hidden import 'Crypto.Cipher.Blowfish'
+39488 INFO: Analyzing hidden import 'Crypto.Cipher.CAST'
+39490 INFO: Analyzing hidden import 'Crypto.Cipher.ChaCha20'
+39496 INFO: Analyzing hidden import 'Crypto.Cipher.ChaCha20_Poly1305'
+39508 INFO: Analyzing hidden import 'Crypto.Cipher.DES'
+39510 INFO: Analyzing hidden import 'Crypto.Cipher.DES3'
+39513 INFO: Analyzing hidden import 'Crypto.Cipher.PKCS1_OAEP'
+39526 INFO: Analyzing hidden import 'Crypto.Cipher.PKCS1_v1_5'
+39529 INFO: Analyzing hidden import 'Crypto.Cipher.Salsa20'
+39532 INFO: Analyzing hidden import 'Crypto.Cipher._ARC4'
+39533 INFO: Analyzing hidden import 'Crypto.Cipher._Salsa20'
+39533 INFO: Analyzing hidden import 'Crypto.Cipher._chacha20'
+39533 INFO: Analyzing hidden import 'Crypto.Cipher._pkcs1_decode'
+39533 INFO: Analyzing hidden import 'Crypto.Cipher._raw_aes'
+39534 INFO: Analyzing hidden import 'Crypto.Cipher._raw_aesni'
+39534 INFO: Analyzing hidden import 'Crypto.Cipher._raw_arc2'
+39534 INFO: Analyzing hidden import 'Crypto.Cipher._raw_blowfish'
+39534 INFO: Analyzing hidden import 'Crypto.Cipher._raw_cast'
+39534 INFO: Analyzing hidden import 'Crypto.Cipher._raw_cbc'
+39535 INFO: Analyzing hidden import 'Crypto.Cipher._raw_cfb'
+39535 INFO: Analyzing hidden import 'Crypto.Cipher._raw_ctr'
+39535 INFO: Analyzing hidden import 'Crypto.Cipher._raw_des'
+39535 INFO: Analyzing hidden import 'Crypto.Cipher._raw_des3'
+39536 INFO: Analyzing hidden import 'Crypto.Cipher._raw_ecb'
+39536 INFO: Analyzing hidden import 'Crypto.Cipher._raw_eksblowfish'
+39536 INFO: Analyzing hidden import 'Crypto.Cipher._raw_ocb'
+39536 INFO: Analyzing hidden import 'Crypto.Cipher._raw_ofb'
+39536 INFO: Analyzing hidden import 'Crypto.Hash.BLAKE2b'
+39541 INFO: Analyzing hidden import 'Crypto.Hash.KMAC128'
+39549 INFO: Analyzing hidden import 'Crypto.Hash.KMAC256'
+39552 INFO: Analyzing hidden import 'Crypto.Hash.KangarooTwelve'
+39560 INFO: Analyzing hidden import 'Crypto.Hash.MD2'
+39562 INFO: Analyzing hidden import 'Crypto.Hash.MD4'
+39565 INFO: Analyzing hidden import 'Crypto.Hash.RIPEMD'
+39568 INFO: Analyzing hidden import 'Crypto.Hash.SHA'
+39569 INFO: Analyzing hidden import 'Crypto.Hash.SHAKE128'
+39572 INFO: Analyzing hidden import 'Crypto.Hash.SHAKE256'
+39575 INFO: Analyzing hidden import 'Crypto.Hash.TupleHash128'
+39578 INFO: Analyzing hidden import 'Crypto.Hash.TupleHash256'
+39579 INFO: Analyzing hidden import 'Crypto.Hash.TurboSHAKE256'
+39580 INFO: Analyzing hidden import 'Crypto.Hash._BLAKE2b'
+39580 INFO: Analyzing hidden import 'Crypto.Hash._BLAKE2s'
+39581 INFO: Analyzing hidden import 'Crypto.Hash._MD2'
+39581 INFO: Analyzing hidden import 'Crypto.Hash._MD4'
+39581 INFO: Analyzing hidden import 'Crypto.Hash._MD5'
+39581 INFO: Analyzing hidden import 'Crypto.Hash._RIPEMD160'
+39581 INFO: Analyzing hidden import 'Crypto.Hash._SHA1'
+39582 INFO: Analyzing hidden import 'Crypto.Hash._SHA224'
+39582 INFO: Analyzing hidden import 'Crypto.Hash._SHA256'
+39582 INFO: Analyzing hidden import 'Crypto.Hash._SHA384'
+39583 INFO: Analyzing hidden import 'Crypto.Hash._SHA512'
+39583 INFO: Analyzing hidden import 'Crypto.Hash._ghash_clmul'
+39583 INFO: Analyzing hidden import 'Crypto.Hash._ghash_portable'
+39583 INFO: Analyzing hidden import 'Crypto.Hash._keccak'
+39584 INFO: Analyzing hidden import 'Crypto.Hash._poly1305'
+39584 INFO: Analyzing hidden import 'Crypto.IO'
+39584 INFO: Analyzing hidden import 'Crypto.IO.PEM'
+39590 INFO: Analyzing hidden import 'Crypto.IO.PKCS8'
+39629 INFO: Analyzing hidden import 'Crypto.Math'
+39630 INFO: Analyzing hidden import 'Crypto.Math.Numbers'
+39684 INFO: Analyzing hidden import 'Crypto.Math.Primality'
+39692 INFO: Analyzing hidden import 'Crypto.Math._modexp'
+39693 INFO: Analyzing hidden import 'Crypto.Protocol.DH'
+39768 INFO: Analyzing hidden import 'Crypto.Protocol.HPKE'
+39783 INFO: Analyzing hidden import 'Crypto.Protocol.SecretSharing'
+39790 INFO: Analyzing hidden import 'Crypto.Protocol._scrypt'
+39791 INFO: Analyzing hidden import 'Crypto.PublicKey.DSA'
+39809 INFO: Analyzing hidden import 'Crypto.PublicKey.ElGamal'
+39816 INFO: Analyzing hidden import 'Crypto.PublicKey.RSA'
+39838 INFO: Analyzing hidden import 'Crypto.PublicKey._curve25519'
+39838 INFO: Analyzing hidden import 'Crypto.PublicKey._curve448'
+39839 INFO: Analyzing hidden import 'Crypto.PublicKey._ec_ws'
+39839 INFO: Analyzing hidden import 'Crypto.PublicKey._ed25519'
+39839 INFO: Analyzing hidden import 'Crypto.PublicKey._ed448'
+39839 INFO: Analyzing hidden import 'Crypto.SelfTest'
+39976 INFO: Processing standard module hook 'hook-difflib.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+40041 INFO: Analyzing hidden import 'Crypto.SelfTest.Cipher'
+40437 INFO: Analyzing hidden import 'Crypto.SelfTest.Hash'
+40592 INFO: Analyzing hidden import 'Crypto.SelfTest.IO'
+40602 INFO: Analyzing hidden import 'Crypto.SelfTest.Math'
+40663 INFO: Analyzing hidden import 'Crypto.SelfTest.Protocol'
+40756 INFO: Analyzing hidden import 'Crypto.SelfTest.PublicKey'
+41045 INFO: Analyzing hidden import 'Crypto.SelfTest.Random'
+41053 INFO: Analyzing hidden import 'Crypto.SelfTest.Signature'
+41154 INFO: Analyzing hidden import 'Crypto.SelfTest.Util'
+41224 INFO: Analyzing hidden import 'Crypto.SelfTest.__main__'
+41225 INFO: Analyzing hidden import 'Crypto.Util._cpuid_c'
+41225 INFO: Analyzing hidden import 'Crypto.Util._strxor'
+41225 INFO: Processing module hooks (post-graph stage)...
+41226 WARNING: Hidden import "pycparser.lextab" not found!
+41226 WARNING: Hidden import "pycparser.yacctab" not found!
+41325 INFO: Processing standard module hook 'hook-_tkinter.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks'
+41339 INFO: Performing binary vs. data reclassification (981 entries)
+41466 INFO: Looking for ctypes DLLs
+41524 INFO: Analyzing run-time hooks ...
+41527 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+41530 INFO: Including run-time hook 'pyi_rth_pkgutil.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+41532 INFO: Including run-time hook 'pyi_rth_multiprocessing.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+41535 INFO: Including run-time hook 'pyi_rth_setuptools.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+41536 INFO: Including run-time hook 'pyi_rth_cryptography_openssl.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\rthooks'
+41537 INFO: Including run-time hook 'pyi_rth__tkinter.py' from 'C:\\Users\\cheyn\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+41598 INFO: Creating base_library.zip...
+41621 INFO: Looking for dynamic libraries
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_pkcs1_15.py:70: UserWarning: Warning: skipping extended tests for Signature Verification 186-3
+  test_vectors_verify = load_test_vectors(("Signature", "PKCS1-v1.5"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_pkcs1_15.py:117: UserWarning: Warning: skipping extended tests for Signature Generation 186-2
+  test_vectors_sign  = load_test_vectors(("Signature", "PKCS1-v1.5"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_pkcs1_15.py:122: UserWarning: Warning: skipping extended tests for Signature Generation 186-3
+  test_vectors_sign += load_test_vectors(("Signature", "PKCS1-v1.5"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_pss.py:117: UserWarning: Warning: skipping extended tests for Signature Verification 186-3
+  test_vectors_verify = load_test_vectors(("Signature", "PKCS1-PSS"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_pss.py:169: UserWarning: Warning: skipping extended tests for Signature Generation 186-2
+  test_vectors_sign = load_test_vectors(("Signature", "PKCS1-PSS"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_pss.py:174: UserWarning: Warning: skipping extended tests for Signature Generation 186-3
+  test_vectors_sign += load_test_vectors(("Signature", "PKCS1-PSS"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_dss.py:159: UserWarning: Warning: skipping extended tests for Signature Verification 186-3
+  test_vectors_verify = load_test_vectors(("Signature", "DSA"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_dss.py:197: UserWarning: Warning: skipping extended tests for Signature Creation 186-3
+  test_vectors_sign = load_test_vectors(("Signature", "DSA"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_dss.py:307: UserWarning: Warning: skipping extended tests for ECDSA Signature Verification 186-3
+  test_vectors_verify = load_test_vectors(("Signature", "ECDSA"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_dss.py:314: UserWarning: Warning: skipping extended tests for ECDSA Signature Verification 186-3
+  test_vectors_verify += load_test_vectors(("Signature", "ECDSA"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\Signature\test_dss.py:357: UserWarning: Warning: skipping extended tests for ECDSA Signature Verification 186-3
+  test_vectors_sign = load_test_vectors(("Signature", "ECDSA"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\PublicKey\test_ECC_NIST.py:779: UserWarning: Warning: skipping extended tests for P-192 tests from point-at-infinity.org
+  tv_pai = load_test_vectors(("PublicKey", "ECC"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\PublicKey\test_ECC_NIST.py:800: UserWarning: Warning: skipping extended tests for P-224 tests from point-at-infinity.org
+  tv_pai = load_test_vectors(("PublicKey", "ECC"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\PublicKey\test_ECC_NIST.py:821: UserWarning: Warning: skipping extended tests for P-256 tests from point-at-infinity.org
+  tv_pai = load_test_vectors(("PublicKey", "ECC"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\PublicKey\test_ECC_NIST.py:842: UserWarning: Warning: skipping extended tests for P-384 tests from point-at-infinity.org
+  tv_pai = load_test_vectors(("PublicKey", "ECC"),
+C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\Crypto\SelfTest\PublicKey\test_ECC_NIST.py:863: UserWarning: Warning: skipping extended tests for P-521 tests from point-at-infinity.org
+  tv_pai = load_test_vectors(("PublicKey", "ECC"),
+42485 INFO: Extra DLL search directories (AddDllDirectory): []
+42485 INFO: Extra DLL search directories (PATH): []
+43400 INFO: Warnings written to C:\Users\cheyn\WorkBuddy\2026-06-15-13-47-25\m3u8-downloader\build\build\warn-build.txt
+43475 INFO: Graph cross-reference written to C:\Users\cheyn\WorkBuddy\2026-06-15-13-47-25\m3u8-downloader\build\build\xref-build.html
+43526 INFO: checking PYZ
+43526 INFO: Building PYZ because PYZ-00.toc is non existent
+43526 INFO: Building PYZ (ZlibArchive) C:\Users\cheyn\WorkBuddy\2026-06-15-13-47-25\m3u8-downloader\build\build\PYZ-00.pyz
+44208 INFO: Building PYZ (ZlibArchive) C:\Users\cheyn\WorkBuddy\2026-06-15-13-47-25\m3u8-downloader\build\build\PYZ-00.pyz completed successfully.
+44249 INFO: checking PYZ
+44250 INFO: Building PYZ because PYZ-01.toc is non existent
+44250 INFO: Building PYZ (ZlibArchive) C:\Users\cheyn\WorkBuddy\2026-06-15-13-47-25\m3u8-downloader\build\build\PYZ-01.pyz
+44918 INFO: Building PYZ (ZlibArchive) C:\Users\cheyn\WorkBuddy\2026-06-15-13-47-25\m3u8-downloader\build\build\PYZ-01.pyz completed successfully.
+44954 INFO: checking PKG
+44955 INFO: Building PKG because PKG-00.toc is non existent
+44955 INFO: Building PKG (CArchive) m3u8-dl-cli.pkg
+49700 INFO: Building PKG (CArchive) m3u8-dl-cli.pkg completed successfully.
+49720 INFO: Bootloader C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\PyInstaller\bootloader\Windows-64bit-intel\run.exe
+49720 INFO: checking EXE
+49720 INFO: Building EXE because EXE-00.toc is non existent
+49720 INFO: Building EXE from EXE-00.toc
+49752 INFO: Copying bootloader EXE to C:\Users\cheyn\WorkBuddy\2026-06-15-13-47-25\m3u8-downloader\dist\m3u8-dl-cli.exe
+49794 INFO: Copying icon to EXE
+49830 INFO: Copying 0 resources to EXE
+49830 INFO: Embedding manifest in EXE
+49864 INFO: Appending PKG archive to EXE
+50047 INFO: Fixing EXE headers
+50458 INFO: Building EXE from EXE-00.toc completed successfully.
+50505 INFO: checking PKG
+50505 INFO: Building PKG because PKG-01.toc is non existent
+50505 INFO: Building PKG (CArchive) m3u8-dl.pkg
+55055 INFO: Building PKG (CArchive) m3u8-dl.pkg completed successfully.
+55085 INFO: Bootloader C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages\PyInstaller\bootloader\Windows-64bit-intel\runw.exe
+55085 INFO: checking EXE
+55085 INFO: Building EXE because EXE-01.toc is non existent
+55085 INFO: Building EXE from EXE-01.toc
+55120 INFO: Copying bootloader EXE to C:\Users\cheyn\WorkBuddy\2026-06-15-13-47-25\m3u8-downloader\dist\m3u8-dl.exe
+55161 INFO: Copying icon to EXE
+55204 INFO: Copying 0 resources to EXE
+55204 INFO: Embedding manifest in EXE
+55243 INFO: Appending PKG archive to EXE
+55434 INFO: Fixing EXE headers
+55834 INFO: Building EXE from EXE-01.toc completed successfully.
+55859 INFO: Build complete! The results are available in: C:\Users\cheyn\WorkBuddy\2026-06-15-13-47-25\m3u8-downloader\dist

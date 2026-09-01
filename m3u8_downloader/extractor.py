@@ -42,11 +42,13 @@ _JS_BLACKLIST = ("jquery", "analytics", "gtag", "polyfill")
 _SOURCE_RANK = {"html": 0, "inline_js": 1, "js": 2, "deep": 3}
 
 # ===== 正则（两条互补，扫完取并集） =====
+# 排除字符集额外去掉反斜杠 \\：否则 index.m3u8\ 会被整段当成 URL 抓进去，
+# 导致请求非法路径、服务端断 TLS（SSLEOFError）。
 M3U8_ABS_RE = re.compile(
-    r'https?://[^\s"\'()\[\]<>]+?\.m3u8[^\s"\'()\[\]<>]*', re.I
+    r'https?://[^\s"\'()\[\]<>\\]+?\.m3u8[^\s"\'()\[\]<>\\]*', re.I
 )
 M3U8_QUOTED_RE = re.compile(
-    r'["\']([^"\'\s()\[\]<>]+?\.m3u8[^"\'\s()\[\]<>]*)["\']', re.I
+    r'["\']([^"\'\s()\[\]<>\\]+?\.m3u8[^"\'\s()\[\]<>\\]*)["\']', re.I
 )
 
 
@@ -147,6 +149,8 @@ def _normalize_candidate_url(raw: str, base_url: str) -> Optional[str]:
     if not raw:
         return None
     raw = raw.strip()
+    # 剥掉尾部非法字符（正则可能把反斜杠/句点/逗号等尾部垃圾一起捕获进 URL）
+    raw = raw.rstrip("\\.,;:!")
     if ".m3u8" not in raw.lower():
         return None
     if len(raw) > 512:

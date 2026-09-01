@@ -55,6 +55,22 @@ def test_scan_text_rejects_non_http_and_oversized():
     assert not any(len(u) > 512 for u in urls)
 
 
+def test_scan_text_strips_trailing_backslash_and_junk():
+    # JS 源码里常见 "...index.m3u8\\" 或 HTML 里 "index.m3u8." 这类尾部垃圾，
+    # 必须剥掉，否则请求非法路径会触发服务端断 TLS（SSLEOFError）。
+    text = (
+        'var u="https://p.com/d/index.m3u8\\";'   # 反斜杠
+        '<a href="https://p.com/e/v.m3u8.">x</a>'  # 尾部句点
+        '<a href="https://p.com/f/w.m3u8!">x</a>'  # 尾部叹号
+    )
+    cands = _scan_text(text, "https://p.com", "html")
+    urls = {c.url for c in cands}
+    assert "https://p.com/d/index.m3u8" in urls
+    assert "https://p.com/e/v.m3u8" in urls
+    assert "https://p.com/f/w.m3u8" in urls
+    assert not any(u.endswith(("\\", ".", "!", ";", ":", ",")) for u in urls)
+
+
 # ===== 去重与 source 优先级 =====
 def test_dedupe_keeps_higher_trust_source_and_title():
     c1 = Candidate(url="https://x/a.m3u8", source="js")
