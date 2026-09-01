@@ -1,11 +1,12 @@
 """Tests for m3u8_downloader.gui module."""
 
 import inspect
+import json
 import os
 import queue
 import threading
 from contextlib import ExitStack
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -385,3 +386,439 @@ class TestMainModule:
         import m3u8_downloader.__main__ as main_mod
         source = inspect.getsource(main_mod)
         assert "main()" in source
+
+
+# ---------------------------------------------------------------------------
+# Helpers and fixture: keep the real ~/.m3u8-downloader config untouched
+# ---------------------------------------------------------------------------
+
+
+def _write_config(config_path, payload):
+    """Write raw text or a JSON-serialisable payload to the isolated config file."""
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(payload, str):
+        config_path.write_text(payload, encoding="utf-8")
+    else:
+        config_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+@pytest.fixture
+def isolated_gui(tmp_path):
+    """GUI instance whose preference file is redirected into tmp_path.
+
+    ``GUI_CONFIG_PATH`` is patched for the whole lifetime of the instance
+    (including ``_build_ui`` -> ``_load_dir_preference``), so the real
+    ``~/.m3u8-downloader/gui_config.json`` is never read nor written.
+
+    Yields:
+        A tuple of ``(gui, config_path)``.
+    """
+    config_path = tmp_path / "prefs" / "gui_config.json"
+    with ExitStack() as stack:
+        for p in _tk_patches():
+            stack.enter_context(p)
+        stack.enter_context(patch("m3u8_downloader.gui.GUI_CONFIG_PATH", config_path))
+        root = _make_mock_root()
+        gui = M3U8DownloaderGUI(root)
+        yield gui, config_path
+
+
+# ---------------------------------------------------------------------------
+# "打开" button: _open_dir()
+# ---------------------------------------------------------------------------
+
+
+class TestOpenDir:
+    """Tests for M3U8DownloaderGUI._open_dir() cross-platform behaviour."""
+
+    def test_open_dir_empty_path_logs_hint_and_does_nothing(self, isolated_gui):
+        """Empty save directory logs a hint and never launches a file manager."""
+        gui, _ = isolated_gui
+        gui._dir_var.get = MagicMock(return_value="   ")
+
+        with patch("os.startfile", create=True) as mock_startfile, \
+                patch("m3u8_downloader.gui.subprocess.run") as mock_run, \
+                patch.object(gui, "_log") as mock_log:
+            gui._open_dir()
+
+        mock_log.assert_called_once_with("提示：保存目录为空或不存在，无法打开")
+        mock_startfile.assert_not_called()
+        mock_run.assert_not_called()
+
+    def test_open_dir_missing_directory_logs_hint_and_does_nothing(self, isolated_gui, tmp_path):
+        """Non-existent save directory logs a hint and never launches a file manager."""
+        gui, _ = isolated_gui
+        gui._dir_var.get = MagicMock(return_value=str(tmp_path / "no-such-dir"))
+
+        with patch("os.path.isdir", return_value=False), \
+                patch("os.startfile", create=True) as mock_startfile, \
+                patch("m3u8_downloader.gui.subprocess.run") as mock_run, \
+                patch.object(gui, "_log") as mock_log:
+            gui._open_dir()
+
+        mock_log.assert_called_once_with("提示：保存目录为空或不存在，无法打开")
+        mock_startfile.assert_not_called()
+        mock_run.assert_not_called()
+
+    def test_open_dir_windows_calls_startfile(self, isolated_gui, tmp_path):
+        """On win32 the directory is opened with os.startfile(path)."""
+        gui, _ = isolated_gui
+        target = str(tmp_path)
+        gui._dir_var.get = MagicMock(return_value=target)
+
+        with patch("sys.platform", "win32"), \
+                patch("os.startfile", create=True) as mock_startfile, \
+                patch("m3u8_downloader.gui.subprocess.run") as mock_run, \
+                patch.object(gui, "_log") as mock_log:
+            gui._open_dir()
+
+        mock_startfile.assert_called_once_with(target)
+        mock_run.assert_not_called()
+        mock_log.assert_not_called()
+
+    def test_open_dir_darwin_calls_open(self, isolated_gui, tmp_path):
+        """On darwin the directory is opened with subprocess.run(["open", path])."""
+        gui, _ = isolated_gui
+        target = str(tmp_path)
+        gui._dir_var.get = MagicMock(return_value=target)
+
+        with patch("sys.platform", "darwin"), \
+                patch("os.startfile", create=True) as mock_startfile, \
+                patch("m3u8_downloader.gui.subprocess.run") as mock_run, \
+                patch.object(gui, "_log") as mock_log:
+            gui._open_dir()
+
+        mock_run.assert_called_once_with(["open", target], check=False)
+        mock_startfile.assert_not_called()
+        mock_log.assert_not_called()
+
+    def test_open_dir_linux_calls_xdg_open(self, isolated_gui, tmp_path):
+        """On other platforms the directory is opened with xdg-open."""
+        gui, _ = isolated_gui
+        target = str(tmp_path)
+        gui._dir_var.get = MagicMock(return_value=target)
+
+        with patch("sys.platform", "linux"), \
+                patch("os.startfile", create=True) as mock_startfile, \
+                patch("m3u8_downloader.gui.subprocess.run") as mock_run, \
+                patch.object(gui, "_log") as mock_log:
+            gui._open_dir()
+
+        mock_run.assert_called_once_with(["xdg-open", target], check=False)
+        mock_startfile.assert_not_called()
+        mock_log.assert_not_called()
+
+    def test_open_dir_failure_is_logged_and_not_raised(self, isolated_gui, tmp_path):
+        """An exception from the open action is logged, never propagated to Tk."""
+        gui, _ = isolated_gui
+        gui._dir_var.get = MagicMock(return_value=str(tmp_path))
+
+        with patch("sys.platform", "win32"), \
+                patch("os.startfile", create=True, side_effect=OSError("拒绝访问")), \
+                patch.object(gui, "_log") as mock_log:
+            gui._open_dir()  # must not raise
+
+        mock_log.assert_called_once()
+        message = mock_log.call_args[0][0]
+        assert "打开目录失败" in message
+        assert "拒绝访问" in message
+
+
+# ---------------------------------------------------------------------------
+# 记住保存位置: _load_dir_preference()
+# ---------------------------------------------------------------------------
+
+
+class TestLoadDirPreference:
+    """Tests for M3U8DownloaderGUI._load_dir_preference() degradation paths."""
+
+    def test_load_missing_config_degrades_gracefully(self, isolated_gui):
+        """Missing config file: no directory filled, checkbox stays unchecked."""
+        gui, config_path = isolated_gui
+        assert not config_path.exists()
+
+        gui._dir_var.set.reset_mock()
+        gui._remember_dir_var.set.reset_mock()
+        gui._load_dir_preference()  # must not raise
+
+        gui._dir_var.set.assert_not_called()
+        gui._remember_dir_var.set.assert_called_once_with(False)
+
+    def test_load_corrupt_json_degrades_gracefully(self, isolated_gui):
+        """Broken JSON content: safe degradation, no exception surfaced."""
+        gui, config_path = isolated_gui
+        _write_config(config_path, "{ not valid json at all ")
+
+        gui._dir_var.set.reset_mock()
+        gui._remember_dir_var.set.reset_mock()
+        gui._load_dir_preference()  # must not raise
+
+        gui._dir_var.set.assert_not_called()
+        gui._remember_dir_var.set.assert_called_once_with(False)
+
+    def test_load_non_dict_top_level_degrades_gracefully(self, isolated_gui):
+        """Valid JSON that is not an object (e.g. a list): safe degradation."""
+        gui, config_path = isolated_gui
+        _write_config(config_path, [1, 2, 3])
+
+        gui._dir_var.set.reset_mock()
+        gui._remember_dir_var.set.reset_mock()
+        gui._load_dir_preference()  # must not raise
+
+        gui._dir_var.set.assert_not_called()
+        gui._remember_dir_var.set.assert_called_once_with(False)
+
+    def test_load_restores_valid_directory(self, isolated_gui, tmp_path):
+        """remember_dir=True with an existing last_dir fills entry and checks box."""
+        gui, config_path = isolated_gui
+        target = tmp_path / "saved_videos"
+        target.mkdir()
+        _write_config(config_path, {"remember_dir": True, "last_dir": str(target)})
+
+        gui._dir_var.set.reset_mock()
+        gui._remember_dir_var.set.reset_mock()
+        gui._load_dir_preference()
+
+        gui._dir_var.set.assert_called_once_with(str(target))
+        gui._remember_dir_var.set.assert_called_once_with(True)
+
+    def test_load_skips_when_saved_directory_is_gone(self, isolated_gui, tmp_path):
+        """remember_dir=True but last_dir no longer exists: degrade to unchecked."""
+        gui, config_path = isolated_gui
+        _write_config(
+            config_path,
+            {"remember_dir": True, "last_dir": str(tmp_path / "deleted")},
+        )
+
+        gui._dir_var.set.reset_mock()
+        gui._remember_dir_var.set.reset_mock()
+        gui._load_dir_preference()
+
+        gui._dir_var.set.assert_not_called()
+        gui._remember_dir_var.set.assert_called_once_with(False)
+
+    def test_load_ignores_when_remember_dir_false(self, isolated_gui, tmp_path):
+        """remember_dir=False never fills the directory even if last_dir is valid."""
+        gui, config_path = isolated_gui
+        target = tmp_path / "saved_videos"
+        target.mkdir()
+        _write_config(config_path, {"remember_dir": False, "last_dir": str(target)})
+
+        gui._dir_var.set.reset_mock()
+        gui._remember_dir_var.set.reset_mock()
+        gui._load_dir_preference()
+
+        gui._dir_var.set.assert_not_called()
+        gui._remember_dir_var.set.assert_called_once_with(False)
+
+    def test_load_ignores_empty_last_dir(self, isolated_gui):
+        """remember_dir=True with an empty last_dir: degrade to unchecked."""
+        gui, config_path = isolated_gui
+        _write_config(config_path, {"remember_dir": True, "last_dir": ""})
+
+        gui._dir_var.set.reset_mock()
+        gui._remember_dir_var.set.reset_mock()
+        gui._load_dir_preference()
+
+        gui._dir_var.set.assert_not_called()
+        gui._remember_dir_var.set.assert_called_once_with(False)
+
+
+# ---------------------------------------------------------------------------
+# 记住保存位置: _save_dir_preference()
+# ---------------------------------------------------------------------------
+
+
+class TestSaveDirPreference:
+    """Tests for M3U8DownloaderGUI._save_dir_preference() persistence."""
+
+    def test_save_checked_writes_dir_preference(self, isolated_gui, tmp_path):
+        """Checked: writes remember_dir=True together with the current directory."""
+        gui, config_path = isolated_gui
+        target = str(tmp_path / "videos")
+        gui._remember_dir_var.get = MagicMock(return_value=True)
+        gui._dir_var.get = MagicMock(return_value=target)
+
+        gui._save_dir_preference()
+
+        assert config_path.exists()
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert data["remember_dir"] is True
+        assert data["last_dir"] == target
+
+    def test_save_creates_parent_directory(self, isolated_gui):
+        """The parent config directory is created when it does not exist yet."""
+        gui, config_path = isolated_gui
+        assert not config_path.parent.exists()
+        gui._remember_dir_var.get = MagicMock(return_value=True)
+        gui._dir_var.get = MagicMock(return_value="D:\\downloads")
+
+        gui._save_dir_preference()
+
+        assert config_path.parent.is_dir()
+        assert config_path.exists()
+
+    def test_save_unchecked_clears_last_dir(self, isolated_gui, tmp_path):
+        """Unchecked: writes remember_dir=False and clears last_dir."""
+        gui, config_path = isolated_gui
+        _write_config(config_path, {"remember_dir": True, "last_dir": "C:\\old"})
+        gui._remember_dir_var.get = MagicMock(return_value=False)
+        gui._dir_var.get = MagicMock(return_value=str(tmp_path / "videos"))
+
+        gui._save_dir_preference()
+
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert data["remember_dir"] is False
+        assert data["last_dir"] == ""
+
+    def test_save_swallows_write_error(self, isolated_gui):
+        """An OSError while writing is logged only, never propagated to Tk."""
+        gui, _ = isolated_gui
+        gui._remember_dir_var.get = MagicMock(return_value=True)
+        gui._dir_var.get = MagicMock(return_value="D:\\downloads")
+
+        with patch("builtins.open", side_effect=OSError("磁盘不可写")):
+            with patch.object(gui, "_log") as mock_log:
+                gui._save_dir_preference()  # must not raise
+
+        mock_log.assert_called_once()
+        assert "写入失败" in mock_log.call_args[0][0]
+
+    def test_save_then_load_round_trip(self, isolated_gui, tmp_path):
+        """A directory saved on one run is restored on the next run."""
+        gui, config_path = isolated_gui
+        target = tmp_path / "round_trip"
+        target.mkdir()
+        gui._remember_dir_var.get = MagicMock(return_value=True)
+        gui._dir_var.get = MagicMock(return_value=str(target))
+
+        gui._save_dir_preference()
+
+        gui._dir_var.set.reset_mock()
+        gui._remember_dir_var.set.reset_mock()
+        gui._load_dir_preference()
+
+        gui._dir_var.set.assert_called_once_with(str(target))
+        gui._remember_dir_var.set.assert_called_once_with(True)
+
+
+# ---------------------------------------------------------------------------
+# "记住保存位置" wiring: _browse_dir sync and _build_ui hooks
+# ---------------------------------------------------------------------------
+
+
+class TestDirPreferenceWiring:
+    """Tests that the new preference feature is wired into the existing UI flow."""
+
+    def test_browse_dir_persists_when_remember_checked(self, isolated_gui, tmp_path):
+        """Picking a directory while checked persists it immediately."""
+        gui, config_path = isolated_gui
+        chosen = str(tmp_path / "chosen")
+        gui._remember_dir_var.get = MagicMock(return_value=True)
+        gui._dir_var.get = MagicMock(return_value=chosen)
+
+        with patch(
+            "m3u8_downloader.gui.filedialog.askdirectory", return_value=chosen
+        ) as mock_ask:
+            gui._browse_dir()
+
+        mock_ask.assert_called_once()
+        gui._dir_var.set.assert_any_call(chosen)
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert data["remember_dir"] is True
+        assert data["last_dir"] == chosen
+
+    def test_browse_dir_does_not_persist_when_unchecked(self, isolated_gui, tmp_path):
+        """Picking a directory while unchecked must not create a config file."""
+        gui, config_path = isolated_gui
+        chosen = str(tmp_path / "chosen")
+        gui._remember_dir_var.get = MagicMock(return_value=False)
+        gui._dir_var.get = MagicMock(return_value=chosen)
+
+        with patch("m3u8_downloader.gui.filedialog.askdirectory", return_value=chosen):
+            gui._browse_dir()
+
+        gui._dir_var.set.assert_any_call(chosen)
+        assert not config_path.exists()
+
+    def test_browse_dir_cancelled_does_not_persist(self, isolated_gui):
+        """Cancelling the directory dialog keeps the preference file untouched."""
+        gui, config_path = isolated_gui
+        gui._remember_dir_var.get = MagicMock(return_value=True)
+
+        with patch("m3u8_downloader.gui.filedialog.askdirectory", return_value=""):
+            gui._browse_dir()
+
+        assert not config_path.exists()
+
+    def test_build_ui_loads_dir_preference_at_startup(self, tmp_path):
+        """_build_ui restores the saved preference as its last step."""
+        with ExitStack() as stack:
+            for p in _tk_patches():
+                stack.enter_context(p)
+            stack.enter_context(
+                patch(
+                    "m3u8_downloader.gui.GUI_CONFIG_PATH", tmp_path / "gui_config.json"
+                )
+            )
+            with patch.object(M3U8DownloaderGUI, "_load_dir_preference") as mock_load:
+                M3U8DownloaderGUI(_make_mock_root())
+
+        mock_load.assert_called_once()
+
+    def test_build_ui_wires_open_button(self, tmp_path):
+        """The 打开 button is created and bound to _open_dir()."""
+        with ExitStack() as stack:
+            for p in _tk_patches():
+                stack.enter_context(p)
+            button_cls = stack.enter_context(
+                patch("tkinter.ttk.Button", return_value=MagicMock())
+            )
+            stack.enter_context(
+                patch(
+                    "m3u8_downloader.gui.GUI_CONFIG_PATH", tmp_path / "gui_config.json"
+                )
+            )
+            gui = M3U8DownloaderGUI(_make_mock_root())
+
+        open_calls = [
+            c for c in button_cls.call_args_list if c.kwargs.get("text") == "打开"
+        ]
+        assert len(open_calls) == 1, "未找到“打开”按钮"
+        assert open_calls[0].kwargs["command"] == gui._open_dir
+
+    def test_build_ui_wires_remember_dir_checkbutton(self, tmp_path):
+        """The 记住保存位置 checkbox is bound to the preference var and callback."""
+        with ExitStack() as stack:
+            for p in _tk_patches():
+                stack.enter_context(p)
+            check_cls = stack.enter_context(
+                patch("tkinter.ttk.Checkbutton", return_value=MagicMock())
+            )
+            stack.enter_context(
+                patch(
+                    "m3u8_downloader.gui.GUI_CONFIG_PATH", tmp_path / "gui_config.json"
+                )
+            )
+            gui = M3U8DownloaderGUI(_make_mock_root())
+
+        remember_calls = [
+            c for c in check_cls.call_args_list
+            if "记住保存位置" in str(c.kwargs.get("text", ""))
+        ]
+        assert len(remember_calls) == 1, "未找到“记住保存位置”勾选框"
+        assert remember_calls[0].kwargs["command"] == gui._save_dir_preference
+        assert remember_calls[0].kwargs["variable"] is gui._remember_dir_var
+
+    def test_remember_dir_var_defaults_to_false(self, isolated_gui):
+        """The preference checkbox starts unchecked by default."""
+        gui, _ = isolated_gui
+        assert gui._remember_dir_var is not None
+        assert gui._remember_dir_var.get() in (False, 0)
+
+    def test_gui_config_path_is_a_path_object(self):
+        """GUI_CONFIG_PATH is exposed as a pathlib.Path pointing at the JSON file."""
+        from m3u8_downloader.gui import GUI_CONFIG_PATH
+        assert isinstance(GUI_CONFIG_PATH, os.PathLike)
+        assert GUI_CONFIG_PATH.name == "gui_config.json"
+        assert str(GUI_CONFIG_PATH).endswith("gui_config.json")

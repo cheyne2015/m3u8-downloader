@@ -1,10 +1,14 @@
 """Tkinter GUI 界面模块：提供图形化下载操作界面."""
 
+import json
 import os
 import queue
+import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Optional
 
@@ -16,6 +20,9 @@ from m3u8_downloader.utils import (
     format_speed,
     is_ffmpeg_available,
 )
+
+# GUI 偏好配置文件路径：存放"记住保存位置"等界面偏好
+GUI_CONFIG_PATH: Path = Path(os.path.expanduser("~/.m3u8-downloader/gui_config.json"))
 
 
 class M3U8DownloaderGUI:
@@ -92,6 +99,10 @@ class M3U8DownloaderGUI:
         dir_browse_btn = ttk.Button(dir_frame, text="浏览", command=self._browse_dir, width=6)
         dir_browse_btn.grid(row=0, column=1)
 
+        # 在系统文件管理器中打开当前保存目录
+        dir_open_btn = ttk.Button(dir_frame, text="打开", command=self._open_dir, width=6)
+        dir_open_btn.grid(row=0, column=2, padx=(5, 0))
+
         row += 1
 
         # 文件名
@@ -101,6 +112,18 @@ class M3U8DownloaderGUI:
         self._filename_var = tk.StringVar(value="output.mp4")
         self._filename_entry = ttk.Entry(main_frame, textvariable=self._filename_var)
         self._filename_entry.grid(row=row, column=1, columnspan=2, sticky=tk.EW, pady=(0, 5))
+
+        row += 1
+
+        # 记住保存位置（下次启动自动填充）
+        self._remember_dir_var = tk.BooleanVar(value=False)
+        remember_dir_check = ttk.Checkbutton(
+            main_frame,
+            text="记住保存位置（下次启动自动填充）",
+            variable=self._remember_dir_var,
+            command=self._save_dir_preference,
+        )
+        remember_dir_check.grid(row=row, column=1, columnspan=2, sticky=tk.W, pady=(0, 5))
 
         row += 1
 
@@ -211,6 +234,9 @@ class M3U8DownloaderGUI:
         self._log_text.grid(row=0, column=0, sticky=tk.NSEW)
         log_scrollbar.grid(row=0, column=1, sticky=tk.NS)
 
+        # UI 构建完成、变量均已创建后，恢复"记住保存位置"偏好
+        self._load_dir_preference()
+
     # ===== UI 回调方法 =====
 
     def _paste_url(self) -> None:
@@ -226,6 +252,77 @@ class M3U8DownloaderGUI:
         selected = filedialog.askdirectory(initialdir=self._dir_var.get())
         if selected:
             self._dir_var.set(selected)
+            # 已勾选"记住保存位置"时，同步持久化新选择的目录
+            if self._remember_dir_var.get():
+                self._save_dir_preference()
+
+    def _open_dir(self) -> None:
+        """在系统文件管理器中打开当前保存目录.
+
+        目录为空或不存在时给出日志提示；打开失败时记录异常但不影响 GUI 运行。
+        """
+        path = self._dir_var.get().strip()
+        if not path or not os.path.isdir(path):
+            self._log("提示：保存目录为空或不存在，无法打开")
+            return
+
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)  # type: ignore[attr-defined]  # Windows 专有接口
+            elif sys.platform == "darwin":
+                subprocess.run(["open", path], check=False)
+            else:
+                subprocess.run(["xdg-open", path], check=False)
+        except Exception as e:
+            self._log(f"打开目录失败：{e}")
+
+    def _load_dir_preference(self) -> None:
+        """读取"记住保存位置"偏好，必要时填充保存目录.
+
+        配置文件为 GUI_CONFIG_PATH（~/.m3u8-downloader/gui_config.json）。
+        仅当 remember_dir 为 True 且 last_dir 是已存在的目录时，才填充保存目录
+        并勾选复选框；文件不存在、JSON 损坏或缺少键时，安全降级为"不记住"，
+        绝不让 GUI 启动失败。
+        """
+        try:
+            with open(GUI_CONFIG_PATH, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            if not isinstance(config, dict):
+                raise ValueError("配置内容不是 JSON 对象")
+
+            remember_dir = bool(config.get("remember_dir", False))
+            last_dir = str(config.get("last_dir", "") or "").strip()
+            restored = remember_dir and bool(last_dir) and os.path.isdir(last_dir)
+        except Exception:
+            # 配置不存在 / JSON 损坏 / 结构异常：安全降级为"不记住"
+            self._remember_dir_var.set(False)
+            return
+
+        if restored:
+            self._dir_var.set(last_dir)
+            self._remember_dir_var.set(True)
+        else:
+            self._remember_dir_var.set(False)
+
+    def _save_dir_preference(self) -> None:
+        """将"记住保存位置"偏好与当前保存目录写入配置文件.
+
+        勾选时记录 remember_dir=True 及当前目录；取消勾选时 remember_dir=False
+        且清空 last_dir，保证下次启动不会自动填充。写入失败仅在日志区提示。
+        """
+        remember_dir = bool(self._remember_dir_var.get())
+        current_dir = self._dir_var.get().strip()
+        config = {
+            "remember_dir": remember_dir,
+            "last_dir": current_dir if remember_dir else "",
+        }
+
+        try:
+            GUI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(GUI_CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self._log(f"提示：保存位置偏好写入失败：{e}")
 
     def _browse_tmpdir(self) -> None:
         """浏览选择临时目录."""
