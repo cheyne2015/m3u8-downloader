@@ -1,0 +1,97 @@
+sequenceDiagram
+    autonumber
+    actor U as 用户
+    participant CLI as cli.main
+    participant GUI as M3U8DownloaderGUI
+    participant EX as extractor.extract_m3u8_from_page
+    participant HTTP as requests.Session
+    participant ES as estimator.estimate_many
+    participant PS as M3U8Parser
+    participant DL as M3U8Downloader
+
+    rect rgb(238,246,255)
+    note over U,CLI: 路径 A：CLI  m3u8-dl <page> --from-page --pick 1,3
+    U->>CLI: 执行命令
+    CLI->>CLI: create_parser().parse_args()
+    CLI->>EX: extract_m3u8_from_page(url, deep, timeout, estimate, max_workers)
+    end
+
+    rect rgb(240,255,240)
+    note over U,GUI: 路径 B：GUI 点击「提取网页」
+    U->>GUI: 粘贴网页 URL + 点击「提取网页」
+    GUI->>GUI: _start_extract() 校验并禁用按钮
+    GUI->>GUI: Thread(_extract_worker).start()
+    GUI->>EX: extract_m3u8_from_page(...) [daemon 线程]
+    end
+
+    EX->>HTTP: create_http_session() / GET 网页 HTML
+    HTTP-->>EX: html 文本
+    alt deep=False（默认静态解析）
+        EX->>EX: _extract_from_html(bs4 标签 + 内联 script)
+        EX->>EX: _collect_js_urls(html, limit=MAX_JS_FILES)
+        loop 每个外链 JS（ThreadPoolExecutor 并发）
+            EX->>HTTP: GET xxx.js
+            HTTP-->>EX: js 文本
+            EX->>EX: _extract_from_js → 正则 + urljoin
+        end
+        EX->>EX: _dedupe() 归一化去重
+        alt 静态无果
+            EX-->>CLI: raise NoCandidateFoundError（提示 --deep）
+        end
+    else deep=True（深度模式）
+        EX->>EX: _deep_extract()
+        alt playwright 不可用
+            EX-->>CLI: raise DeepModeUnavailableError（给安装命令）
+        else 可用
+            EX->>HTTP: 无头浏览器 goto + 监听 response
+            HTTP-->>EX: 运行时命中的 .m3u8 URL
+        end
+    end
+
+    opt estimate=True
+        EX->>ES: estimate_many(urls, max_workers)
+        par 并发估算（每个候选一个 worker）
+            ES->>HTTP: GET playlist 文本
+            HTTP-->>ES: m3u8 内容
+            ES->>PS: M3U8Parser(content, url).parse()
+            PS-->>ES: M3U8Playlist(is_master/streams/segments/total_duration)
+            alt master playlist
+                ES->>HTTP: GET 最高码率变体 playlist
+                HTTP-->>ES: media 内容
+                ES->>ES: size = BANDWIDTH * duration / 8  (method=bandwidth)
+            else media playlist
+                ES->>HTTP: HEAD 前 3 个片段取 Content-Length
+                HTTP-->>ES: Content-Length
+                ES->>ES: size = 平均片段大小 * 片段数 (method=segment_head)
+            end
+        end
+        ES-->>EX: {url: SizeEstimate}
+        EX->>EX: Candidate.apply_estimate() + 排序
+    end
+
+    EX-->>CLI: list[Candidate]
+    EX-->>GUI: list[Candidate]（经 queue）
+
+    rect rgb(255,250,235)
+    note over U,DL: 用户选择 → 回填真实 m3u8 URL → 走原有下载器（内部零改动）
+    CLI->>U: _print_candidates() 打印编号/估计大小/时长/码率
+    alt 提供 --pick
+        CLI->>CLI: _parse_pick("1,3", total)
+    else 交互式
+        CLI->>U: 提示输入序号
+        U-->>CLI: "1,3"
+    end
+    GUI->>GUI: _fill_tree() 填充 Treeview（标注「估计」）
+    U->>GUI: 多选行 + 点击「下载选中」
+    GUI->>GUI: _pending_jobs = [(url, build_output_path(...)), ...]
+    loop 每个被选中的候选（CLI 顺序 / GUI 串行队列）
+        CLI->>DL: M3U8Downloader(url=candidate.url, output=build_output_path(...)).download()
+        GUI->>DL: 同上（daemon 线程 + queue 进度）
+        DL->>PS: 内部解析 + select_best_stream
+        DL-->>CLI: 输出 mp4 路径
+        DL-->>GUI: 进度/完成消息（queue）
+    end
+    GUI->>GUI: _on_download_done → _run_next_job() 直到队列空
+    CLI-->>U: 汇总成功/失败数量并设置退出码
+    GUI-->>U: messagebox 全部完成
+    end

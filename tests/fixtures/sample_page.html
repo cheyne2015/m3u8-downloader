@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <title>测试播放页</title>
+    <!-- 黑名单 JS：应被 _collect_js_urls 过滤 -->
+    <script src="https://libs.example.com/jquery/3.6.0/jquery.min.js"></script>
+</head>
+<body>
+    <h1>测试播放页</h1>
+
+    <!-- source 带 label（最高可信来源，title 应为 1080P） -->
+    <video controls>
+        <source src="https://cdn.example.com/hls/1080/index.m3u8" label="1080P" type="application/x-mpegURL">
+        <source src="https://cdn.example.com/hls/720/index.m3u8" label="720P" type="application/x-mpegURL">
+    </video>
+
+    <!-- video 直链 -->
+    <video src="https://cdn.example.com/hls/720/index.m3u8"></video>
+
+    <!-- a 标签相对路径（应被 urljoin 成绝对） + 锚文本作为 title -->
+    <a href="/play/hls/480/index.m3u8">480P 线路二</a>
+
+    <!-- 协议相对路径（应继承页面 scheme 变 https） -->
+    <iframe src="//cdn.example.com/embed/360/index.m3u8"></iframe>
+
+    <!-- 内联 script 拼接 m3u8 -->
+    <script>
+        var hlsConfig = {
+            low: "https://cdn.example.com/hls/360/index.m3u8",
+            audio: "https://cdn.example.com/hls/audio/index.m3u8"
+        };
+        var fallbackUrl = 'https://cdn.example.com/hls/240/index.m3u8';
+    </script>
+
+    <!-- 外链播放器 JS（会被下载并扫描，相对 base = player.js 自身 URL） -->
+    <script src="//cdn.example.com/player/player.js"></script>
+
+    <!-- 重复 URL：与上面 video 720 相同，应被 _dedupe 合并 -->
+    <a href="https://cdn.example.com/hls/720/index.m3u8">重复 720</a>
+
+    <!-- 一个 JSON-LD / 配置块里的 m3u8（全文正则兜底命中） -->
+    <script type="application/ld+json">
+    {"streamUrl": "https://cdn.example.com/hls/1080/index.m3u8"}
+    </script>
+</body>
+</html>

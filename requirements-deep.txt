@@ -1,0 +1,10 @@
+# 深度模式（无头浏览器）可选依赖，安装后 --deep / GUI「深度模式」才可用
+# 安装：
+#   pip install -r requirements-deep.txt
+#   playwright install chromium
+#
+# 说明：playwright 不在主依赖 requirements.txt 中，原因见 README「深度模式」小节：
+#   1. wheel 本体约 40MB，Chromium 内核约 150MB，会让绿色小工具体积膨胀十几倍
+#   2. PyInstaller 打包浏览器内核极易失败，build.spec 已在 excludes 中排除 playwright
+#   3. 绝大多数站点静态解析即可命中，深度模式只是兜底能力
+playwright>=1.40.0

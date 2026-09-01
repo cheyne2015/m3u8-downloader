@@ -225,3 +225,58 @@ def normalize_mp4_filename(name: str) -> str:
     # 3. 追加单个 .mp4 后缀（保留文件名中间的点）
     base = base + ".mp4"
     return os.path.join(directory, base) if directory else base
+
+
+def normalize_page_url(raw: str) -> str:
+    """规范化用户输入的网页 URL：补 ``https://``、去首尾空白.
+
+    仅做最轻量的修正，不验证可达性；保留原 query/锚点。
+
+    Args:
+        raw: 用户粘贴的网页地址（可能漏写协议，或带首尾空格）。
+
+    Returns:
+        规范化后的绝对 URL；空输入返回空字符串。
+    """
+    if not raw:
+        return ""
+    text = raw.strip()
+    if not text:
+        return ""
+    if not text.startswith(("http://", "https://")):
+        text = "https://" + text
+    return text
+
+
+def build_output_path(base_output: str, index: int, total: int) -> str:
+    """多目标下载时生成带序号的输出文件名.
+
+    规则（见 docs/system_design.md §3.4）：
+
+    - ``total <= 1``：直接返回 ``normalize_mp4_filename(base_output)`` 原样，
+      不追加序号；
+    - ``total > 1``：主名后追加 ``_{index}``（index 为候选序号，便于对应列表），
+      再经 ``normalize_mp4_filename`` 保证单一 ``.mp4`` 后缀。
+
+    Args:
+        base_output: 用户提供的输出文件路径（如 ``video.mp4``）。
+        index: 候选序号（从 1 开始）。
+        total: 本次要下载的目标总数。
+
+    Returns:
+        最终输出路径，如 ``video_1.mp4`` / ``video_2.mp4``。
+    """
+    if total <= 1:
+        return normalize_mp4_filename(base_output)
+
+    directory, base = os.path.split(base_output)
+    # 去掉末尾任意数量的 .mp4（大小写不敏感），避免 video.mp4_1.mp4
+    base_lower = base.lower()
+    while base_lower.endswith(".mp4"):
+        base = base[:-4]
+        base_lower = base.lower()
+    if not base:
+        base = "output"
+    base = f"{base}_{index}"
+    base = base + ".mp4"
+    return os.path.join(directory, base) if directory else base

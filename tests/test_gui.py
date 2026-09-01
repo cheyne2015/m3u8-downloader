@@ -44,6 +44,7 @@ def _tk_patches():
         patch("tkinter.ttk.Progressbar", return_value=MagicMock()),
         patch("tkinter.ttk.LabelFrame", return_value=MagicMock()),
         patch("tkinter.ttk.Scrollbar", return_value=MagicMock()),
+        patch("tkinter.ttk.Treeview", return_value=MagicMock()),
         patch("tkinter.messagebox.showinfo"),
         patch("tkinter.messagebox.showerror"),
     ]
@@ -822,3 +823,116 @@ class TestDirPreferenceWiring:
         assert isinstance(GUI_CONFIG_PATH, os.PathLike)
         assert GUI_CONFIG_PATH.name == "gui_config.json"
         assert str(GUI_CONFIG_PATH).endswith("gui_config.json")
+
+
+# ---------------------------------------------------------------------------
+# 网页抽取与多选下载（T05）
+# ---------------------------------------------------------------------------
+
+import tkinter as tk  # noqa: E402  (tk.NORMAL 常量用于断言)
+
+from m3u8_downloader.extractor import Candidate  # noqa: E402
+
+
+class TestWebExtractAndMultiDownload:
+    """Tests for the new web-extraction Treeview and multi-select download queue."""
+
+    def test_fill_tree_populates_and_enables_button(self, gui_instance):
+        gui_instance._tree.get_children.return_value = []
+        cands = [
+            Candidate(url="https://x/a.m3u8", title="A"),
+            Candidate(url="https://x/b.m3u8", title="B", is_master=True),
+        ]
+        gui_instance._fill_tree(cands)
+        assert gui_instance._tree.insert.call_count == 2
+        gui_instance._download_selected_btn.configure.assert_called_with(
+            state=tk.NORMAL
+        )
+
+    def test_extract_worker_fills_tree_via_queue(self, gui_instance):
+        cands = [Candidate(url="https://x/a.m3u8", title="A")]
+        with patch(
+            "m3u8_downloader.extractor.extract_m3u8_from_page", return_value=cands
+        ):
+            gui_instance._tree.get_children.return_value = []
+            gui_instance._extract_worker("https://x/page", False)
+
+        msgs = []
+        while True:
+            try:
+                msgs.append(gui_instance._message_queue.get_nowait())
+            except queue.Empty:
+                break
+        assert "candidates" in [m[0] for m in msgs]
+        assert "extract_done" in [m[0] for m in msgs]
+        for t, d in msgs:
+            gui_instance._handle_message(t, d)
+        assert gui_instance._tree.insert.call_count == 1
+
+    def test_extract_worker_survives_exception(self, gui_instance):
+        with patch(
+            "m3u8_downloader.extractor.extract_m3u8_from_page",
+            side_effect=RuntimeError("boom"),
+        ):
+            gui_instance._extract_worker("https://x/page", False)
+        msgs = []
+        while True:
+            try:
+                msgs.append(gui_instance._message_queue.get_nowait())
+            except queue.Empty:
+                break
+        # 异常不应让 GUI 崩溃：仍收到 extract_done(error)
+        assert ("extract_done", "error") in msgs
+
+    def test_download_selected_builds_jobs(self, gui_instance):
+        gui_instance._candidates = [
+            Candidate(url="https://x/a.m3u8"),
+            Candidate(url="https://x/b.m3u8"),
+        ]
+        gui_instance._filename_var.get.return_value = "v.mp4"
+        gui_instance._dir_var.get.return_value = "/tmp/out"
+        gui_instance._tree.get_children.return_value = []
+        gui_instance._tree.selection.return_value = ["i1", "i2"]
+        gui_instance._tree.item.side_effect = lambda item, *a, **k: {
+            "i1": (1, "≈ 1MB", "01:00", "2 Mbps", "media", "A", "https://x/a.m3u8"),
+            "i2": (2, "≈ 2MB", "02:00", "4 Mbps", "media", "B", "https://x/b.m3u8"),
+        }[item]
+        with patch.object(gui_instance, "_run_next_job") as rnr:
+            gui_instance._download_selected()
+        assert len(gui_instance._pending_jobs) == 2
+        assert gui_instance._pending_jobs[0][0] == "https://x/a.m3u8"
+        assert gui_instance._pending_jobs[0][1].endswith("v_1.mp4")
+        assert gui_instance._pending_jobs[1][1].endswith("v_2.mp4")
+        rnr.assert_called_once()
+
+    def test_download_selected_ignores_empty_selection(self, gui_instance):
+        gui_instance._tree.selection.return_value = []
+        with patch.object(gui_instance, "_run_next_job") as rnr:
+            gui_instance._download_selected()
+        assert gui_instance._pending_jobs == []
+        rnr.assert_not_called()
+
+    def test_on_download_done_continues_queue(self, gui_instance):
+        gui_instance._pending_jobs = [("https://x/c.m3u8", "/tmp/c.mp4")]
+        with patch.object(gui_instance, "_run_next_job") as rnr:
+            gui_instance._on_download_done("success")
+        rnr.assert_called_once()
+        # 还有后续任务时不应恢复「开始下载」按钮
+        gui_instance._start_btn.configure.assert_not_called()
+
+    def test_on_download_done_restores_when_no_queue(self, gui_instance):
+        gui_instance._pending_jobs = []
+        gui_instance._candidates = [Candidate(url="https://x/a.m3u8")]
+        gui_instance._on_download_done("success")
+        gui_instance._start_btn.configure.assert_called_with(state=tk.NORMAL)
+        gui_instance._download_selected_btn.configure.assert_called_with(
+            state=tk.NORMAL
+        )
+
+    def test_double_click_fills_url(self, gui_instance):
+        gui_instance._tree.selection.return_value = ["i1"]
+        gui_instance._tree.item.return_value = (
+            1, "x", "x", "x", "media", "A", "https://x/a.m3u8"
+        )
+        gui_instance._on_tree_double_click(None)
+        gui_instance._url_var.set.assert_called_with("https://x/a.m3u8")

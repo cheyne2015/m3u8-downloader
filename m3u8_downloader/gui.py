@@ -14,7 +14,9 @@ from typing import Optional
 
 from m3u8_downloader import __version__
 from m3u8_downloader.downloader import M3U8Downloader
+from m3u8_downloader.extractor import is_deep_mode_available
 from m3u8_downloader.utils import (
+    build_output_path,
     format_duration,
     format_file_size,
     format_speed,
@@ -41,14 +43,19 @@ class M3U8DownloaderGUI:
         """
         self._root = root
         self._root.title("m3u8 下载工具")
-        self._root.geometry("720x640")
-        self._root.minsize(600, 500)
+        self._root.geometry("900x800")
+        self._root.minsize(760, 620)
 
         # 下载状态变量
         self._downloading: bool = False
         self._stop_flag: threading.Event = threading.Event()
         self._download_thread: Optional[threading.Thread] = None
         self._message_queue: queue.Queue = queue.Queue()
+
+        # 网页抽取 / 多选下载状态
+        self._candidates: list = []
+        self._pending_jobs: list = []
+        self._extracting: bool = False
 
         # 构建 UI
         self._build_ui()
@@ -68,7 +75,7 @@ class M3U8DownloaderGUI:
         row = 0
 
         # ===== URL 输入区 =====
-        url_label = ttk.Label(main_frame, text="m3u8 地址：")
+        url_label = ttk.Label(main_frame, text="地址（m3u8 / 网页）：")
         url_label.grid(row=row, column=0, sticky=tk.W, pady=(0, 5))
 
         url_frame = ttk.Frame(main_frame)
@@ -81,6 +88,11 @@ class M3U8DownloaderGUI:
 
         paste_btn = ttk.Button(url_frame, text="粘贴", command=self._paste_url, width=6)
         paste_btn.grid(row=0, column=1)
+
+        self._extract_btn = ttk.Button(
+            url_frame, text="提取网页", command=self._start_extract, width=10
+        )
+        self._extract_btn.grid(row=0, column=2, padx=(5, 0))
 
         row += 1
 
@@ -180,6 +192,62 @@ class M3U8DownloaderGUI:
         )
         tmp_browse_btn.grid(row=0, column=1)
 
+        # 深度模式（无头浏览器）复选框
+        self._deep_var = tk.BooleanVar(value=False)
+        deep_check = ttk.Checkbutton(
+            param_frame, text="深度模式（需 playwright）", variable=self._deep_var
+        )
+        deep_check.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+        if not is_deep_mode_available():
+            deep_check.configure(state=tk.DISABLED)
+
+        row += 1
+
+        # ===== 网页提取结果区 =====
+        extract_frame = ttk.LabelFrame(main_frame, text="网页提取结果", padding=8)
+        extract_frame.grid(row=row, column=0, columnspan=3, sticky=tk.EW, pady=(0, 10))
+        extract_frame.columnconfigure(0, weight=1)
+        extract_frame.rowconfigure(0, weight=1)
+
+        self._tree = ttk.Treeview(
+            extract_frame,
+            columns=("no", "size", "duration", "bandwidth", "type", "title", "url"),
+            show="headings",
+            selectmode="extended",
+            height=8,
+        )
+        self._tree.heading("no", text="#")
+        self._tree.heading("size", text="估计大小")
+        self._tree.heading("duration", text="时长")
+        self._tree.heading("bandwidth", text="码率")
+        self._tree.heading("type", text="类型")
+        self._tree.heading("title", text="标题")
+        self._tree.heading("url", text="链接")
+        self._tree.column("no", width=40, anchor=tk.CENTER)
+        self._tree.column("size", width=110)
+        self._tree.column("duration", width=90)
+        self._tree.column("bandwidth", width=100)
+        self._tree.column("type", width=70)
+        self._tree.column("title", width=120)
+        self._tree.column("url", width=300, stretch=True)
+
+        tree_scroll = ttk.Scrollbar(
+            extract_frame, orient=tk.VERTICAL, command=self._tree.yview
+        )
+        self._tree.configure(yscrollcommand=tree_scroll.set)
+        self._tree.grid(row=0, column=0, sticky=tk.NSEW)
+        tree_scroll.grid(row=0, column=1, sticky=tk.NS)
+        self._tree.bind("<Double-1>", self._on_tree_double_click)
+
+        self._download_selected_btn = ttk.Button(
+            extract_frame,
+            text="下载选中",
+            command=self._download_selected,
+            state=tk.DISABLED,
+            width=15,
+        )
+        self._download_selected_btn.grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
+
         row += 1
 
         # ===== 操作按钮区 =====
@@ -237,6 +305,13 @@ class M3U8DownloaderGUI:
 
         # UI 构建完成、变量均已创建后，恢复"记住保存位置"偏好
         self._load_dir_preference()
+
+        # 深度模式依赖缺失时给出安装提示（此时日志区已就绪，可安全 _log）
+        if not is_deep_mode_available():
+            self._log(
+                "提示：未安装 playwright，深度模式不可用；"
+                "安装：pip install playwright && playwright install chromium"
+            )
 
     # ===== UI 回调方法 =====
 
@@ -654,6 +729,10 @@ class M3U8DownloaderGUI:
             self._update_progress(data)
         elif msg_type == "done":
             self._on_download_done(str(data))
+        elif msg_type == "candidates":
+            self._fill_tree(data if isinstance(data, list) else [])
+        elif msg_type == "extract_done":
+            self._on_extract_done(str(data))
 
     def _log(self, message: str) -> None:
         """向日志区追加一行文本.
@@ -696,9 +775,19 @@ class M3U8DownloaderGUI:
         Args:
             result: 完成状态（"success", "error", "stopped"）.
         """
+        # 串行下载队列：还有后续任务则继续，不恢复按钮
+        if self._pending_jobs:
+            self._log("")
+            self._run_next_job()
+            return
+
         self._downloading = False
         self._start_btn.configure(state=tk.NORMAL)
         self._stop_btn.configure(state=tk.DISABLED)
+        self._extract_btn.configure(state=tk.NORMAL)
+        self._download_selected_btn.configure(
+            state=tk.NORMAL if self._candidates else tk.DISABLED
+        )
 
         if result == "success":
             self._progress_var.set(100)
@@ -708,6 +797,172 @@ class M3U8DownloaderGUI:
             self._status_var.set("下载已停止")
         elif result == "error":
             self._status_var.set("下载失败")
+
+    # ===== 网页抽取与多选下载 =====
+
+    def _start_extract(self) -> None:
+        """点击「提取网页」按钮的回调：起 daemon 线程抽取页内 m3u8."""
+        if self._extracting or self._downloading:
+            return
+        page_url = self._url_var.get().strip()
+        if not page_url:
+            self._log("错误：请输入网页地址")
+            return
+        if not page_url.startswith(("http://", "https://")):
+            page_url = "https://" + page_url
+            self._url_var.set(page_url)
+
+        self._extracting = True
+        self._extract_btn.configure(state=tk.DISABLED)
+        self._download_selected_btn.configure(state=tk.DISABLED)
+        self._clear_tree()
+        self._log("正在抽取网页中的 m3u8 ...")
+        deep = bool(self._deep_var.get())
+        threading.Thread(
+            target=self._extract_worker, args=(page_url, deep), daemon=True
+        ).start()
+
+    def _extract_worker(self, page_url: str, deep: bool) -> None:
+        """抽取工作线程：调用 extractor，通过队列回传候选/完成消息.
+
+        Args:
+            page_url: 网页绝对 URL.
+            deep: 是否深度模式.
+        """
+        from m3u8_downloader.extractor import extract_m3u8_from_page
+
+        try:
+            candidates = extract_m3u8_from_page(page_url, deep=deep, estimate=True)
+            self._queue_message("candidates", candidates)
+            self._queue_message("extract_done", "success")
+        except Exception as e:  # 任何异常都不让 GUI 崩溃
+            self._queue_message("log", f"抽取失败：{e}")
+            self._queue_message("extract_done", "error")
+
+    def _clear_tree(self) -> None:
+        """清空候选列表 Treeview."""
+        for item in self._tree.get_children():
+            self._tree.delete(item)
+
+    def _fill_tree(self, candidates: list) -> None:
+        """把候选列表填入 Treeview.
+
+        Args:
+            candidates: :func:`extract_m3u8_from_page` 返回的候选列表.
+        """
+        self._clear_tree()
+        self._candidates = list(candidates)
+        for i, c in enumerate(candidates, 1):
+            ctype = "master" if c.is_master else ("-" if not c.reachable else "media")
+            title = c.title or ("(不可达)" if not c.reachable else "-")
+            self._tree.insert(
+                "",
+                tk.END,
+                values=(
+                    i,
+                    c.display_size(),
+                    c.display_duration(),
+                    c.display_bandwidth(),
+                    ctype,
+                    title,
+                    c.url,
+                ),
+            )
+        if candidates:
+            self._download_selected_btn.configure(state=tk.NORMAL)
+
+    def _on_extract_done(self, result: str) -> None:
+        """抽取完成的 UI 收尾.
+
+        Args:
+            result: 抽取结果（"success" / "empty" / "error"）.
+        """
+        self._extracting = False
+        self._extract_btn.configure(state=tk.NORMAL)
+        self._download_selected_btn.configure(
+            state=tk.NORMAL if self._candidates else tk.DISABLED
+        )
+        if result == "success":
+            self._status_var.set("抽取完成")
+            self._log("以上大小均为估计值")
+        elif result == "empty":
+            self._status_var.set("未找到候选")
+            self._log("提示：未从该网页找到任何 m3u8，可尝试勾选「深度模式」")
+        else:
+            self._status_var.set("抽取失败")
+
+    def _on_tree_double_click(self, event) -> None:
+        """双击候选行：把该行链接回填到地址框（单一下载快捷路径）."""
+        sel = self._tree.selection()
+        if not sel:
+            return
+        values = self._tree.item(sel[0], "values")
+        if values and len(values) > 6:
+            url = values[6]
+            self._url_var.set(url)
+            self._log(f"已填入链接：{url}")
+
+    def _download_selected(self) -> None:
+        """点击「下载选中」：把多选行组装为串行下载任务队列."""
+        if self._downloading or self._extracting:
+            return
+        sel = self._tree.selection()
+        if not sel:
+            self._log("提示：请先在列表中选择要下载的 m3u8")
+            return
+
+        base_name = self._filename_var.get().strip() or "output.mp4"
+        save_dir = self._dir_var.get().strip()
+        total = len(sel)
+
+        jobs = []
+        for item in sel:
+            values = self._tree.item(item, "values")
+            if not values or len(values) < 7:
+                continue
+            url = values[6]
+            orig_no = int(values[0])
+            output_name = build_output_path(base_name, orig_no, total)
+            output_path = normalize_mp4_filename(
+                os.path.join(save_dir, output_name)
+            )
+            jobs.append((url, output_path))
+
+        if not jobs:
+            return
+
+        self._pending_jobs = jobs
+        self._log(f"已加入 {len(jobs)} 个下载任务，开始串行下载")
+        self._start_btn.configure(state=tk.DISABLED)
+        self._extract_btn.configure(state=tk.DISABLED)
+        self._download_selected_btn.configure(state=tk.DISABLED)
+        self._run_next_job()
+
+    def _run_next_job(self) -> None:
+        """从串行队列弹出下一个任务并启动下载线程."""
+        if not self._pending_jobs:
+            return
+        url, output_path = self._pending_jobs.pop(0)
+        self._log(f"下载: {url}")
+        self._log(f"保存为: {output_path}")
+
+        workers = self._workers_var.get()
+        retries = self._retries_var.get()
+        timeout = self._timeout_var.get()
+        use_ffmpeg = self._use_ffmpeg_var.get()
+        tmp_dir = self._tmpdir_var.get().strip()
+
+        self._downloading = True
+        self._stop_flag.clear()
+        self._progress_var.set(0)
+        self._status_var.set("正在下载...")
+
+        self._download_thread = threading.Thread(
+            target=self._download_worker,
+            args=(url, output_path, workers, retries, timeout, use_ffmpeg, tmp_dir),
+            daemon=True,
+        )
+        self._download_thread.start()
 
 
 def run_gui() -> None:

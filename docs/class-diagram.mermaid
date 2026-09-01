@@ -1,0 +1,141 @@
+classDiagram
+    class SizeEstimate {
+        +int size_bytes
+        +float duration
+        +int bandwidth
+        +bool is_master
+        +int variant_count
+        +int segment_count
+        +str method
+        +str error
+        +bool ok
+    }
+
+    class Candidate {
+        +str url
+        +str title
+        +str source
+        +bool is_master
+        +int estimated_size
+        +float duration
+        +int bandwidth
+        +int segment_count
+        +str estimate_method
+        +str estimate_error
+        +bool reachable
+        +apply_estimate(est: SizeEstimate) None
+        +display_size() str
+        +display_duration() str
+        +display_bandwidth() str
+    }
+
+    class estimator {
+        <<module>>
+        +DEFAULT_HEAD_SAMPLES: int
+        +MAX_ESTIMATE_WORKERS: int
+        +estimate_size(url, session, timeout, head_samples) SizeEstimate
+        +estimate_many(urls, session, timeout, max_workers) Dict~str, SizeEstimate~
+        -_estimate_master(playlist, session, timeout) SizeEstimate
+        -_estimate_media(playlist, session, timeout, head_samples) SizeEstimate
+        -_head_content_length(session, url, timeout) int
+        -_fetch_text(session, url, timeout) str
+    }
+
+    class extractor {
+        <<module>>
+        +M3U8_ABS_RE: Pattern
+        +M3U8_QUOTED_RE: Pattern
+        +MAX_JS_FILES: int
+        +MAX_PAGE_BYTES: int
+        +DEEP_WAIT_MS: int
+        +extract_m3u8_from_page(url, session, deep, timeout, estimate, max_workers) List~Candidate~
+        +is_deep_mode_available() bool
+        -_fetch_page(url, session, timeout) str
+        -_extract_from_html(html, page_url) List~Candidate~
+        -_collect_js_urls(html, page_url, limit) List~str~
+        -_extract_from_js(js_text, js_url, page_url) List~Candidate~
+        -_scan_text(text, base_url, source) List~Candidate~
+        -_deep_extract(url, timeout, wait_ms) List~Candidate~
+        -_dedupe(cands) List~Candidate~
+    }
+
+    class ExtractError {
+        <<exception>>
+    }
+    class PageFetchError {
+        <<exception>>
+    }
+    class DeepModeUnavailableError {
+        <<exception>>
+    }
+    class NoCandidateFoundError {
+        <<exception>>
+    }
+
+    class cli {
+        <<module>>
+        +create_parser() ArgumentParser
+        +main() None
+        -_run_from_page(args) None
+        -_print_candidates(cands) None
+        -_parse_pick(spec, total) List~int~
+        -_prompt_selection(cands) List~int~
+        -_download_many(cands, args) int
+    }
+
+    class M3U8DownloaderGUI {
+        -_url_var: StringVar
+        -_deep_var: BooleanVar
+        -_candidates: List~Candidate~
+        -_pending_jobs: List~Tuple~
+        -_tree: Treeview
+        -_extracting: bool
+        +_start_extract() None
+        -_extract_worker(page_url, deep, timeout) None
+        -_fill_tree(cands) None
+        -_on_tree_double_click(event) None
+        +_download_selected() None
+        -_run_next_job() None
+        -_handle_message(msg_type, data) None
+    }
+
+    class M3U8Parser {
+        +parse() M3U8Playlist
+    }
+    class M3U8Playlist {
+        +bool is_master
+        +List~M3U8Stream~ streams
+        +List~M3U8Segment~ segments
+        +float total_duration
+    }
+    class M3U8Downloader {
+        +download() str
+    }
+    class utils {
+        <<module>>
+        +create_http_session(timeout, headers) Session
+        +format_file_size(n) str
+        +format_duration(s) str
+        +normalize_mp4_filename(name) str
+        +build_output_path(base, index, total) str
+        +normalize_page_url(raw) str
+    }
+
+    ExtractError <|-- PageFetchError
+    ExtractError <|-- DeepModeUnavailableError
+    ExtractError <|-- NoCandidateFoundError
+
+    extractor ..> Candidate : creates
+    extractor ..> estimator : uses estimate_many()
+    extractor ..> ExtractError : raises
+    extractor ..> utils : create_http_session()
+    estimator ..> SizeEstimate : creates
+    estimator ..> M3U8Parser : reuses
+    M3U8Parser --> M3U8Playlist : produces
+    Candidate ..> SizeEstimate : apply_estimate()
+    cli ..> extractor : extract
+    cli ..> M3U8Downloader : download
+    cli ..> utils : build_output_path()
+    M3U8DownloaderGUI ..> extractor : extract (daemon thread)
+    M3U8DownloaderGUI ..> M3U8Downloader : download (daemon thread)
+    M3U8DownloaderGUI ..> Candidate : renders in Treeview

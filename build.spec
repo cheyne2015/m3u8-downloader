@@ -13,10 +13,17 @@ hiddenimports = [
     'Crypto.Util', 'Crypto.Util.Padding', 'Crypto.Util.strxor',
     'tqdm', 'tqdm.auto', 'tqdm.std', 'tqdm.utils',
     'socks',
+    # 静态 HTML 解析（纯 Python，使用内置 html.parser，不引 lxml）
+    'bs4', 'soupsieve', 'html.parser',
     'm3u8_downloader', 'm3u8_downloader.parser',
     'm3u8_downloader.downloader', 'm3u8_downloader.merger',
     'm3u8_downloader.utils', 'm3u8_downloader.cli', 'm3u8_downloader.gui',
+    'm3u8_downloader.extractor', 'm3u8_downloader.estimator',
 ] + crypto_hiddenimports
+
+# 深度模式依赖（playwright + Chromium 内核）体积巨大且打包易失败，显式排除，
+# 保持双 EXE 绿色小巧；用户需要时用 pip install -r requirements-deep.txt 单独安装。
+excludes = ['playwright']
 
 # CLI 入口（保留控制台，用于命令行进度输出）
 a_cli = Analysis(
@@ -24,7 +31,7 @@ a_cli = Analysis(
     pathex=[], binaries=[], datas=[],
     hiddenimports=hiddenimports,
     hookspath=[], hooksconfig={}, runtime_hooks=[],
-    excludes=[], win_no_prefer_redirects=False, win_private_assemblies=False,
+    excludes=excludes, win_no_prefer_redirects=False, win_private_assemblies=False,
     cipher=block_cipher, noarchive=False,
 )
 
@@ -34,7 +41,7 @@ a_gui = Analysis(
     pathex=[], binaries=[], datas=[],
     hiddenimports=hiddenimports,
     hookspath=[], hooksconfig={}, runtime_hooks=[],
-    excludes=[], win_no_prefer_redirects=False, win_private_assemblies=False,
+    excludes=excludes, win_no_prefer_redirects=False, win_private_assemblies=False,
     cipher=block_cipher, noarchive=False,
 )
 
