@@ -41,6 +41,84 @@ def _ensure_playwright_browsers_path() -> None:
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = r"F:\gadgets\playwright-browsers"
 
 
+# 冻结 EXE 未打包 playwright（build.spec 显式 exclude，避免体积爆炸）。
+# 本机若已安装 playwright，则把系统 Python 的 site-packages 注入 sys.path，
+# 让冻结 EXE 直接复用用户的 playwright（含 node 驱动与 PLAYWRIGHT_BROWSERS_PATH 的 Chromium）。
+_SYSTEM_PLAYWRIGHT_INJECTED = False
+
+
+def _playwright_importable() -> bool:
+    try:
+        import playwright  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+def _inject_system_playwright() -> bool:
+    """尝试从本机系统 Python 注入 playwright，使深度模式在冻结 EXE 中可用。
+
+    仅在本机已安装 playwright 时生效。成功返回 True（此后 ``import playwright`` 可用）。
+
+    Returns:
+        是否成功注入（即当前 ``import playwright`` 可用）.
+    """
+    global _SYSTEM_PLAYWRIGHT_INJECTED
+    if _SYSTEM_PLAYWRIGHT_INJECTED:
+        return _playwright_importable()
+
+    import shutil
+    import subprocess
+
+    candidates: List[str] = []
+
+    # 1) 通过 py 启动器探测 Python 3.13 的 site-packages（最常见安装位置）
+    py = shutil.which("py") or shutil.which("py.exe")
+    if py:
+        try:
+            out = subprocess.run(
+                [py, "-3.13", "-c",
+                 "import site; sp=site.getsitepackages(); print(sp[0] if sp else '')"],
+                capture_output=True, text=True, timeout=15,
+            ).stdout.strip()
+            if out and os.path.isdir(out):
+                candidates.append(out)
+        except Exception:
+            pass
+
+    # 2) 用户目录下的 Python 安装（扫描 Lib/site-packages）
+    local_programs = os.path.join(
+        os.environ.get("LOCALAPPDATA", r"C:\Users\cheyn\AppData\Local"),
+        "Programs", "Python",
+    )
+    if os.path.isdir(local_programs):
+        for name in sorted(os.listdir(local_programs)):
+            sp = os.path.join(local_programs, name, "Lib", "site-packages")
+            if os.path.isdir(sp):
+                candidates.append(sp)
+
+    # 3) 兜底硬编码路径
+    for base in (
+        r"C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages",
+        r"C:\Users\cheyn\AppData\Local\Programs\Python\Python312\Lib\site-packages",
+        r"C:\Python313\Lib\site-packages",
+    ):
+        if os.path.isdir(base):
+            candidates.append(base)
+
+    for sp in candidates:
+        if sp in sys.path:
+            continue
+        if os.path.isdir(os.path.join(sp, "playwright")):
+            sys.path.insert(0, sp)
+            if _playwright_importable():
+                _SYSTEM_PLAYWRIGHT_INJECTED = True
+                return True
+            sys.path.remove(sp)
+    return False
+
+
 # ===== 模块常量（不要散落魔数） =====
 MAX_JS_FILES: int = 10                      # 最多递归下载的外链 JS 数量
 MAX_PAGE_BYTES: int = 5 * 1024 * 1024       # 网页/JS 单文件读取上限，防超大文件
@@ -476,15 +554,15 @@ def _fetch_page(url: str, session: requests.Session, timeout: int) -> str:
 def is_deep_mode_available() -> bool:
     """检测深度模式依赖（playwright）是否可用.
 
-    Returns:
-        True 表示 ``import playwright`` 成功.
-    """
-    try:
-        import playwright  # noqa: F401
+    冻结 EXE 未打包 playwright 时，会尝试从本机系统 Python 注入（见
+    :func:`_inject_system_playwright`），因此本机已装 playwright 即返回 True。
 
+    Returns:
+        True 表示 ``import playwright`` 成功（含冻结 EXE 从本机注入的情况）.
+    """
+    if _playwright_importable():
         return True
-    except ImportError:
-        return False
+    return _inject_system_playwright()
 
 
 def _on_response(resp, collected: List[str]) -> None:
@@ -516,6 +594,8 @@ def _deep_extract(
     Raises:
         DeepModeUnavailableError: playwright 缺失或浏览器执行失败.
     """
+    # 冻结 EXE 未打包 playwright：先尝试从本机系统 Python 注入，复用用户已装 playwright
+    _inject_system_playwright()
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:

@@ -182,6 +182,42 @@ def test_ensure_playwright_browsers_path_respects_existing(monkeypatch):
     assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == "/custom/path"
 
 
+# ===== 冻结 EXE 从本机注入 playwright =====
+def test_inject_system_playwright_finds_installed(monkeypatch):
+    """模拟冻结 EXE（playwright 不在 sys.path）：应从本机系统 Python 注入并可用。
+
+    本机未安装 playwright 时跳过（不视为失败）。
+    """
+    import sys as _sys
+    import shutil as _shutil
+    import subprocess as _sp
+
+    py = _shutil.which("py") or _shutil.which("py.exe")
+    have_system = False
+    if py:
+        try:
+            out = _sp.run(
+                [py, "-3.13", "-c", "import site; print(site.getsitepackages()[0])"],
+                capture_output=True, text=True, timeout=15,
+            ).stdout.strip()
+            have_system = bool(out) and os.path.isdir(os.path.join(out, "playwright"))
+        except Exception:
+            have_system = False
+    if not have_system:
+        pytest.skip("本机未安装 system playwright，跳过注入验证")
+
+    monkeypatch.setattr(extractor, "_SYSTEM_PLAYWRIGHT_INJECTED", False)
+    saved = list(_sys.path)
+    # 模拟冻结：移除所有含 playwright 包的站点目录
+    _sys.path[:] = [p for p in _sys.path if not os.path.isdir(os.path.join(p, "playwright"))]
+    try:
+        assert extractor._playwright_importable() is False
+        assert extractor._inject_system_playwright() is True
+        assert extractor._playwright_importable() is True
+    finally:
+        _sys.path[:] = saved
+
+
 # ===== bs4 缺失时降级仍能抽到 =====
 def test_extract_works_without_bs4():
     with mock.patch.object(extractor, "BeautifulSoup", None), mock.patch(
