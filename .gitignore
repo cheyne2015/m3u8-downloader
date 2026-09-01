@@ -34,3 +34,4 @@ Desktop.ini
 *.ts
 
 build.log
+_run_build.py
