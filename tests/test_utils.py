@@ -12,6 +12,8 @@ from m3u8_downloader.utils import (
     create_http_session,
     is_ffmpeg_available,
     normalize_mp4_filename,
+    extract_title_segment,
+    _normalize_proxy,
 )
 
 
@@ -242,3 +244,50 @@ class TestNormalizeMp4Filename:
         # 对结果再次规范化应保持不变
         once = normalize_mp4_filename("a.mp4.mp4")
         assert normalize_mp4_filename(once) == once == "a.mp4"
+
+
+# ---------------------------------------------------------------------------
+# extract_title_segment
+# ---------------------------------------------------------------------------
+
+class TestExtractTitleSegment:
+    """Tests for extract_title_segment (截取第一个 '-' 之前的段落)."""
+
+    def test_split_on_dash_with_spaces(self):
+        title = "仙界法务部 第55集 (2026) - 动漫 - 在线免费观看 - 冷映"
+        assert extract_title_segment(title) == "仙界法务部 第55集 (2026)"
+
+    def test_split_on_bare_dash(self):
+        assert extract_title_segment("Hello - World") == "Hello"
+        assert extract_title_segment("A-B-C") == "A"
+
+    def test_no_dash_returns_whole(self):
+        assert extract_title_segment("完整标题无连字符") == "完整标题无连字符"
+
+    def test_strips_whitespace(self):
+        assert extract_title_segment("  trimmed  - suffix") == "trimmed"
+
+    def test_empty_returns_empty(self):
+        assert extract_title_segment("") == ""
+        assert extract_title_segment("   ") == ""
+
+
+# ---------------------------------------------------------------------------
+# _normalize_proxy
+# ---------------------------------------------------------------------------
+
+class TestNormalizeProxy:
+    """Tests for _normalize_proxy (补全协议头)."""
+
+    def test_bare_host_port_gets_http(self):
+        assert _normalize_proxy("127.0.0.1:7897") == "http://127.0.0.1:7897"
+
+    def test_socks5_preserved(self):
+        assert _normalize_proxy("socks5://127.0.0.1:7897") == "socks5://127.0.0.1:7897"
+
+    def test_http_preserved(self):
+        assert _normalize_proxy("http://user:pass@host:8080") == "http://user:pass@host:8080"
+
+    def test_empty_returns_empty(self):
+        assert _normalize_proxy("") == ""
+        assert _normalize_proxy("   ") == ""

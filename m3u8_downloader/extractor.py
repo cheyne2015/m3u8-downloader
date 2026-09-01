@@ -589,6 +589,72 @@ def _fetch_page(url: str, session: requests.Session, timeout: int) -> str:
     return text
 
 
+def fetch_page_title(
+    page_url: str,
+    no_proxy: bool = False,
+    proxy: Optional[str] = None,
+    timeout: int = 30,
+) -> str:
+    """抓取网页标题（``<title>`` 优先，回退 ``og:title`` / ``twitter:title``）.
+
+    仅在静态模式下用于自动填充输出文件名；与 :func:`extract_m3u8_from_page`
+    共享同一套 HTTP 配置（代理 / 直连 / UA）。
+
+    Args:
+        page_url: 网页绝对 URL.
+        no_proxy: 为 True 时直连、跳过系统代理环境变量.
+        proxy: 手动代理地址（如 ``127.0.0.1:7897``）；与 no_proxy 互斥.
+        timeout: HTTP 超时秒数.
+
+    Returns:
+        标题文本（已 ``strip``）；抓取或解析失败时返回空字符串（调用方回退默认名）.
+    """
+    session = utils.create_http_session(timeout=timeout, no_proxy=no_proxy, proxy=proxy)
+    try:
+        try:
+            html = _fetch_page(page_url, session, timeout)
+        except Exception:
+            return ""
+        return _parse_page_title(html)
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+
+def _parse_page_title(html: str) -> str:
+    """从 HTML 文本里抽出页面标题，优先 ``<title>``，回退 og/twitter meta.
+
+    Args:
+        html: 网页 HTML 文本.
+
+    Returns:
+        标题字符串（已 strip）；无法取得时返回空字符串.
+    """
+    if not html:
+        return ""
+    if BeautifulSoup is not None:
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+            title_tag = soup.find("title")
+            if title_tag and (title_tag.get_text() or "").strip():
+                return title_tag.get_text().strip()
+            for prop in ("og:title", "twitter:title"):
+                meta = soup.find("meta", attrs={"property": prop}) or soup.find(
+                    "meta", attrs={"name": prop}
+                )
+                if meta and (meta.get("content") or "").strip():
+                    return meta.get("content").strip()
+        except Exception:
+            pass
+    # bs4 缺失或解析失败：退化为简单的 <title>...</title> 正则
+    m = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return ""
+
+
 def _find_system_python() -> Optional[List[str]]:
     """定位可用于运行深度模式 worker 的系统 Python 解释器.
 
@@ -951,6 +1017,7 @@ def extract_m3u8_from_page(
     estimate: bool = True,
     max_workers: int = 8,
     no_proxy: bool = False,
+    proxy: Optional[str] = None,
 ) -> List[Candidate]:
     """从网页抽取所有 m3u8 候选链接（可选估算大小）.
 
@@ -965,6 +1032,8 @@ def extract_m3u8_from_page(
         estimate: 是否并发估算大小（False 时秒出列表，大小显示 ``-``）.
         max_workers: 抽取/估算并发数（内部钳制到 1..MAX_ESTIMATE_WORKERS）.
         no_proxy: 为 True 时所有请求直连、跳过系统代理环境变量.
+        proxy: 手动指定代理地址（如 ``127.0.0.1:7897``）；与 no_proxy 互斥，
+            同时传入时 no_proxy 优先（直连）。
 
     Returns:
         候选列表（已去重、排序：reachable 优先 → 大小降序 → url 字典序）.
@@ -976,7 +1045,9 @@ def extract_m3u8_from_page(
     """
     own_session = session is None
     if own_session:
-        session = utils.create_http_session(timeout, no_proxy=no_proxy)
+        session = utils.create_http_session(
+            timeout, no_proxy=no_proxy, proxy=proxy
+        )
 
     page_url = utils.normalize_page_url(url)
     workers = max(1, min(int(max_workers or 1), MAX_ESTIMATE_WORKERS))

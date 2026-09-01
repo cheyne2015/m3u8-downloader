@@ -125,6 +125,10 @@ class M3U8DownloaderGUI:
         self._filename_var = tk.StringVar(value="output.mp4")
         self._filename_entry = ttk.Entry(main_frame, textvariable=self._filename_var)
         self._filename_entry.grid(row=row, column=1, columnspan=2, sticky=tk.EW, pady=(0, 5))
+        # 用户手动改过文件名后，不再用网页标题自动覆盖
+        self._filename_touched = False
+        self._filename_entry.bind("<Key>", self._on_filename_typed)
+        self._filename_entry.bind("<<Paste>>", self._on_filename_typed)
 
         row += 1
 
@@ -207,6 +211,14 @@ class M3U8DownloaderGUI:
             param_frame, text="直连/跳过代理", variable=self._no_proxy_var
         )
         no_proxy_check.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+
+        # 手动代理地址（本地 clash 默认 127.0.0.1:7897）
+        ttk.Label(param_frame, text="代理地址：").grid(
+            row=5, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0)
+        )
+        self._proxy_var = tk.StringVar(value="127.0.0.1:7897")
+        proxy_entry = ttk.Entry(param_frame, textvariable=self._proxy_var, width=24)
+        proxy_entry.grid(row=5, column=1, columnspan=3, sticky=tk.W, pady=(5, 0))
 
         row += 1
 
@@ -329,6 +341,12 @@ class M3U8DownloaderGUI:
             self._url_var.set(clipboard_text.strip())
         except tk.TclError:
             pass  # 剪贴板为空或不可访问
+
+    def _on_filename_typed(self, event=None) -> None:
+        """文件名输入框有手动输入/粘贴时标记，停止自动覆盖."""
+        if not self._filename_touched:
+            self._filename_touched = True
+            self._log("已手动指定文件名，后续抽取不再自动覆盖")
 
     def _browse_dir(self) -> None:
         """浏览选择保存目录."""
@@ -482,6 +500,7 @@ class M3U8DownloaderGUI:
         timeout: int,
         use_ffmpeg: bool,
         tmp_dir: str,
+        proxy: str = "",
     ) -> None:
         """下载工作线程函数.
 
@@ -495,6 +514,7 @@ class M3U8DownloaderGUI:
             timeout: 超时时间.
             use_ffmpeg: 是否使用 ffmpeg.
             tmp_dir: 临时目录.
+            proxy: 手动代理地址（如 ``127.0.0.1:7897``）；为空则不使用.
         """
         try:
             # 检查 ffmpeg
@@ -514,6 +534,7 @@ class M3U8DownloaderGUI:
                 max_retries=retries,
                 timeout=timeout,
                 no_proxy=self._no_proxy_var.get(),
+                proxy=proxy,
             )
 
             # 使用自定义的下载流程以便回调进度
@@ -739,6 +760,9 @@ class M3U8DownloaderGUI:
             self._on_download_done(str(data))
         elif msg_type == "candidates":
             self._fill_tree(data if isinstance(data, list) else [])
+        elif msg_type == "suggest_filename":
+            # 抽取成功后用网页标题段落自动填充输出文件名（仅当用户未改过默认名）
+            self._suggest_filename(str(data))
         elif msg_type == "extract_done":
             self._on_extract_done(str(data))
 
@@ -827,25 +851,53 @@ class M3U8DownloaderGUI:
         self._log("正在抽取网页中的 m3u8 ...")
         deep = bool(self._deep_var.get())
         no_proxy = bool(self._no_proxy_var.get())
+        proxy = self._proxy_var.get().strip()
         threading.Thread(
-            target=self._extract_worker, args=(page_url, deep, no_proxy), daemon=True
+            target=self._extract_worker,
+            args=(page_url, deep, no_proxy, proxy),
+            daemon=True,
         ).start()
 
-    def _extract_worker(self, page_url: str, deep: bool, no_proxy: bool = False) -> None:
+    def _extract_worker(
+        self, page_url: str, deep: bool, no_proxy: bool = False, proxy: str = ""
+    ) -> None:
         """抽取工作线程：调用 extractor，通过队列回传候选/完成消息.
 
         Args:
             page_url: 网页绝对 URL.
             deep: 是否深度模式.
             no_proxy: 为 True 时所有请求直连、跳过系统代理环境变量.
+            proxy: 手动代理地址（如 ``127.0.0.1:7897``）；为空则不使用.
         """
-        from m3u8_downloader.extractor import extract_m3u8_from_page
+        from m3u8_downloader.extractor import (
+            extract_m3u8_from_page,
+            fetch_page_title,
+        )
 
         try:
             candidates = extract_m3u8_from_page(
-                page_url, deep=deep, estimate=True, no_proxy=no_proxy
+                page_url,
+                deep=deep,
+                estimate=True,
+                no_proxy=no_proxy,
+                proxy=proxy,
             )
             self._queue_message("candidates", candidates)
+            # 自动用网页标题（第一个 "-" 之前段落）填充输出文件名
+            if not no_proxy:
+                pass  # 占位，保持结构清晰
+            try:
+                title = fetch_page_title(
+                    page_url, no_proxy=no_proxy, proxy=proxy
+                )
+                if title:
+                    from m3u8_downloader.utils import extract_title_segment
+
+                    seg = extract_title_segment(title)
+                    if seg:
+                        self._queue_message("suggest_filename", seg)
+            except Exception:
+                pass
             self._queue_message("extract_done", "success")
         except Exception as e:  # 任何异常都不让 GUI 崩溃
             self._queue_message("log", f"抽取失败：{e}")
@@ -882,6 +934,21 @@ class M3U8DownloaderGUI:
             )
         if candidates:
             self._download_selected_btn.configure(state=tk.NORMAL)
+
+    def _suggest_filename(self, base_name: str) -> None:
+        """抽取成功后用网页标题段落自动填充输出文件名.
+
+        仅在用户未手动修改过文件名时生效，避免覆盖用户已输入的自定义名。
+
+        Args:
+            base_name: 网页标题截取后的文件名基底（不含扩展名），如 ``仙界法务部 第55集 (2026)``.
+        """
+        if self._filename_touched:
+            return
+        if not base_name:
+            return
+        self._filename_var.set(base_name)
+        self._log(f"已按网页标题自动命名：{base_name}")
 
     def _on_extract_done(self, result: str) -> None:
         """抽取完成的 UI 收尾.
@@ -963,6 +1030,7 @@ class M3U8DownloaderGUI:
         timeout = self._timeout_var.get()
         use_ffmpeg = self._use_ffmpeg_var.get()
         tmp_dir = self._tmpdir_var.get().strip()
+        proxy = self._proxy_var.get().strip()
 
         self._downloading = True
         self._stop_flag.clear()
@@ -971,7 +1039,7 @@ class M3U8DownloaderGUI:
 
         self._download_thread = threading.Thread(
             target=self._download_worker,
-            args=(url, output_path, workers, retries, timeout, use_ffmpeg, tmp_dir),
+            args=(url, output_path, workers, retries, timeout, use_ffmpeg, tmp_dir, proxy),
             daemon=True,
         )
         self._download_thread.start()

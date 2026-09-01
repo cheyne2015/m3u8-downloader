@@ -25,10 +25,17 @@ hiddenimports = [
 # 保持双 EXE 绿色小巧；用户需要时用 pip install -r requirements-deep.txt 单独安装。
 excludes = ['playwright']
 
+# 深度模式子进程 worker：以「数据文件」随包分发（不参与 import，故不进 hiddenimports）。
+# 冻结 EXE 内无法 import 外部 site-packages，深度模式改为调用系统 Python 执行该脚本，
+# 复用本机 playwright 与浏览器，体积只增加几 KB。
+# 注意：不要把 'm3u8_downloader.deep_worker' 加进 hiddenimports，否则会被编译进 PYZ，
+#       导致 sys._MEIPASS/m3u8_downloader/deep_worker.py 文件不存在、子进程路线失效。
+deep_worker_datas = [('m3u8_downloader/deep_worker.py', 'm3u8_downloader')]
+
 # CLI 入口（保留控制台，用于命令行进度输出）
 a_cli = Analysis(
     ['m3u8_downloader/__main__.py'],
-    pathex=[], binaries=[], datas=[],
+    pathex=[], binaries=[], datas=deep_worker_datas,
     hiddenimports=hiddenimports,
     hookspath=[], hooksconfig={}, runtime_hooks=[],
     excludes=excludes, win_no_prefer_redirects=False, win_private_assemblies=False,
@@ -38,7 +45,7 @@ a_cli = Analysis(
 # GUI 入口（无控制台，双击运行不弹黑窗口）
 a_gui = Analysis(
     ['m3u8_downloader/gui_launcher.py'],
-    pathex=[], binaries=[], datas=[],
+    pathex=[], binaries=[], datas=deep_worker_datas,
     hiddenimports=hiddenimports,
     hookspath=[], hooksconfig={}, runtime_hooks=[],
     excludes=excludes, win_no_prefer_redirects=False, win_private_assemblies=False,

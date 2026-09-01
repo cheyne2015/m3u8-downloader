@@ -154,6 +154,7 @@ class M3U8Downloader:
         max_retries: int = DEFAULT_MAX_RETRIES,
         timeout: int = 30,
         no_proxy: bool = False,
+        proxy: Optional[str] = None,
     ) -> None:
         """初始化下载器.
 
@@ -166,6 +167,8 @@ class M3U8Downloader:
             max_retries: 下载最大重试次数.
             timeout: HTTP 请求超时时间（秒）.
             no_proxy: 为 True 时所有请求直连、跳过系统代理环境变量.
+            proxy: 手动指定代理地址（如 ``127.0.0.1:7897``）；与 no_proxy 互斥，
+                同时传入时 no_proxy 优先（直连）。
         """
         self._url = url
         self._output = output
@@ -173,7 +176,9 @@ class M3U8Downloader:
         self._max_retries = max_retries
         self._timeout = timeout
         self._use_ffmpeg = use_ffmpeg
-        self._session = create_http_session(timeout=timeout, no_proxy=no_proxy)
+        self._session = create_http_session(
+            timeout=timeout, no_proxy=no_proxy, proxy=proxy
+        )
 
         # 设置临时目录
         if tmp_dir:

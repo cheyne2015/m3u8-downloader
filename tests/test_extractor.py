@@ -15,8 +15,10 @@ from m3u8_downloader.extractor import (
     _collect_js_urls,
     _dedupe,
     _extract_from_html,
+    _parse_page_title,
     _scan_text,
     extract_m3u8_from_page,
+    fetch_page_title,
 )
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
@@ -271,3 +273,36 @@ def test_extract_works_without_bs4():
     assert "https://cdn.example.com/hls/1080/index.m3u8" in urls
     assert "https://www.example.com/play/hls/480/index.m3u8" in urls
     assert not any("jquery" in u.lower() for u in urls)
+
+
+# ===== 网页标题解析 (用于自动命名) =====
+def test_parse_page_title_from_title_tag():
+    html = "<html><head><title>仙界法务部 第55集 (2026) - 动漫 - 在线免费观看</title></head></html>"
+    assert _parse_page_title(html) == "仙界法务部 第55集 (2026) - 动漫 - 在线免费观看"
+
+
+def test_parse_page_title_falls_back_to_og_title():
+    html = '<html><head><meta property="og:title" content="OG 标题示例"></head></html>'
+    assert _parse_page_title(html) == "OG 标题示例"
+
+
+def test_parse_page_title_empty_when_absent():
+    assert _parse_page_title("<html><body>no title</body></html>") == ""
+    assert _parse_page_title("") == ""
+
+
+def test_fetch_page_title_uses_fetch_page(monkeypatch):
+    """fetch_page_title 应复用 _fetch_page 解析标题（零网络 mock）."""
+    html = "<title>示例剧集 第3话 - 某站点</title>"
+    monkeypatch.setattr(extractor, "_fetch_page", lambda url, session, timeout: html)
+    # 同时避免 session 真正创建（已被上面的 mock 短路，但保险起见）
+    title = fetch_page_title("https://example.com/x", timeout=5)
+    assert title == "示例剧集 第3话 - 某站点"
+
+
+def test_fetch_page_title_handles_fetch_error(monkeypatch):
+    def _boom(url, session, timeout):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(extractor, "_fetch_page", _boom)
+    assert fetch_page_title("https://example.com/x") == ""

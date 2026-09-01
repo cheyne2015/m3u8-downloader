@@ -147,6 +147,7 @@ def create_http_session(
     timeout: int = 30,
     headers: Optional[dict] = None,
     no_proxy: bool = False,
+    proxy: Optional[str] = None,
 ) -> requests.Session:
     """创建带默认配置的 HTTP Session.
 
@@ -156,6 +157,9 @@ def create_http_session(
         no_proxy: 为 True 时绕过系统代理环境变量（HTTPS_PROXY / HTTP_PROXY /
             ALL_PROXY 等），所有请求走直连。内部设置 ``session.trust_env = False``
             以禁用环境代理读取（不影响其他 session），不会改动全局 ``os.environ``。
+        proxy: 手动指定代理地址（如 ``127.0.0.1:7897``）。非空时自动补全协议头，
+            同时作用于 http 与 https。与 ``no_proxy=True`` 互斥，二者同时传入时
+            ``no_proxy`` 优先生效（直连）。
 
     Returns:
         配置好的 requests.Session.
@@ -181,7 +185,65 @@ def create_http_session(
     # 必须用 trust_env=False 才能真正绕过。
     if no_proxy:
         session.trust_env = False
+    elif proxy:
+        proxy_url = _normalize_proxy(proxy)
+        session.proxies.update({"http": proxy_url, "https": proxy_url})
     return session
+
+
+def _normalize_proxy(proxy: str) -> str:
+    """把用户输入的代理地址规范化为带协议头的完整 URL.
+
+    接受多种形式：
+    - ``127.0.0.1:7897`` -> ``http://127.0.0.1:7897``
+    - ``socks5://127.0.0.1:7897`` -> 原样
+    - ``http://user:pass@host:port`` -> 原样
+
+    Args:
+        proxy: 用户输入的代理字符串。
+
+    Returns:
+        带协议头的代理 URL；空输入返回空字符串。
+    """
+    proxy = (proxy or "").strip()
+    if not proxy:
+        return ""
+    if proxy.startswith(("http://", "https://", "socks5://", "socks5h://", "socks4://")):
+        return proxy
+    return "http://" + proxy
+
+
+def extract_title_segment(title: str) -> str:
+    """从网页标题截取「第一个 '-' 之前的段落」作为输出文件名基底.
+
+    规则（贴近用户示例）：
+    - 优先按 ``" - "``（空格-连字符-空格）切分，取第一段并去首尾空白；
+    - 若不存在 ``" - "`` 但存在单个 ``"-"``，则按 ``"-"`` 切分取第一段；
+    - 若整个标题不含 ``"-"``，则原样返回（去首尾空白）；
+    - 结果为空时返回空字符串，由调用方回退默认名。
+
+    示例：
+        ``"仙界法务部 第55集 (2026) - 动漫 - 在线免费观看 - 冷映"``
+        -> ``"仙界法务部 第55集 (2026)"``
+
+    Args:
+        title: 网页 ``<title>`` 或 og:title 文本。
+
+    Returns:
+        截取后的文件名基底（不含扩展名）；无法截取时返回空字符串。
+    """
+    if not title:
+        return ""
+    text = title.strip()
+    if not text:
+        return ""
+    if " - " in text:
+        seg = text.split(" - ")[0].strip()
+    elif "-" in text:
+        seg = text.split("-")[0].strip()
+    else:
+        seg = text
+    return seg
 
 
 def is_ffmpeg_available() -> bool:

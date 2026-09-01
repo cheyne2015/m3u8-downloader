@@ -156,6 +156,15 @@ m3u8-dl https://site.com/play/123 --deep
 
 深度模式**不进主依赖、不进 EXE**，缺失时给出明确的安装提示而不会崩溃。
 
+> **EXE 的深度模式怎么跑通？** 两条路线自动择优，无需额外配置：
+>
+> 1. **进程内**：源码运行时当前 Python 装了 playwright，直接跑（最快）；
+> 2. **子进程**：冻结 EXE 内无法 import 外部 site-packages，改为调用系统 Python
+>    （`py -3.13` / `python`）执行随包分发几 KB 的 `deep_worker.py`，复用本机
+>    playwright 与 Chromium 浏览器，因此 EXE 体积不受影响。
+>
+> 两者都不可用时，提示会区分具体原因（缺解释器 / 缺 playwright / 缺浏览器内核）。
+
 ## 依赖
 
 - `requests` - HTTP 请求

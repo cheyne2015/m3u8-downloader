@@ -108,6 +108,12 @@ def create_parser() -> argparse.ArgumentParser:
         help="直连/跳过系统代理（忽略 HTTPS_PROXY / HTTP_PROXY 等环境变量）",
     )
     parser.add_argument(
+        "--proxy",
+        default="",
+        help="手动指定代理地址（如 127.0.0.1:7897），同时作用于 http/https；"
+        "与 --no-proxy 互斥，同时传入时 --no-proxy 优先",
+    )
+    parser.add_argument(
         "--extract-workers",
         type=int,
         default=8,
@@ -301,7 +307,7 @@ def _prompt_selection(total: int) -> list:
     return []
 
 
-def _download_many(selected: list, args, no_proxy: bool = False) -> None:
+def _download_many(selected: list, args, no_proxy: bool = False, proxy: str = "") -> None:
     """依次下载选中的候选（串行，文件名自动编号）.
 
     Args:
@@ -341,6 +347,7 @@ def _download_many(selected: list, args, no_proxy: bool = False) -> None:
                 max_retries=args.retries,
                 timeout=args.timeout,
                 no_proxy=no_proxy,
+                proxy=proxy,
             )
             downloader.download()
             success += 1
@@ -374,6 +381,7 @@ def _run_from_page(args) -> None:
     max_workers = max(1, min(int(args.extract_workers or 8), 16))
     timeout = args.timeout
     no_proxy = bool(args.no_proxy)
+    proxy = args.proxy.strip() if args.proxy else ""
 
     from m3u8_downloader.extractor import (
         DeepModeUnavailableError,
@@ -390,6 +398,7 @@ def _run_from_page(args) -> None:
             estimate=estimate,
             max_workers=max_workers,
             no_proxy=no_proxy,
+            proxy=proxy,
         )
     except DeepModeUnavailableError as e:
         print(f"错误: {e}")
@@ -425,7 +434,7 @@ def _run_from_page(args) -> None:
             return
 
     selected = [(i, candidates[i - 1]) for i in indices]
-    _download_many(selected, args, no_proxy=no_proxy)
+    _download_many(selected, args, no_proxy=no_proxy, proxy=proxy)
 
 
 if __name__ == "__main__":
