@@ -165,6 +165,16 @@ class TestCreateHttpSession:
         session = create_http_session(timeout=60)
         assert session._default_timeout == 60
 
+    def test_no_proxy_sets_none_proxies(self):
+        # 开启 no_proxy 时，proxies 应被显式设为 None，覆盖环境代理
+        session = create_http_session(no_proxy=True)
+        assert session.proxies == {"http": None, "https": None}
+
+    def test_default_no_proxy_not_set(self):
+        # 默认不应出现 None 值（空字典或仅含正常代理）
+        session = create_http_session()
+        assert not any(v is None for v in session.proxies.values())
+
 
 # ---------------------------------------------------------------------------
 # is_ffmpeg_available

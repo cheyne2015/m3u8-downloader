@@ -197,6 +197,14 @@ class TestFromPageArgs:
         args = create_parser().parse_args(["https://x/page", "--from-page"])
         assert args.extract_workers == 8
 
+    def test_no_proxy_flag_parsed(self):
+        args = create_parser().parse_args(["https://x/page", "--from-page", "--no-proxy"])
+        assert args.no_proxy is True
+
+    def test_no_proxy_default_false(self):
+        args = create_parser().parse_args(["https://x/page", "--from-page"])
+        assert args.no_proxy is False
+
 
 class TestParsePick:
     """Tests for _parse_pick boundary handling."""

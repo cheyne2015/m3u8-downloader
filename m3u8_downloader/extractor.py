@@ -10,6 +10,7 @@
   ``playwright`` 缺失时优雅降级为 ``DeepModeUnavailableError``。
 """
 
+import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -28,6 +29,16 @@ try:  # pragma: no cover - 依赖探测
     from bs4 import BeautifulSoup
 except ImportError:  # pragma: no cover
     BeautifulSoup = None
+
+
+def _ensure_playwright_browsers_path() -> None:
+    """深度模式启动前确保浏览器目录已设置（用户本机默认 F:\\gadgets\\playwright-browsers）。
+
+    若用户已自行设置 PLAYWRIGHT_BROWSERS_PATH 环境变量则尊重，不覆盖。
+    playwright 会在启动时自动读取该环境变量定位浏览器内核。
+    """
+    if "PLAYWRIGHT_BROWSERS_PATH" not in os.environ:
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = r"F:\gadgets\playwright-browsers"
 
 
 # ===== 模块常量（不要散落魔数） =====
@@ -514,6 +525,9 @@ def _deep_extract(
             "  playwright install chromium"
         ) from exc
 
+    # 深度模式启动前确保浏览器目录已设置（尊重用户自定义的环境变量）
+    _ensure_playwright_browsers_path()
+
     candidates: List[Candidate] = []
     collected: List[str] = []
     try:
@@ -549,6 +563,7 @@ def extract_m3u8_from_page(
     timeout: int = 30,
     estimate: bool = True,
     max_workers: int = 8,
+    no_proxy: bool = False,
 ) -> List[Candidate]:
     """从网页抽取所有 m3u8 候选链接（可选估算大小）.
 
@@ -562,6 +577,7 @@ def extract_m3u8_from_page(
         timeout: HTTP 超时秒数.
         estimate: 是否并发估算大小（False 时秒出列表，大小显示 ``-``）.
         max_workers: 抽取/估算并发数（内部钳制到 1..MAX_ESTIMATE_WORKERS）.
+        no_proxy: 为 True 时所有请求直连、跳过系统代理环境变量.
 
     Returns:
         候选列表（已去重、排序：reachable 优先 → 大小降序 → url 字典序）.
@@ -573,7 +589,7 @@ def extract_m3u8_from_page(
     """
     own_session = session is None
     if own_session:
-        session = utils.create_http_session(timeout)
+        session = utils.create_http_session(timeout, no_proxy=no_proxy)
 
     page_url = utils.normalize_page_url(url)
     workers = max(1, min(int(max_workers or 1), MAX_ESTIMATE_WORKERS))

@@ -103,6 +103,11 @@ def create_parser() -> argparse.ArgumentParser:
         help="跳过大小估计（秒出列表，大小/时长显示 -）",
     )
     parser.add_argument(
+        "--no-proxy",
+        action="store_true",
+        help="直连/跳过系统代理（忽略 HTTPS_PROXY / HTTP_PROXY 等环境变量）",
+    )
+    parser.add_argument(
         "--extract-workers",
         type=int,
         default=8,
@@ -183,6 +188,7 @@ def main() -> None:
             use_ffmpeg=use_ffmpeg,
             max_retries=args.retries,
             timeout=args.timeout,
+            no_proxy=args.no_proxy,
         )
         downloader.download()
     except KeyboardInterrupt:
@@ -295,12 +301,13 @@ def _prompt_selection(total: int) -> list:
     return []
 
 
-def _download_many(selected: list, args) -> None:
+def _download_many(selected: list, args, no_proxy: bool = False) -> None:
     """依次下载选中的候选（串行，文件名自动编号）.
 
     Args:
         selected: ``(orig_index, Candidate)`` 列表，orig_index 为候选在列表中的序号.
         args: 解析后的命令行参数.
+        no_proxy: 为 True 时所有请求直连、跳过系统代理环境变量.
     """
     from m3u8_downloader.downloader import M3U8Downloader
     from m3u8_downloader.utils import (
@@ -333,6 +340,7 @@ def _download_many(selected: list, args) -> None:
                 use_ffmpeg=use_ffmpeg,
                 max_retries=args.retries,
                 timeout=args.timeout,
+                no_proxy=no_proxy,
             )
             downloader.download()
             success += 1
@@ -365,6 +373,7 @@ def _run_from_page(args) -> None:
     estimate = not bool(args.no_estimate)
     max_workers = max(1, min(int(args.extract_workers or 8), 16))
     timeout = args.timeout
+    no_proxy = bool(args.no_proxy)
 
     from m3u8_downloader.extractor import (
         DeepModeUnavailableError,
@@ -380,6 +389,7 @@ def _run_from_page(args) -> None:
             timeout=timeout,
             estimate=estimate,
             max_workers=max_workers,
+            no_proxy=no_proxy,
         )
     except DeepModeUnavailableError as e:
         print(f"错误: {e}")
@@ -415,7 +425,7 @@ def _run_from_page(args) -> None:
             return
 
     selected = [(i, candidates[i - 1]) for i in indices]
-    _download_many(selected, args)
+    _download_many(selected, args, no_proxy=no_proxy)
 
 
 if __name__ == "__main__":

@@ -201,6 +201,13 @@ class M3U8DownloaderGUI:
         if not is_deep_mode_available():
             deep_check.configure(state=tk.DISABLED)
 
+        # 直连/跳过代理复选框
+        self._no_proxy_var = tk.BooleanVar(value=False)
+        no_proxy_check = ttk.Checkbutton(
+            param_frame, text="直连/跳过代理", variable=self._no_proxy_var
+        )
+        no_proxy_check.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+
         row += 1
 
         # ===== 网页提取结果区 =====
@@ -506,6 +513,7 @@ class M3U8DownloaderGUI:
                 use_ffmpeg=use_ffmpeg,
                 max_retries=retries,
                 timeout=timeout,
+                no_proxy=self._no_proxy_var.get(),
             )
 
             # 使用自定义的下载流程以便回调进度
@@ -818,21 +826,25 @@ class M3U8DownloaderGUI:
         self._clear_tree()
         self._log("正在抽取网页中的 m3u8 ...")
         deep = bool(self._deep_var.get())
+        no_proxy = bool(self._no_proxy_var.get())
         threading.Thread(
-            target=self._extract_worker, args=(page_url, deep), daemon=True
+            target=self._extract_worker, args=(page_url, deep, no_proxy), daemon=True
         ).start()
 
-    def _extract_worker(self, page_url: str, deep: bool) -> None:
+    def _extract_worker(self, page_url: str, deep: bool, no_proxy: bool = False) -> None:
         """抽取工作线程：调用 extractor，通过队列回传候选/完成消息.
 
         Args:
             page_url: 网页绝对 URL.
             deep: 是否深度模式.
+            no_proxy: 为 True 时所有请求直连、跳过系统代理环境变量.
         """
         from m3u8_downloader.extractor import extract_m3u8_from_page
 
         try:
-            candidates = extract_m3u8_from_page(page_url, deep=deep, estimate=True)
+            candidates = extract_m3u8_from_page(
+                page_url, deep=deep, estimate=True, no_proxy=no_proxy
+            )
             self._queue_message("candidates", candidates)
             self._queue_message("extract_done", "success")
         except Exception as e:  # 任何异常都不让 GUI 崩溃

@@ -167,6 +167,21 @@ def test_is_deep_mode_available_returns_bool():
     assert isinstance(extractor.is_deep_mode_available(), bool)
 
 
+# ===== _ensure_playwright_browsers_path =====
+def test_ensure_playwright_browsers_path(monkeypatch):
+    # 用户未设置时，应被设为默认浏览器目录
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+    extractor._ensure_playwright_browsers_path()
+    assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == r"F:\gadgets\playwright-browsers"
+
+
+def test_ensure_playwright_browsers_path_respects_existing(monkeypatch):
+    # 用户已设置时，应尊重原值、不覆盖
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "/custom/path")
+    extractor._ensure_playwright_browsers_path()
+    assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == "/custom/path"
+
+
 # ===== bs4 缺失时降级仍能抽到 =====
 def test_extract_works_without_bs4():
     with mock.patch.object(extractor, "BeautifulSoup", None), mock.patch(

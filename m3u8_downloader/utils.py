@@ -146,12 +146,17 @@ class ProgressBar:
 def create_http_session(
     timeout: int = 30,
     headers: Optional[dict] = None,
+    no_proxy: bool = False,
 ) -> requests.Session:
     """创建带默认配置的 HTTP Session.
 
     Args:
         timeout: 默认超时时间（秒）.
         headers: 自定义请求头.
+        no_proxy: 为 True 时显式绕过系统代理环境变量（HTTPS_PROXY / HTTP_PROXY /
+            ALL_PROXY 等），所有请求走直连。内部通过给 session 设置
+            ``proxies = {"http": None, "https": None}`` 实现，
+            不会改动全局 ``os.environ``。
 
     Returns:
         配置好的 requests.Session.
@@ -172,6 +177,9 @@ def create_http_session(
     session.headers.update(default_headers)
     # 将 timeout 绑定到 session 上供后续使用
     session._default_timeout = timeout  # type: ignore[attr-defined]
+    # 直连/跳过代理：显式把代理置为 None，覆盖环境代理变量
+    if no_proxy:
+        session.proxies = {"http": None, "https": None}
     return session
 
 
