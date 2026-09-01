@@ -150,17 +150,58 @@ def test_extract_from_page_no_candidate_raises():
             extract_m3u8_from_page(PAGE_URL, estimate=False, deep=False)
 
 
-# ===== 深度模式：playwright 缺失降级 =====
-def test_deep_extract_without_playwright_raises():
+# ===== 深度模式：playwright 缺失 / 不可导入时回退子进程 =====
+def test_deep_extract_without_playwright_falls_back_to_subprocess(monkeypatch):
+    """playwright 可 import 但 sync_api 导入失败 → 必须回退子进程，不得直接抛错.
+
+    回归背景：GUI 启动时调用 is_deep_mode_available() 会注入系统 site-packages，
+    使 _playwright_importable() 此后恒为 True；早期实现据此判定「用户环境损坏」
+    并抛「依赖不完整」，导致 GUI 永远走不到子进程（CLI 却正常）。
+    """
     fake_pw = types.ModuleType("playwright")
     fake_sync = types.ModuleType("playwright.sync_api")
     # 故意不提供 sync_playwright 属性 -> from ... import 触发 ImportError
+
+    sentinel = {"called": False}
+
+    def _fake_subprocess(url, timeout=30, wait_ms=5000):
+        sentinel["called"] = True
+        sentinel["url"] = url
+        return []
+
+    monkeypatch.setattr(extractor, "_deep_extract_subprocess", _fake_subprocess)
     with mock.patch.dict(
         sys.modules,
         {"playwright": fake_pw, "playwright.sync_api": fake_sync},
     ):
-        with pytest.raises(DeepModeUnavailableError):
-            extractor._deep_extract(PAGE_URL)
+        extractor._deep_extract(PAGE_URL)
+
+    assert sentinel["called"] is True, "应回退到子进程路线，而不是直接抛错"
+    assert sentinel["url"] == PAGE_URL
+
+
+def test_deep_extract_inprocess_used_when_sync_api_importable(monkeypatch):
+    """sync_api 可正常导入 → 走进程内路线（最快路径不被回退逻辑破坏）."""
+    called = {"subprocess": False, "inprocess": False}
+
+    def _fake_inprocess(sync_playwright, url, timeout, wait_ms):
+        called["inprocess"] = True
+        return []
+
+    monkeypatch.setattr(extractor, "_deep_extract_inprocess", _fake_inprocess)
+    monkeypatch.setattr(
+        extractor,
+        "_deep_extract_subprocess",
+        lambda url, timeout=30, wait_ms=5000: (
+            called.__setitem__("subprocess", True) or []
+        ),
+    )
+    monkeypatch.setattr(extractor, "_try_import_sync_playwright", lambda: object())
+
+    extractor._deep_extract(PAGE_URL)
+
+    assert called["inprocess"] is True
+    assert called["subprocess"] is False
 
 
 def test_is_deep_mode_available_returns_bool():

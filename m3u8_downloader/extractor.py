@@ -6,16 +6,26 @@
 * 仅抛出 :class:`ExtractError` 的子类（``PageFetchError`` /
   ``DeepModeUnavailableError`` / ``NoCandidateFoundError``），入口层按类型给提示；
 * 大小估算委托给 :mod:`m3u8_downloader.estimator`（纯计算层，永不抛异常）；
-* 静态解析用 HTML + 递归外链 JS 两条路；深度模式（无头浏览器）只留接口，
-  ``playwright`` 缺失时优雅降级为 ``DeepModeUnavailableError``。
+* 静态解析用 HTML + 递归外链 JS 两条路；
+* 深度模式（无头浏览器）有两条路线，按顺序择优（见 :func:`_deep_extract`）：
+
+  1. **进程内**：本进程能 import playwright（源码运行 / 冻结 EXE 注入成功）；
+  2. **子进程**：冻结 EXE 内 import 外部 site-packages 不可行，改为调用系统
+     Python 执行随包分发的 :mod:`m3u8_downloader.deep_worker`，解析其 JSON 输出。
+
+  两条路都不可用时才抛 ``DeepModeUnavailableError``（提示按原因区分，见
+  :func:`_explain_worker_failure`）。
 """
 
+import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Callable, List, Optional
 from urllib.parse import urljoin
 
 import requests
@@ -38,7 +48,7 @@ def _ensure_playwright_browsers_path() -> None:
     playwright 会在启动时自动读取该环境变量定位浏览器内核。
     """
     if "PLAYWRIGHT_BROWSERS_PATH" not in os.environ:
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = r"F:\gadgets\playwright-browsers"
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = DEFAULT_PLAYWRIGHT_BROWSERS_PATH
 
 
 # 冻结 EXE 未打包 playwright（build.spec 显式 exclude，避免体积爆炸）。
@@ -123,6 +133,14 @@ def _inject_system_playwright() -> bool:
 MAX_JS_FILES: int = 10                      # 最多递归下载的外链 JS 数量
 MAX_PAGE_BYTES: int = 5 * 1024 * 1024       # 网页/JS 单文件读取上限，防超大文件
 DEEP_WAIT_MS: int = 5000                    # 深度模式等待网络静默毫秒数
+DEEP_SUBPROCESS_MARGIN_SEC: int = 60        # 子进程路线在导航超时外预留的启动/收尾时间
+DEEP_WORKER_NAME: str = "deep_worker.py"    # 随包分发的深度模式子进程脚本
+DEFAULT_PLAYWRIGHT_BROWSERS_PATH: str = r"F:\gadgets\playwright-browsers"
+MAX_CANDIDATE_URL_LEN: int = 512            # 候选 URL 长度上限，防超长脏串
+# 兜底：显式列出的系统 Python 解释器（无任何命令能解析到时使用）
+_FALLBACK_PYTHON_PATHS = (
+    r"C:\Users\cheyn\AppData\Local\Programs\Python\Python313\python.exe",
+)
 
 # 外链 JS 黑名单关键词：这些基本不可能是播放器逻辑，直接跳过
 _JS_BLACKLIST = ("jquery", "analytics", "gtag", "polyfill")
@@ -225,6 +243,32 @@ class Candidate:
 
 
 # ===== 内部工具 =====
+def _is_m3u8_like(raw: str) -> Optional[str]:
+    """判定一段文本是否为「疑似 m3u8 URL」，并清洗掉尾部垃圾字符.
+
+    这是**单一事实来源**：静态扫描（:func:`_scan_text`）与深度模式子进程
+    （``m3u8_downloader/deep_worker.py``）共用同一套判定，避免两份逻辑漂移。
+    worker 在冻结 EXE 中无法 import 本模块时，会回退到自己的内联副本，
+    由 ``tests/test_deep_worker.py`` 的一致性断言兜底。
+
+    Args:
+        raw: 原始命中串（可能带反斜杠 / 句点 / 逗号 / 叹号等尾部垃圾）.
+
+    Returns:
+        清洗后的原始串；不是疑似 m3u8 URL（空、不含 ``.m3u8``、超长）时返回 None.
+    """
+    if not raw:
+        return None
+    # 剥掉尾部非法字符：正则/网络响应可能把反斜杠、句点、逗号等尾部垃圾一起捕获，
+    # 不清理会导致请求非法路径、服务端断 TLS（SSLEOFError）。
+    cleaned = raw.strip().rstrip("\\.,;:!")
+    if ".m3u8" not in cleaned.lower():
+        return None
+    if len(cleaned) > MAX_CANDIDATE_URL_LEN:
+        return None
+    return cleaned
+
+
 def _normalize_candidate_url(raw: str, base_url: str) -> Optional[str]:
     """把原始命中（可能是相对/协议相对路径）归一化为绝对 http(s) URL.
 
@@ -235,16 +279,10 @@ def _normalize_candidate_url(raw: str, base_url: str) -> Optional[str]:
     Returns:
         归一化后的绝对 URL；不符合规范（非 http/https、超长、非 .m3u8）返回 None.
     """
-    if not raw:
+    cleaned = _is_m3u8_like(raw)
+    if cleaned is None:
         return None
-    raw = raw.strip()
-    # 剥掉尾部非法字符（正则可能把反斜杠/句点/逗号等尾部垃圾一起捕获进 URL）
-    raw = raw.rstrip("\\.,;:!")
-    if ".m3u8" not in raw.lower():
-        return None
-    if len(raw) > 512:
-        return None
-    joined = urljoin(base_url, raw) if base_url else raw
+    joined = urljoin(base_url, cleaned) if base_url else cleaned
     if not joined.startswith(("http://", "https://")):
         return None
     return joined
@@ -551,18 +589,248 @@ def _fetch_page(url: str, session: requests.Session, timeout: int) -> str:
     return text
 
 
-def is_deep_mode_available() -> bool:
-    """检测深度模式依赖（playwright）是否可用.
+def _find_system_python() -> Optional[List[str]]:
+    """定位可用于运行深度模式 worker 的系统 Python 解释器.
 
-    冻结 EXE 未打包 playwright 时，会尝试从本机系统 Python 注入（见
-    :func:`_inject_system_playwright`），因此本机已装 playwright 即返回 True。
+    冻结 EXE 内无法 import 外部 site-packages，深度模式改为**调用系统 Python
+    执行随包分发的** ``deep_worker.py``。按顺序探测：
+
+    1. ``py -3.13``（Windows Python 启动器，首选）；
+    2. ``python``（PATH 上的默认解释器）；
+    3. ``LOCALAPPDATA\\Programs\\Python\\Python3xx\\python.exe`` 与显式兜底路径。
 
     Returns:
-        True 表示 ``import playwright`` 成功（含冻结 EXE 从本机注入的情况）.
+        可直接交给 :func:`subprocess.run` 的命令列表（解释器路径 + 版本参数）；
+        一个可用解释器都找不到时返回 None.
     """
+    py = shutil.which("py") or shutil.which("py.exe")
+    if py and os.path.isfile(py):
+        return [py, "-3.13"]
+
+    python = shutil.which("python") or shutil.which("python.exe")
+    if python and os.path.isfile(python):
+        return [python]
+
+    candidates: List[str] = list(_FALLBACK_PYTHON_PATHS)
+    local_appdata = os.environ.get("LOCALAPPDATA", "")
+    if local_appdata:
+        base = os.path.join(local_appdata, "Programs", "Python")
+        for name in ("Python313", "Python312", "Python311"):
+            candidates.append(os.path.join(base, name, "python.exe"))
+
+    for path in candidates:
+        if os.path.isfile(path):
+            return [path]
+    return None
+
+
+def _deep_worker_path() -> str:
+    """深度模式 worker 脚本的绝对路径.
+
+    * 冻结 EXE：``sys._MEIPASS\\m3u8_downloader\\deep_worker.py``（build.spec 随包分发）；
+    * 源码运行：与 ``extractor.py`` 同目录.
+
+    Returns:
+        worker 脚本绝对路径（不保证存在）.
+    """
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        return os.path.join(meipass, "m3u8_downloader", DEEP_WORKER_NAME)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), DEEP_WORKER_NAME)
+
+
+def _deep_worker_available() -> bool:
+    """子进程路线是否具备条件.
+
+    只做**文件存在性**探测（解释器 + worker 脚本），既不 import playwright
+    也不启动子进程，因此可以安全地被 GUI 在启动时调用。
+
+    Returns:
+        True 表示可以用系统 Python 跑 worker 完成深度模式.
+    """
+    return _find_system_python() is not None and os.path.isfile(_deep_worker_path())
+
+
+def _try_import_sync_playwright() -> Optional[Callable]:
+    """尝试导入 ``playwright.sync_api.sync_playwright``.
+
+    Returns:
+        成功返回该可调用对象；失败（未安装 / 依赖不全）返回 None.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+
+        return sync_playwright
+    except Exception:
+        return None
+
+
+def _explain_worker_failure(returncode: int, stderr: str) -> str:
+    """把 worker 的非 0 退出码翻译成可操作的人话提示.
+
+    Args:
+        returncode: worker 进程退出码.
+        stderr: worker 的 stderr 全文.
+
+    Returns:
+        面向用户的中文提示（含具体修复命令）.
+    """
+    low = (stderr or "").lower()
+    # 注意顺序：浏览器内核缺失的报错原文里含 "playwright install chromium"，
+    # 必须先于「缺 playwright 模块」判定，否则会被误判为缺模块。
+    if (
+        "executable doesn't exist" in low
+        or "playwright install" in low
+        or ("executable" in low and "browsertype.launch" in low)
+    ):
+        return (
+            "深度模式缺少 Chromium 浏览器内核，请在系统 Python 中执行：\n"
+            "  playwright install chromium"
+        )
+    if (
+        "modulenotfounderror" in low
+        or "no module named" in low
+        or "缺少 playwright" in (stderr or "")
+    ):
+        return (
+            "深度模式需要 playwright，请在系统 Python 中执行：\n"
+            "  pip install playwright"
+        )
+    tail = (stderr or "").strip().splitlines()[-5:]
+    detail = "\n".join(tail) if tail else f"（退出码 {returncode}，无错误输出）"
+    return f"深度模式执行失败（退出码 {returncode}）：\n{detail}"
+
+
+def _deep_extract_subprocess(
+    url: str, timeout: int = 30, wait_ms: int = DEEP_WAIT_MS
+) -> List[Candidate]:
+    """子进程路线深度抽取：调用系统 Python 执行随包分发的 ``deep_worker.py``.
+
+    冻结 EXE 内无法 import 外部 site-packages，这是**冻结环境下唯一可用**的
+    深度模式路线；worker 用 playwright 抓页面并把 URL 列表以 JSON 打印到
+    stdout，本函数解析后构造候选。
+
+    Args:
+        url: 页面绝对 URL.
+        timeout: 导航超时秒数.
+        wait_ms: 网络静默后额外等待毫秒数.
+
+    Returns:
+        去重后的候选列表（可能为空）.
+
+    Raises:
+        DeepModeUnavailableError: 无可用解释器 / worker 缺失 / worker 失败 / 输出无法解析.
+    """
+    python_cmd = _find_system_python()
+    if not python_cmd:
+        raise DeepModeUnavailableError(
+            "深度模式需要一个系统 Python 来运行内置抓取脚本，但未找到可用解释器。\n"
+            "请安装 Python（或确保 py -3.13 / python 在 PATH 中）后重试。"
+        )
+
+    worker = _deep_worker_path()
+    if not os.path.isfile(worker):
+        raise DeepModeUnavailableError(
+            f"深度模式抓取脚本缺失：{worker}\n"
+            "安装包可能已损坏，请重新下载安装本程序。"
+        )
+
+    # 浏览器目录：尊重用户自定义环境变量，未设置时用本机默认目录（setdefault 语义）
+    _ensure_playwright_browsers_path()
+    cmd: List[str] = list(python_cmd) + [
+        worker,
+        "--url", url,
+        "--timeout", str(int(timeout)),
+        "--wait-ms", str(int(wait_ms)),
+        "--browsers-path", os.environ["PLAYWRIGHT_BROWSERS_PATH"],
+    ]
+    total_timeout = int(timeout) + int(wait_ms) // 1000 + DEEP_SUBPROCESS_MARGIN_SEC
+
+    # 强制子进程以 UTF-8 输出：中文 Windows 下子进程 stderr 默认用 GBK 写，
+    # 而本侧按 UTF-8 解码会导致中文报错乱码（与 worker 内的 reconfigure 双保险）。
+    env = os.environ.copy()
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=total_timeout,
+            env=env,
+            creationflags=(
+                getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            ),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DeepModeUnavailableError(
+            f"深度模式执行超时（超过 {total_timeout} 秒仍未返回），"
+            "可增大 --timeout 或检查网络连通性。"
+        ) from exc
+    except OSError as exc:
+        raise DeepModeUnavailableError(
+            f"无法启动系统 Python（{' '.join(python_cmd)}）：{exc}"
+        ) from exc
+
+    if proc.returncode != 0:
+        raise DeepModeUnavailableError(
+            _explain_worker_failure(int(proc.returncode), proc.stderr or "")
+        )
+
+    raw_urls: List[str] = []
+    try:
+        parsed = json.loads((proc.stdout or "").strip() or "[]")
+        if isinstance(parsed, list):
+            raw_urls = [str(item) for item in parsed]
+    except (ValueError, TypeError) as exc:
+        raise DeepModeUnavailableError(
+            "深度模式抓取脚本返回了无法解析的输出（可能版本不匹配）：\n"
+            f"{(proc.stdout or '')[:200]}"
+        ) from exc
+
+    candidates: List[Candidate] = []
+    for raw in raw_urls:
+        normalized = _normalize_candidate_url(raw, url)
+        if normalized:
+            candidates.append(_new_candidate(normalized, "deep"))
+    return _dedupe(candidates)
+
+
+# 深度模式可用性缓存（GUI 启动时会调用，避免重复探测）
+_DEEP_AVAILABLE_CACHE: Optional[bool] = None
+
+
+def is_deep_mode_available() -> bool:
+    """检测深度模式是否可用.
+
+    两条路线任一可用即为可用：
+
+    1. **进程内**：``import playwright`` 成功（源码运行 / 冻结 EXE 从系统 Python
+       注入成功，见 :func:`_inject_system_playwright`）；
+    2. **子进程**：能找到系统 Python 解释器且随包的 ``deep_worker.py`` 存在
+       （冻结 EXE 的典型路线，见 :func:`_deep_extract_subprocess`）。
+
+    结果会被缓存：探测只做文件存在性检查，不 import playwright、不跑子进程。
+
+    Returns:
+        True 表示深度模式可用.
+    """
+    global _DEEP_AVAILABLE_CACHE
+    if _DEEP_AVAILABLE_CACHE is not None:
+        return _DEEP_AVAILABLE_CACHE
+
+    result = False
     if _playwright_importable():
-        return True
-    return _inject_system_playwright()
+        result = True
+    elif _deep_worker_available():
+        result = True
+    else:
+        # 最后才尝试注入（会起一次轻量子进程探测 site-packages 路径）
+        result = _inject_system_playwright()
+    _DEEP_AVAILABLE_CACHE = result
+    return result
 
 
 def _on_response(resp, collected: List[str]) -> None:
@@ -575,15 +843,13 @@ def _on_response(resp, collected: List[str]) -> None:
         collected.append(req_url)
 
 
-def _deep_extract(
-    url: str, timeout: int = 30, wait_ms: int = DEEP_WAIT_MS
+def _deep_extract_inprocess(
+    sync_playwright, url: str, timeout: int = 30, wait_ms: int = DEEP_WAIT_MS
 ) -> List[Candidate]:
-    """无头浏览器深度抽取（playwright）.
-
-    v1 实现要点：监听网络响应中的 .m3u8，并扫描最终 DOM 文本；
-    playwright 缺失或浏览器启动失败时转成 :class:`DeepModeUnavailableError`。
+    """进程内深度抽取（当前进程已能 import playwright 时走这条路，最快）.
 
     Args:
+        sync_playwright: ``playwright.sync_api.sync_playwright`` 可调用对象.
         url: 页面绝对 URL.
         timeout: 导航超时秒数.
         wait_ms: 网络静默后额外等待毫秒数.
@@ -592,31 +858,28 @@ def _deep_extract(
         去重后的候选列表（可能为空）.
 
     Raises:
-        DeepModeUnavailableError: playwright 缺失或浏览器执行失败.
+        DeepModeUnavailableError: 浏览器启动或页面执行失败.
     """
-    # 冻结 EXE 未打包 playwright：先尝试从本机系统 Python 注入，复用用户已装 playwright
-    _inject_system_playwright()
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError as exc:
-        raise DeepModeUnavailableError(
-            "深度模式需要 playwright，请先执行：\n"
-            "  pip install playwright\n"
-            "  playwright install chromium"
-        ) from exc
-
     # 深度模式启动前确保浏览器目录已设置（尊重用户自定义的环境变量）
     _ensure_playwright_browsers_path()
 
     candidates: List[Candidate] = []
     collected: List[str] = []
+    content = ""
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
             page.on("response", lambda resp: _on_response(resp, collected))
-            page.goto(url, wait_until="networkidle", timeout=timeout * 1000)
-            page.wait_for_timeout(wait_ms)
+            # 用 domcontentloaded 而非 networkidle：视频站有持续的广告/埋点/
+            # 视频分片请求，网络永不静默，networkidle 会一直等到超时。
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            # DOM 就绪后轮询等待，收集到即提前返回，未收集到才用满预算。
+            remaining = int(wait_ms)
+            while remaining > 0 and not collected:
+                step = min(500, remaining)
+                page.wait_for_timeout(step)
+                remaining -= step
             content = page.content()
             browser.close()
     except Exception as exc:
@@ -633,6 +896,50 @@ def _deep_extract(
     # 最终 DOM 文本也扫一遍（兼容脚本里拼接、但未走网络请求的情形）
     candidates.extend(_scan_text(content, url, "deep"))
     return _dedupe(candidates)
+
+
+def _deep_extract(
+    url: str, timeout: int = 30, wait_ms: int = DEEP_WAIT_MS
+) -> List[Candidate]:
+    """无头浏览器深度抽取（playwright）.
+
+    两条路线，按顺序择优：
+
+    1. **进程内**：当前进程能 import playwright（源码运行 / 冻结 EXE 从系统
+       Python 注入成功）时直接跑，最快；
+    2. **子进程**：进程内不可用时（**冻结 EXE 的典型情况**），调用系统 Python
+       执行随包分发的 ``deep_worker.py``，解析其 JSON 输出。
+
+    Args:
+        url: 页面绝对 URL.
+        timeout: 导航超时秒数.
+        wait_ms: 网络静默后额外等待毫秒数.
+
+    Returns:
+        去重后的候选列表（可能为空）.
+
+    Raises:
+        DeepModeUnavailableError: playwright 缺失、浏览器未安装或执行失败.
+    """
+    if not _playwright_importable():
+        # 冻结 EXE 未打包 playwright：先尝试从本机系统 Python 注入，复用用户已装 playwright
+        _inject_system_playwright()
+
+    sync_playwright = _try_import_sync_playwright()
+    if sync_playwright is not None:
+        return _deep_extract_inprocess(sync_playwright, url, timeout, wait_ms)
+
+    # 进程内跑不通 → 无条件回退子进程。
+    #
+    # 注意：早期实现会在「playwright 可 import 但 sync_api 导入失败」时直接抛
+    # 「依赖不完整」而拒绝回退，这在 GUI 中是致命的——GUI 启动时调用
+    # is_deep_mode_available() 已经执行过 _inject_system_playwright()，使
+    # _playwright_importable() 此后恒为 True，于是 GUI 永远走不到子进程；
+    # 而 CLI 是干净进程、未被注入副作用污染，反而能正常回退（表现为 CLI 可用、
+    # GUI 不可用）。子进程路线用的同样是系统 Python，不存在"掩盖问题"的顾虑。
+    # 无条件回退子进程。「无可用解释器」「worker 缺失」等具体诊断由
+    # _deep_extract_subprocess 给出，比在此处笼统提示更精确。
+    return _deep_extract_subprocess(url, timeout, wait_ms)
 
 
 # ===== 门面 =====

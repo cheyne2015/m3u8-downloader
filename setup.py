@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="m3u8-downloader",
-    version="1.2.0",
+    version="1.4.0",
     description="本地 m3u8 下载工具，支持 TS 片段并发下载与 MP4 转换",
     author="m3u8-downloader",
     python_requires=">=3.8",
