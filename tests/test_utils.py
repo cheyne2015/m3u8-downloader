@@ -1,5 +1,7 @@
 """Tests for m3u8_downloader.utils module."""
 
+import os
+
 import pytest
 
 from m3u8_downloader.utils import (
@@ -9,6 +11,7 @@ from m3u8_downloader.utils import (
     ProgressBar,
     create_http_session,
     is_ffmpeg_available,
+    normalize_mp4_filename,
 )
 
 
@@ -173,3 +176,58 @@ class TestIsFfmpegAvailable:
     def test_returns_bool(self):
         result = is_ffmpeg_available()
         assert isinstance(result, bool)
+
+
+# ---------------------------------------------------------------------------
+# normalize_mp4_filename
+# ---------------------------------------------------------------------------
+
+class TestNormalizeMp4Filename:
+    """Tests for normalize_mp4_filename (保证后缀为单一 .mp4)."""
+
+    def test_plain_name_gets_mp4(self):
+        assert normalize_mp4_filename("video") == "video.mp4"
+
+    def test_already_mp4_unchanged(self):
+        assert normalize_mp4_filename("video.mp4") == "video.mp4"
+
+    def test_double_mp4_collapsed(self):
+        # 杜绝 .mp4.mp4
+        assert normalize_mp4_filename("video.mp4.mp4") == "video.mp4"
+
+    def test_triple_mp4_collapsed(self):
+        assert normalize_mp4_filename("a.b.mp4.mp4.mp4") == "a.b.mp4"
+
+    def test_other_extension_becomes_mp4(self):
+        assert normalize_mp4_filename("clip.avi") == "clip.avi.mp4"
+
+    def test_uppercase_mp4_normalized(self):
+        assert normalize_mp4_filename("VID.MP4") == "VID.mp4"
+
+    def test_mixed_case_mp4_mp4_collapsed(self):
+        assert normalize_mp4_filename("x.Mp4.MP4") == "x.mp4"
+
+    def test_dots_in_name_preserved(self):
+        # 中间的点保留，只在末尾追加一个 .mp4
+        assert normalize_mp4_filename("my.clip.v2") == "my.clip.v2.mp4"
+
+    def test_only_dot_mp4_falls_back_to_default(self):
+        # 用户只填了 ".mp4" -> 主名为空，回退为 output.mp4
+        assert normalize_mp4_filename(".mp4") == "output.mp4"
+
+    def test_empty_string_falls_back_to_default(self):
+        assert normalize_mp4_filename("") == "output.mp4"
+
+    def test_chinese_name(self):
+        assert normalize_mp4_filename("我的视频") == "我的视频.mp4"
+
+    def test_full_path_normalized(self):
+        assert normalize_mp4_filename("C:/Movies/clip.mkv") == os.path.join("C:/Movies", "clip.mkv.mp4")
+
+    def test_full_path_double_mp4_collapsed(self):
+        assert normalize_mp4_filename("/tmp/out.mp4.mp4") == os.path.join("/tmp", "out.mp4")
+
+    def test_idempotent(self):
+        # 对结果再次规范化应保持不变
+        once = normalize_mp4_filename("a.mp4.mp4")
+        assert normalize_mp4_filename(once) == once == "a.mp4"

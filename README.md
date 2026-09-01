@@ -106,13 +106,10 @@ m3u8-dl --help
 ### 启动方式
 
 ```bash
-# 方式一：命令行参数
-m3u8-dl --gui
+# 方式一：双击 m3u8-dl.exe（GUI 版，无黑窗口，文件名固定）
+m3u8-dl.exe
 
-# 方式二：直接启动 GUI 入口
-m3u8-dl-gui
-
-# 方式三：模块方式运行
+# 方式二：Python 模块方式（需 pip install -e .）
 python -m m3u8_downloader --gui
 ```
 
@@ -140,7 +137,7 @@ python -m m3u8_downloader --gui
 双击运行 `build.bat`，脚本将自动：
 1. 检查并安装 PyInstaller
 2. 安装项目依赖
-3. 执行打包生成 `dist/m3u8-dl.exe`
+3. 执行打包生成 `dist/m3u8-dl.exe`（GUI）与 `dist/m3u8-dl-cli.exe`（CLI）
 
 ### 手动打包
 
@@ -152,21 +149,21 @@ pip install pyinstaller
 pyinstaller build.spec --clean --noconfirm
 ```
 
-打包完成后，`dist/` 目录下生成 `m3u8-dl.exe`（命令行版）与 `m3u8-dl-gui.exe`（图形界面版，无控制台窗口）。
+打包完成后，`dist/` 目录下生成 `m3u8-dl.exe`（图形界面版，无控制台窗口）与 `m3u8-dl-cli.exe`（命令行版，保留控制台进度输出）。
 
 ### EXE 使用
 
 打包后 `dist/` 目录会生成两个 EXE：
 
-- **`m3u8-dl-gui.exe`** —— 图形界面版，**双击即可运行且不会弹出黑色终端窗口**（推荐日常 GUI 使用）。
-- **`m3u8-dl.exe`** —— 命令行版，保留控制台窗口用于实时进度输出（适合在终端/批处理中调用）。
+- **`m3u8-dl.exe`** —— 图形界面版，**双击即可运行且不会弹出黑色终端窗口**（文件名固定为 m3u8-dl.exe，推荐日常 GUI 使用）。
+- **`m3u8-dl-cli.exe`** —— 命令行版，保留控制台窗口用于实时进度输出（适合在终端/批处理中调用）。
 
 ```bash
-# GUI 模式（双击 m3u8-dl-gui.exe，无黑窗口）
-m3u8-dl-gui.exe
+# GUI 模式（双击 m3u8-dl.exe，无黑窗口）
+m3u8-dl.exe
 
 # 命令行模式（保留进度输出）
-m3u8-dl.exe https://example.com/index.m3u8 -o video.mp4
+m3u8-dl-cli.exe https://example.com/index.m3u8 -o video.mp4
 ```
 
 ## 项目结构

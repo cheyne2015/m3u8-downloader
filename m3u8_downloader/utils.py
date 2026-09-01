@@ -1,5 +1,6 @@
 """工具函数模块：进度条、文件大小格式化、时间格式化、HTTP Session 管理."""
 
+import os
 import sys
 import time
 from typing import Optional
@@ -192,3 +193,35 @@ def is_ffmpeg_available() -> bool:
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return False
+
+
+def normalize_mp4_filename(name: str) -> str:
+    """将任意文件名规范化为以且仅以一个 .mp4 结尾的路径.
+
+    无论用户填写什么（无后缀 / 其他后缀 / 多个 .mp4），最终都保证：
+    1. 文件后缀为 .mp4；
+    2. 不会出现 .mp4.mp4 之类的重复后缀（字符串末尾只有唯一的 .mp4）。
+
+    规则：
+    - 反复去掉末尾的 .mp4（大小写不敏感），杜绝 ``a.mp4.mp4``；
+    - 若去除后主名为空（如用户只填了 ``.mp4``），回退为 ``output``；
+    - 直接追加单个 .mp4 后缀（保留文件名中间的点，如 ``a.b`` -> ``a.b.mp4``）。
+
+    Args:
+        name: 用户提供的文件名或完整路径。
+
+    Returns:
+        规范化后的文件名或完整路径（目录 + 单一的 .mp4 后缀）。
+    """
+    directory, base = os.path.split(name)
+    # 1. 去掉末尾任意数量的 .mp4（大小写不敏感），杜绝 .mp4.mp4
+    base_lower = base.lower()
+    while base_lower.endswith(".mp4"):
+        base = base[:-4]
+        base_lower = base.lower()
+    # 2. 兜底：主名为空时给默认名
+    if not base:
+        base = "output"
+    # 3. 追加单个 .mp4 后缀（保留文件名中间的点）
+    base = base + ".mp4"
+    return os.path.join(directory, base) if directory else base

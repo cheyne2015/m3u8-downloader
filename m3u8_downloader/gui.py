@@ -19,6 +19,7 @@ from m3u8_downloader.utils import (
     format_file_size,
     format_speed,
     is_ffmpeg_available,
+    normalize_mp4_filename,
 )
 
 # GUI 偏好配置文件路径：存放"记住保存位置"等界面偏好
@@ -353,6 +354,11 @@ class M3U8DownloaderGUI:
             return
 
         output_path = os.path.join(save_dir, filename)
+        # 规范化：保证最终保存文件后缀为 .mp4 且仅有一个 .mp4
+        output_path = normalize_mp4_filename(output_path)
+        # 把规范化后的名称回填到输入框，让用户清楚实际会保存成什么文件
+        self._filename_var.set(os.path.basename(output_path))
+        self._log(f"保存文件: {output_path}")
 
         workers = self._workers_var.get()
         retries = self._retries_var.get()

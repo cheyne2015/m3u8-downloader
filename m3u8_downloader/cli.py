@@ -5,7 +5,7 @@ import sys
 
 from m3u8_downloader import __version__
 from m3u8_downloader.downloader import M3U8Downloader
-from m3u8_downloader.utils import is_ffmpeg_available
+from m3u8_downloader.utils import is_ffmpeg_available, normalize_mp4_filename
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -76,6 +76,9 @@ def main() -> None:
     """CLI 主入口函数."""
     parser = create_parser()
     args = parser.parse_args()
+
+    # 规范化输出文件名：保证后缀为 .mp4 且只有一个 .mp4，避免 .mp4.mp4 等异常后缀
+    args.output = normalize_mp4_filename(args.output)
 
     # 如果指定了 --gui，启动 GUI
     if args.gui:
