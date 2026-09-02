@@ -894,8 +894,8 @@ class TestWebExtractAndMultiDownload:
         gui_instance._tree.get_children.return_value = []
         gui_instance._tree.selection.return_value = ["i1", "i2"]
         gui_instance._tree.item.side_effect = lambda item, *a, **k: {
-            "i1": (1, "≈ 1MB", "01:00", "2 Mbps", "media", "A", "https://x/a.m3u8"),
-            "i2": (2, "≈ 2MB", "02:00", "4 Mbps", "media", "B", "https://x/b.m3u8"),
+            "i1": (1, "≈ 1MB", "01:00", "2 Mbps", "media", "普通", "A", "https://x/a.m3u8"),
+            "i2": (2, "≈ 2MB", "02:00", "4 Mbps", "media", "普通", "B", "https://x/b.m3u8"),
         }[item]
         with patch.object(gui_instance, "_run_next_job") as rnr:
             gui_instance._download_selected()
@@ -932,7 +932,7 @@ class TestWebExtractAndMultiDownload:
     def test_double_click_fills_url(self, gui_instance):
         gui_instance._tree.selection.return_value = ["i1"]
         gui_instance._tree.item.return_value = (
-            1, "x", "x", "x", "media", "A", "https://x/a.m3u8"
+            1, "x", "x", "x", "media", "普通", "A", "https://x/a.m3u8"
         )
         gui_instance._on_tree_double_click(None)
         gui_instance._url_var.set.assert_called_with("https://x/a.m3u8")

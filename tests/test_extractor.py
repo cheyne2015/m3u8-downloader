@@ -364,3 +364,28 @@ def test_deep_mode_proxy_forwarded_when_no_proxy_false(monkeypatch):
             PAGE_URL, deep=True, no_proxy=False, proxy="127.0.0.1:7897"
         )
     assert called["proxy"] == "127.0.0.1:7897"
+
+
+class TestCandidateDeepMode:
+    """Candidate.deep / display_mode 应与 source 保持一致，且不因 _dedupe 改写 source 而脱节."""
+
+    def test_deep_true_when_source_deep(self):
+        c = Candidate(url="https://x/a.m3u8", source="deep")
+        assert c.deep is True
+        assert c.display_mode() == "深度"
+
+    def test_deep_false_for_static_sources(self):
+        for src in ("html", "inline_js", "js"):
+            c = Candidate(url="https://x/a.m3u8", source=src)
+            assert c.deep is False
+            assert c.display_mode() == "普通"
+
+    def test_deep_follows_source_after_dedupe_override(self):
+        """_dedupe 会把 existing.source 改写为更可信来源（如 "deep"）。
+        deep 作为属性应随之变化，而非停留在构造时的 False。"""
+        existing = Candidate(url="https://x/a.m3u8", source="html")
+        assert existing.deep is False
+        # 模拟 _dedupe 在 deep 来源更可信时的 source 覆盖
+        existing.source = "deep"
+        assert existing.deep is True
+        assert existing.display_mode() == "深度"

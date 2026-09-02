@@ -240,6 +240,7 @@ class M3U8DownloaderGUI:
         self._tree.heading("duration", text="时长")
         self._tree.heading("bandwidth", text="码率")
         self._tree.heading("type", text="类型")
+        self._tree.heading("mode", text="模式")
         self._tree.heading("title", text="标题")
         self._tree.heading("url", text="链接")
         self._tree.column("no", width=40, anchor=tk.CENTER)
@@ -247,6 +248,7 @@ class M3U8DownloaderGUI:
         self._tree.column("duration", width=90)
         self._tree.column("bandwidth", width=100)
         self._tree.column("type", width=70)
+        self._tree.column("mode", width=70, anchor=tk.CENTER)
         self._tree.column("title", width=120)
         self._tree.column("url", width=300, stretch=True)
 
@@ -874,6 +876,10 @@ class M3U8DownloaderGUI:
             fetch_page_title,
         )
 
+        mode_label = "深度模式（无头浏览器）" if deep else "普通模式（HTML + JS 静态扫描）"
+        self._extract_mode = "深度" if deep else "普通"
+        self._queue_message("log", f"提取模式：{mode_label}")
+
         try:
             candidates = extract_m3u8_from_page(
                 page_url,
@@ -928,6 +934,7 @@ class M3U8DownloaderGUI:
                     c.display_duration(),
                     c.display_bandwidth(),
                     ctype,
+                    c.display_mode(),
                     title,
                     c.url,
                 ),
@@ -963,7 +970,8 @@ class M3U8DownloaderGUI:
         )
         if result == "success":
             self._status_var.set("抽取完成")
-            self._log("以上大小均为估计值")
+            mode = getattr(self, "_extract_mode", "普通")
+            self._log(f"本次提取模式：{mode}；以上大小均为估计值")
         elif result == "empty":
             self._status_var.set("未找到候选")
             self._log("提示：未从该网页找到任何 m3u8，可尝试勾选「深度模式」")
@@ -976,8 +984,8 @@ class M3U8DownloaderGUI:
         if not sel:
             return
         values = self._tree.item(sel[0], "values")
-        if values and len(values) > 6:
-            url = values[6]
+        if values and len(values) > 7:
+            url = values[7]
             self._url_var.set(url)
             self._log(f"已填入链接：{url}")
 
@@ -997,9 +1005,9 @@ class M3U8DownloaderGUI:
         jobs = []
         for item in sel:
             values = self._tree.item(item, "values")
-            if not values or len(values) < 7:
+            if not values or len(values) < 8:
                 continue
-            url = values[6]
+            url = values[7]
             orig_no = int(values[0])
             output_name = build_output_path(base_name, orig_no, total)
             output_path = normalize_mp4_filename(

@@ -185,6 +185,7 @@ class Candidate:
         url: 绝对 URL（已 ``urljoin`` 归一化，保留 query）.
         title: 来自 label/title/<a> 文本/文件名，可空.
         source: ``"html"`` | ``"inline_js"`` | ``"js"`` | ``"deep"``.
+        deep: 是否来自深度模式（无头浏览器）抽取；等价于 ``source == "deep"``.
         is_master: 是否是 master playlist（多码率列表）.
         estimated_size: 估计字节数；``0`` 表示未知.
         duration: 时长（秒）；``0.0`` 表示未知.
@@ -240,6 +241,18 @@ class Candidate:
         if self.bandwidth > 0:
             return f"{self.bandwidth / 1e6:.1f} Mbps"
         return "-"
+
+    @property
+    def deep(self) -> bool:
+        """是否来自深度模式（无头浏览器）抽取；等价于 ``source == "deep"``.
+
+        作为属性而非字段，避免与 :func:`_dedupe` 在合并时改写 ``source`` 后脱节。
+        """
+        return self.source == "deep"
+
+    def display_mode(self) -> str:
+        """展示用提取模式标签：``深度``（无头浏览器）/ ``普通``（HTML + JS 静态扫描）."""
+        return "深度" if self.deep else "普通"
 
 
 # ===== 内部工具 =====

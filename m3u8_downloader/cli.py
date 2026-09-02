@@ -220,7 +220,7 @@ def _print_candidates(candidates: list) -> None:
     Args:
         candidates: :func:`extract_m3u8_from_page` 返回的候选列表.
     """
-    print(f"{'[序号]':<7}{'估计大小':<12}{'时长':<10}{'码率':<10}{'类型':<8}{'来源':<10} 标题/URL")
+    print(f"{'[序号]':<7}{'估计大小':<12}{'时长':<10}{'码率':<10}{'类型':<8}{'模式':<6}{'来源':<10} 标题/URL")
     for i, c in enumerate(candidates, 1):
         ctype = "master" if c.is_master else ("-" if not c.reachable else "media")
         title = c.title or "-"
@@ -232,6 +232,7 @@ def _print_candidates(candidates: list) -> None:
             + f"{c.display_duration():<10}"
             + f"{c.display_bandwidth():<10}"
             + f"{ctype:<8}"
+            + f"{c.display_mode():<6}"
             + f"{c.source:<10} "
             + title
         )
@@ -412,6 +413,9 @@ def _run_from_page(args) -> None:
     except KeyboardInterrupt:
         print("\n用户中断")
         sys.exit(130)
+
+    mode_label = "深度模式（无头浏览器）" if deep else "普通模式（HTML + JS 静态扫描）"
+    print(f"\n[提取模式] {mode_label}")
 
     _print_candidates(candidates)
 
