@@ -121,7 +121,24 @@ def _log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
-def _collect_urls(url: str, timeout: int, wait_ms: int) -> List[str]:
+def _normalize_proxy(proxy: str) -> str:
+    """把用户输入的代理地址规范化为带协议头的完整 URL（与父进程一致）.
+
+    Args:
+        proxy: 用户输入的代理字符串（可能缺协议头）.
+
+    Returns:
+        带协议头的代理 URL；空输入返回空字符串.
+    """
+    proxy = (proxy or "").strip()
+    if not proxy:
+        return ""
+    if proxy.startswith(("http://", "https://", "socks5://", "socks5h://", "socks4://")):
+        return proxy
+    return "http://" + proxy
+
+
+def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "") -> List[str]:
     """用 playwright 打开页面并收集 m3u8 链接.
 
     收集两条路：网络响应中的 URL + 最终 DOM 文本扫描（兼容脚本拼接但
@@ -131,6 +148,7 @@ def _collect_urls(url: str, timeout: int, wait_ms: int) -> List[str]:
         url: 页面绝对 URL.
         timeout: 导航超时秒数.
         wait_ms: 网络静默后额外等待毫秒数.
+        proxy: 手动代理地址（如 ``127.0.0.1:7897``）；非空时浏览器走代理.
 
     Returns:
         去重后的原始 URL 字符串列表（可能含相对路径，交给父进程 urljoin 归一化）.
@@ -159,7 +177,10 @@ def _collect_urls(url: str, timeout: int, wait_ms: int) -> List[str]:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         try:
-            page = browser.new_page()
+            proxy_cfg: dict = {}
+            if proxy:
+                proxy_cfg["proxy"] = {"server": _normalize_proxy(proxy)}
+            page = browser.new_page(**proxy_cfg)
 
             def _on_response(resp) -> None:
                 try:
@@ -209,6 +230,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="playwright 浏览器目录（缺省时用环境变量，再缺省用 F:\\gadgets\\playwright-browsers）",
     )
+    parser.add_argument(
+        "--proxy",
+        default="",
+        help="手动代理地址（如 127.0.0.1:7897），浏览器走代理访问页面",
+    )
     return parser
 
 
@@ -237,8 +263,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", args.browsers_path)
     os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", DEFAULT_BROWSERS_PATH)
 
+    # 代理地址：命令行 --proxy > 环境变量 M3U8_DEEP_PROXY（父进程透传）；
+    # 父进程在 no_proxy 时已不会设置该环境变量，故此处无需再判 no_proxy。
+    proxy = (args.proxy or os.environ.get("M3U8_DEEP_PROXY", "")).strip()
+
     try:
-        urls = _collect_urls(args.url, args.timeout, args.wait_ms)
+        urls = _collect_urls(args.url, args.timeout, args.wait_ms, proxy=proxy)
     except ImportError as exc:
         _log(f"[deep_worker] 缺少 playwright：{exc}")
         _log("[deep_worker] 请在系统 Python 中执行：pip install playwright")

@@ -298,3 +298,13 @@ def test_is_deep_mode_available_uses_cache(monkeypatch):
     monkeypatch.setattr(extractor, "_playwright_importable", _count)
     assert extractor.is_deep_mode_available() is True
     assert calls["n"] == 0, "缓存命中时不应再探测"
+
+
+def test_worker_normalize_proxy():
+    """deep_worker._normalize_proxy 与 extractor 侧协议头补全逻辑一致."""
+    assert deep_worker._normalize_proxy("127.0.0.1:7897") == "http://127.0.0.1:7897"
+    assert deep_worker._normalize_proxy("socks5://127.0.0.1:7897") == "socks5://127.0.0.1:7897"
+    assert deep_worker._normalize_proxy("") == ""
+    # 与 extractor.utils 的实现保持一致（两侧不能漂移）
+    from m3u8_downloader.utils import _normalize_proxy as ext_norm
+    assert deep_worker._normalize_proxy("1.2.3.4:8080") == ext_norm("1.2.3.4:8080")

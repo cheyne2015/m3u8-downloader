@@ -166,9 +166,10 @@ def test_deep_extract_without_playwright_falls_back_to_subprocess(monkeypatch):
 
     sentinel = {"called": False}
 
-    def _fake_subprocess(url, timeout=30, wait_ms=5000):
+    def _fake_subprocess(url, timeout=30, wait_ms=5000, proxy=None):
         sentinel["called"] = True
         sentinel["url"] = url
+        sentinel["proxy"] = proxy
         return []
 
     monkeypatch.setattr(extractor, "_deep_extract_subprocess", _fake_subprocess)
@@ -186,15 +187,16 @@ def test_deep_extract_inprocess_used_when_sync_api_importable(monkeypatch):
     """sync_api 可正常导入 → 走进程内路线（最快路径不被回退逻辑破坏）."""
     called = {"subprocess": False, "inprocess": False}
 
-    def _fake_inprocess(sync_playwright, url, timeout, wait_ms):
+    def _fake_inprocess(sync_playwright, url, timeout, wait_ms, proxy=None):
         called["inprocess"] = True
+        called["proxy"] = proxy
         return []
 
     monkeypatch.setattr(extractor, "_deep_extract_inprocess", _fake_inprocess)
     monkeypatch.setattr(
         extractor,
         "_deep_extract_subprocess",
-        lambda url, timeout=30, wait_ms=5000: (
+        lambda url, timeout=30, wait_ms=5000, proxy=None: (
             called.__setitem__("subprocess", True) or []
         ),
     )
@@ -306,3 +308,59 @@ def test_fetch_page_title_handles_fetch_error(monkeypatch):
 
     monkeypatch.setattr(extractor, "_fetch_page", _boom)
     assert fetch_page_title("https://example.com/x") == ""
+
+
+# ===== 深度模式代理透传 =====
+def test_deep_subprocess_receives_proxy_env(monkeypatch):
+    """深度模式子进程路线应把手动代理写入 M3U8_DEEP_PROXY 环境变量."""
+    import subprocess as _sp
+
+    captured = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["env"] = kwargs.get("env", {})
+        fake = _sp.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+        return fake
+
+    monkeypatch.setattr(extractor, "_find_system_python", lambda: ["py", "-3.13"])
+    monkeypatch.setattr(extractor, "_deep_worker_path", lambda: "worker.py")
+    monkeypatch.setattr(extractor.os.path, "isfile", lambda p: True)
+    monkeypatch.setattr(extractor, "_ensure_playwright_browsers_path", lambda: None)
+    monkeypatch.setattr(extractor.subprocess, "run", _fake_run)
+
+    extractor._deep_extract_subprocess(PAGE_URL, proxy="127.0.0.1:7897")
+    assert captured["env"].get("M3U8_DEEP_PROXY") == "http://127.0.0.1:7897"
+
+
+def test_deep_mode_proxy_nulled_when_no_proxy(monkeypatch):
+    """no_proxy=True 时，深度模式不应拿到代理（直连优先）."""
+    called = {"proxy": "UNSET"}
+
+    def _fake_deep(url, timeout=30, wait_ms=5000, proxy=None):
+        called["proxy"] = proxy
+        return [extractor._new_candidate(url, "deep")]
+
+    monkeypatch.setattr(extractor, "_deep_extract", _fake_deep)
+    with mock.patch.object(extractor, "is_deep_mode_available", return_value=True), \
+         mock.patch.object(extractor, "_fetch_page", side_effect=Exception("unreachable")):
+        extractor.extract_m3u8_from_page(
+            PAGE_URL, deep=True, no_proxy=True, proxy="127.0.0.1:7897"
+        )
+    assert called["proxy"] is None, "no_proxy 时深度模式应拿不到代理"
+
+
+def test_deep_mode_proxy_forwarded_when_no_proxy_false(monkeypatch):
+    """no_proxy=False 且有代理时，深度模式应收到代理."""
+    called = {"proxy": "UNSET"}
+
+    def _fake_deep(url, timeout=30, wait_ms=5000, proxy=None):
+        called["proxy"] = proxy
+        return [extractor._new_candidate(url, "deep")]
+
+    monkeypatch.setattr(extractor, "_deep_extract", _fake_deep)
+    with mock.patch.object(extractor, "is_deep_mode_available", return_value=True), \
+         mock.patch.object(extractor, "_fetch_page", side_effect=Exception("unreachable")):
+        extractor.extract_m3u8_from_page(
+            PAGE_URL, deep=True, no_proxy=False, proxy="127.0.0.1:7897"
+        )
+    assert called["proxy"] == "127.0.0.1:7897"

@@ -768,7 +768,7 @@ def _explain_worker_failure(returncode: int, stderr: str) -> str:
 
 
 def _deep_extract_subprocess(
-    url: str, timeout: int = 30, wait_ms: int = DEEP_WAIT_MS
+    url: str, timeout: int = 30, wait_ms: int = DEEP_WAIT_MS, proxy: Optional[str] = None
 ) -> List[Candidate]:
     """子进程路线深度抽取：调用系统 Python 执行随包分发的 ``deep_worker.py``.
 
@@ -816,6 +816,9 @@ def _deep_extract_subprocess(
     # 而本侧按 UTF-8 解码会导致中文报错乱码（与 worker 内的 reconfigure 双保险）。
     env = os.environ.copy()
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    # 把手动代理透传给子进程 worker（no_proxy 时 extract_m3u8_from_page 已置 proxy=None）
+    if proxy:
+        env["M3U8_DEEP_PROXY"] = utils._normalize_proxy(proxy)
 
     try:
         proc = subprocess.run(
@@ -910,7 +913,7 @@ def _on_response(resp, collected: List[str]) -> None:
 
 
 def _deep_extract_inprocess(
-    sync_playwright, url: str, timeout: int = 30, wait_ms: int = DEEP_WAIT_MS
+    sync_playwright, url: str, timeout: int = 30, wait_ms: int = DEEP_WAIT_MS, proxy: Optional[str] = None
 ) -> List[Candidate]:
     """进程内深度抽取（当前进程已能 import playwright 时走这条路，最快）.
 
@@ -919,6 +922,7 @@ def _deep_extract_inprocess(
         url: 页面绝对 URL.
         timeout: 导航超时秒数.
         wait_ms: 网络静默后额外等待毫秒数.
+        proxy: 手动代理地址（如 ``127.0.0.1:7897``）；非空时浏览器走代理.
 
     Returns:
         去重后的候选列表（可能为空）.
@@ -935,7 +939,10 @@ def _deep_extract_inprocess(
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+            proxy_cfg: dict = {}
+            if proxy:
+                proxy_cfg["proxy"] = {"server": utils._normalize_proxy(proxy)}
+            page = browser.new_page(**proxy_cfg)
             page.on("response", lambda resp: _on_response(resp, collected))
             # 用 domcontentloaded 而非 networkidle：视频站有持续的广告/埋点/
             # 视频分片请求，网络永不静默，networkidle 会一直等到超时。
@@ -965,7 +972,7 @@ def _deep_extract_inprocess(
 
 
 def _deep_extract(
-    url: str, timeout: int = 30, wait_ms: int = DEEP_WAIT_MS
+    url: str, timeout: int = 30, wait_ms: int = DEEP_WAIT_MS, proxy: Optional[str] = None
 ) -> List[Candidate]:
     """无头浏览器深度抽取（playwright）.
 
@@ -993,7 +1000,7 @@ def _deep_extract(
 
     sync_playwright = _try_import_sync_playwright()
     if sync_playwright is not None:
-        return _deep_extract_inprocess(sync_playwright, url, timeout, wait_ms)
+        return _deep_extract_inprocess(sync_playwright, url, timeout, wait_ms, proxy=proxy)
 
     # 进程内跑不通 → 无条件回退子进程。
     #
@@ -1005,7 +1012,7 @@ def _deep_extract(
     # GUI 不可用）。子进程路线用的同样是系统 Python，不存在"掩盖问题"的顾虑。
     # 无条件回退子进程。「无可用解释器」「worker 缺失」等具体诊断由
     # _deep_extract_subprocess 给出，比在此处笼统提示更精确。
-    return _deep_extract_subprocess(url, timeout, wait_ms)
+    return _deep_extract_subprocess(url, timeout, wait_ms, proxy=proxy)
 
 
 # ===== 门面 =====
@@ -1054,7 +1061,9 @@ def extract_m3u8_from_page(
 
     try:
         if deep:
-            candidates = _deep_extract(page_url, timeout)
+            # no_proxy 优先：直连时不给 headless 浏览器传代理
+            proxy_for_deep = None if no_proxy else proxy
+            candidates = _deep_extract(page_url, timeout, proxy=proxy_for_deep)
         else:
             try:
                 html = _fetch_page(page_url, session, timeout)
