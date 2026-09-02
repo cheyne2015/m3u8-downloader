@@ -205,14 +205,14 @@ class M3U8DownloaderGUI:
         if not is_deep_mode_available():
             deep_check.configure(state=tk.DISABLED)
 
-        # 直连/跳过代理复选框
-        self._no_proxy_var = tk.BooleanVar(value=False)
-        no_proxy_check = ttk.Checkbutton(
-            param_frame, text="直连/跳过代理", variable=self._no_proxy_var
+        # 使用代理复选框（默认不勾选 = 直连，不通过任何代理）
+        self._use_proxy_var = tk.BooleanVar(value=False)
+        use_proxy_check = ttk.Checkbutton(
+            param_frame, text="使用代理", variable=self._use_proxy_var
         )
-        no_proxy_check.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+        use_proxy_check.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
 
-        # 手动代理地址（本地 clash 默认 127.0.0.1:7897）
+        # 手动代理地址（本地 clash 默认 127.0.0.1:7897；勾选「使用代理」后生效）
         ttk.Label(param_frame, text="代理地址：").grid(
             row=5, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0)
         )
@@ -316,7 +316,7 @@ class M3U8DownloaderGUI:
         main_frame.rowconfigure(row, weight=1)
 
         self._log_text = tk.Text(
-            log_frame, height=10, wrap=tk.WORD, state=tk.DISABLED, font=("Consolas", 9)
+            log_frame, height=18, wrap=tk.WORD, state=tk.DISABLED, font=("Consolas", 9)
         )
         log_scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self._log_text.yview)
         self._log_text.configure(yscrollcommand=log_scrollbar.set)
@@ -493,6 +493,16 @@ class M3U8DownloaderGUI:
             self._log("正在停止下载...")
             self._status_var.set("正在停止...")
 
+    def _resolve_proxy(self) -> "tuple[str, bool]":
+        """根据 UI 解析代理配置.
+
+        默认直连（未勾选「使用代理」）：返回 ``("", True)`` —— 不使用任何代理，
+        且跳过系统代理环境变量。勾选「使用代理」后返回用户输入的代理地址。
+        """
+        if not self._use_proxy_var.get():
+            return "", True
+        return self._proxy_var.get().strip(), False
+
     def _download_worker(
         self,
         url: str,
@@ -526,7 +536,8 @@ class M3U8DownloaderGUI:
 
             self._queue_message("log", f"正在解析 m3u8: {url}")
 
-            # 创建下载器实例
+            # 创建下载器实例（默认直连；勾选「使用代理」才走代理）
+            proxy, no_proxy = self._resolve_proxy()
             downloader = M3U8Downloader(
                 url=url,
                 output=output_path,
@@ -535,7 +546,7 @@ class M3U8DownloaderGUI:
                 use_ffmpeg=use_ffmpeg,
                 max_retries=retries,
                 timeout=timeout,
-                no_proxy=self._no_proxy_var.get(),
+                no_proxy=no_proxy,
                 proxy=proxy,
             )
 
@@ -852,8 +863,7 @@ class M3U8DownloaderGUI:
         self._clear_tree()
         self._log("正在抽取网页中的 m3u8 ...")
         deep = bool(self._deep_var.get())
-        no_proxy = bool(self._no_proxy_var.get())
-        proxy = self._proxy_var.get().strip()
+        proxy, no_proxy = self._resolve_proxy()
         threading.Thread(
             target=self._extract_worker,
             args=(page_url, deep, no_proxy, proxy),
@@ -1038,7 +1048,6 @@ class M3U8DownloaderGUI:
         timeout = self._timeout_var.get()
         use_ffmpeg = self._use_ffmpeg_var.get()
         tmp_dir = self._tmpdir_var.get().strip()
-        proxy = self._proxy_var.get().strip()
 
         self._downloading = True
         self._stop_flag.clear()
@@ -1047,7 +1056,7 @@ class M3U8DownloaderGUI:
 
         self._download_thread = threading.Thread(
             target=self._download_worker,
-            args=(url, output_path, workers, retries, timeout, use_ffmpeg, tmp_dir, proxy),
+            args=(url, output_path, workers, retries, timeout, use_ffmpeg, tmp_dir),
             daemon=True,
         )
         self._download_thread.start()
@@ -1063,4 +1072,6 @@ def run_gui() -> None:
     except Exception:
         pass
     _app = M3U8DownloaderGUI(root)
+    root.geometry("920x680")
+    root.minsize(720, 560)
     root.mainloop()
