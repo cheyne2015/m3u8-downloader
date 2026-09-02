@@ -230,7 +230,7 @@ class M3U8DownloaderGUI:
 
         self._tree = ttk.Treeview(
             extract_frame,
-            columns=("no", "size", "duration", "bandwidth", "type", "title", "url"),
+            columns=("no", "size", "duration", "bandwidth", "type", "mode", "title", "url"),
             show="headings",
             selectmode="extended",
             height=8,
