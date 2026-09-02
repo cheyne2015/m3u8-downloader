@@ -35,3 +35,6 @@ Desktop.ini
 
 build.log
 _run_build.py
+
+# 开发产物归档（EXE 压缩包 / 历史 / 回滚备份，仅本地留存，不进版本库）
+m3u8-archives/
