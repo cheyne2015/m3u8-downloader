@@ -213,6 +213,46 @@ def _normalize_proxy(proxy: str) -> str:
     return "http://" + proxy
 
 
+# Windows 文件名保留字符（非法，不能出现在文件名中）
+_INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
+
+
+def sanitize_filename_component(name: str, max_component_len: int = 180) -> str:
+    """清洗单个文件名片段中的 Windows 非法字符并限制长度.
+
+    仅针对「文件名主体」使用，不要传入含目录分隔符的完整路径。
+    - 将保留字符 ``< > : " / \\ | ? *`` 替换为下划线 ``_``；
+    - 删除控制字符（``ord(ch) < 32``）；
+    - 去除首尾空格与结尾的句点（Windows 不允许文件/目录名以 ``.`` 或空格结尾）；
+    - 超过 ``max_component_len`` 时截断（并再次清理结尾的 ``.``/空格），
+      为完整路径预留目录与 ``.mp4`` 后缀空间，避免超出 MAX_PATH(260)。
+
+    Args:
+        name: 待清洗的文件名片段（不含目录）。
+        max_component_len: 文件名主体最大长度，默认 180。
+
+    Returns:
+        清洗后的安全文件名片段；若清洗后为空则返回 ``"output"``。
+    """
+    if not name:
+        return "output"
+    cleaned_chars = []
+    for ch in name:
+        if ch in _INVALID_FILENAME_CHARS:
+            cleaned_chars.append("_")
+        elif ord(ch) < 32:
+            # 跳过控制字符
+            continue
+        else:
+            cleaned_chars.append(ch)
+    cleaned = "".join(cleaned_chars).strip().rstrip(".")
+    if not cleaned:
+        return "output"
+    if len(cleaned) > max_component_len:
+        cleaned = cleaned[:max_component_len].rstrip(". ")
+    return cleaned
+
+
 def extract_title_segment(title: str) -> str:
     """从网页标题截取「第一个 '-' 之前的段落」作为输出文件名基底.
 
@@ -243,7 +283,9 @@ def extract_title_segment(title: str) -> str:
         seg = text.split("-")[0].strip()
     else:
         seg = text
-    return seg
+    if not seg:
+        return ""
+    return sanitize_filename_component(seg)
 
 
 def is_ffmpeg_available() -> bool:
@@ -293,6 +335,8 @@ def normalize_mp4_filename(name: str) -> str:
     # 2. 兜底：主名为空时给默认名
     if not base:
         base = "output"
+    # 2.5 清洗 Windows 非法文件名字符并限制长度（如网页标题自带的 '|' '?' 等）
+    base = sanitize_filename_component(base)
     # 3. 追加单个 .mp4 后缀（保留文件名中间的点）
     base = base + ".mp4"
     return os.path.join(directory, base) if directory else base
@@ -348,6 +392,7 @@ def build_output_path(base_output: str, index: int, total: int) -> str:
         base_lower = base.lower()
     if not base:
         base = "output"
+    base = sanitize_filename_component(base)
     base = f"{base}_{index}"
     base = base + ".mp4"
     return os.path.join(directory, base) if directory else base

@@ -13,6 +13,8 @@ from m3u8_downloader.utils import (
     is_ffmpeg_available,
     normalize_mp4_filename,
     extract_title_segment,
+    build_output_path,
+    sanitize_filename_component,
     _normalize_proxy,
 )
 
@@ -240,6 +242,22 @@ class TestNormalizeMp4Filename:
     def test_full_path_double_mp4_collapsed(self):
         assert normalize_mp4_filename("/tmp/out.mp4.mp4") == os.path.join("/tmp", "out.mp4")
 
+    def test_invalid_windows_chars_sanitized(self):
+        # 复现真实失败：网页标题含 ASCII '|' 会导致 [Errno 22] Invalid argument
+        # 注：全角 '？'(U+FF1F) 在 Windows 文件名中合法，应予以保留
+        raw = "空悲切是什么梗？福利姬小鱼自慰 竟被瓜友玩原神救己不救她认出 结果竟是亲姐姐！ | 51吃瓜网"
+        out = normalize_mp4_filename(raw)
+        assert out == "空悲切是什么梗？福利姬小鱼自慰 竟被瓜友玩原神救己不救她认出 结果竟是亲姐姐！ _ 51吃瓜网.mp4"
+        # 不得残留任何非法字符（仅 ASCII 保留集需要清洗）
+        for ch in '<|>:"/\\|?*':
+            assert ch not in out
+
+    def test_invalid_chars_in_path_base_sanitized(self):
+        out = normalize_mp4_filename("F:/迅雷下载/a|b?.mp4")
+        assert out == os.path.join("F:/迅雷下载", "a_b_.mp4")
+        for ch in '<|>:"/\\|?*':
+            assert ch not in os.path.basename(out)
+
     def test_idempotent(self):
         # 对结果再次规范化应保持不变
         once = normalize_mp4_filename("a.mp4.mp4")
@@ -270,6 +288,73 @@ class TestExtractTitleSegment:
     def test_empty_returns_empty(self):
         assert extract_title_segment("") == ""
         assert extract_title_segment("   ") == ""
+
+
+# ---------------------------------------------------------------------------
+# sanitize_filename_component
+# ---------------------------------------------------------------------------
+
+class TestSanitizeFilenameComponent:
+    """Tests for sanitize_filename_component (清洗 Windows 非法文件名字符)."""
+
+    def test_invalid_chars_replaced_with_underscore(self):
+        cleaned = sanitize_filename_component('a<b>c:d"e/f\\g|h?i*j')
+        assert cleaned == "a_b_c_d_e_f_g_h_i_j"
+
+    def test_no_invalid_chars_unchanged(self):
+        assert sanitize_filename_component("my_clip.v2") == "my_clip.v2"
+
+    def test_trailing_dot_and_space_stripped(self):
+        assert sanitize_filename_component("name. ") == "name"
+        assert sanitize_filename_component("name...") == "name"
+
+    def test_control_chars_removed(self):
+        cleaned = sanitize_filename_component("a\tb\nc")
+        assert cleaned == "abc"
+
+    def test_empty_falls_back_to_output(self):
+        assert sanitize_filename_component("") == "output"
+        assert sanitize_filename_component("   ") == "output"
+
+    def test_title_with_invalid_chars(self):
+        title = "title | x?y"
+        cleaned = sanitize_filename_component(title)
+        for ch in '<|>:"/\\|?*':
+            assert ch not in cleaned
+
+
+# ---------------------------------------------------------------------------
+# extract_title_segment (invalid chars)
+# ---------------------------------------------------------------------------
+
+class TestExtractTitleSegmentInvalidChars:
+    """extract_title_segment 应同时清洗标题中的非法文件名字符."""
+
+    def test_title_with_pipe_sanitized(self):
+        title = "full title | sub - suffix"
+        assert extract_title_segment(title) == "full title _ sub"
+
+    def test_title_with_question_sanitized(self):
+        title = "what is X? why - site"
+        assert extract_title_segment(title) == "what is X_ why"
+
+
+# ---------------------------------------------------------------------------
+# build_output_path (invalid chars in multi-target)
+# ---------------------------------------------------------------------------
+
+class TestBuildOutputPathInvalidChars:
+    """多目标下载时 build_output_path 也应清洗非法字符."""
+
+    def test_invalid_chars_sanitized_multi(self):
+        out = build_output_path("a|b?.mp4", 1, 3)
+        assert out == "a_b__1.mp4"
+        for ch in '<|>:"/\\|?*':
+            assert ch not in out
+
+    def test_invalid_chars_sanitized_single(self):
+        out = build_output_path("a|b?.mp4", 1, 1)
+        assert out == "a_b_.mp4"
 
 
 # ---------------------------------------------------------------------------
