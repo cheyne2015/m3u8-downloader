@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from types import SimpleNamespace
 from unittest import mock
 
@@ -50,6 +51,20 @@ def _completed(returncode: int = 0, stdout: str = "", stderr: str = ""):
     """构造一个 ``subprocess.CompletedProcess``（供 mock 返回）."""
     return subprocess.CompletedProcess(args=[], returncode=returncode,
                                        stdout=stdout, stderr=stderr)
+
+
+def _fake_proc(returncode: int = 0, stdout: str = "", stderr: str = "", running: bool = False):
+    """构造一个假的 ``subprocess.Popen`` 进程对象（poll/read/terminate）."""
+    proc = SimpleNamespace()
+    proc.returncode = returncode
+    proc._running = running
+    proc.stdout = SimpleNamespace(read=lambda: stdout)
+    proc.stderr = SimpleNamespace(read=lambda: stderr)
+    proc.poll = lambda: None if proc._running else returncode
+    proc.terminate = lambda: None
+    proc.kill = lambda: None
+    proc.wait = lambda timeout=None: returncode
+    return proc
 
 
 # ===== 1. worker 与 extractor 的判定逻辑一致 =====
@@ -165,8 +180,8 @@ def test_deep_extract_subprocess_parses_json_and_normalizes(force_subprocess, mo
     ], ensure_ascii=False)
 
     with mock.patch(
-        "m3u8_downloader.extractor.subprocess.run", return_value=_completed(0, stdout)
-    ) as run_mock:
+        "m3u8_downloader.extractor.subprocess.Popen", return_value=_fake_proc(0, stdout)
+    ) as popen_mock:
         cands = extractor._deep_extract(PAGE_URL, timeout=10, wait_ms=1000)
 
     urls = [c.url for c in cands]
@@ -177,7 +192,7 @@ def test_deep_extract_subprocess_parses_json_and_normalizes(force_subprocess, mo
     assert all(c.source == "deep" for c in cands)
 
     # 命令必须传全参数，且带浏览器目录
-    cmd = run_mock.call_args[0][0]
+    cmd = popen_mock.call_args[0][0]
     assert "--url" in cmd and PAGE_URL in cmd
     assert "--timeout" in cmd and "10" in cmd
     assert "--wait-ms" in cmd and "1000" in cmd
@@ -192,8 +207,8 @@ def test_deep_extract_subprocess_error_playwright_missing(force_subprocess, monk
         "[deep_worker] 请在系统 Python 中执行：pip install playwright\n"
     )
     with mock.patch(
-        "m3u8_downloader.extractor.subprocess.run",
-        return_value=_completed(2, "", stderr),
+        "m3u8_downloader.extractor.subprocess.Popen",
+        return_value=_fake_proc(2, "", stderr),
     ):
         with pytest.raises(DeepModeUnavailableError) as excinfo:
             extractor._deep_extract(PAGE_URL)
@@ -211,8 +226,8 @@ def test_deep_extract_subprocess_error_browser_missing(force_subprocess, monkeyp
         "Please run: playwright install chromium\n"
     )
     with mock.patch(
-        "m3u8_downloader.extractor.subprocess.run",
-        return_value=_completed(3, "", stderr),
+        "m3u8_downloader.extractor.subprocess.Popen",
+        return_value=_fake_proc(3, "", stderr),
     ):
         with pytest.raises(DeepModeUnavailableError) as excinfo:
             extractor._deep_extract(PAGE_URL)
@@ -226,8 +241,8 @@ def test_deep_extract_subprocess_error_unknown_keeps_stderr(force_subprocess, mo
     monkeypatch.setattr(extractor, "_find_system_python", lambda: [r"C:\py\python.exe"])
     stderr = "line1\nline2\n[deep_worker] 执行失败：net::ERR_NAME_NOT_RESOLVED\n"
     with mock.patch(
-        "m3u8_downloader.extractor.subprocess.run",
-        return_value=_completed(4, "", stderr),
+        "m3u8_downloader.extractor.subprocess.Popen",
+        return_value=_fake_proc(4, "", stderr),
     ):
         with pytest.raises(DeepModeUnavailableError) as excinfo:
             extractor._deep_extract(PAGE_URL)
@@ -239,21 +254,41 @@ def test_deep_extract_subprocess_error_unknown_keeps_stderr(force_subprocess, mo
 def test_deep_extract_subprocess_timeout_raises(force_subprocess, monkeypatch):
     """子进程超时 → 转成 DeepModeUnavailableError，不抛裸异常."""
     monkeypatch.setattr(extractor, "_find_system_python", lambda: [r"C:\py\python.exe"])
-    with mock.patch(
-        "m3u8_downloader.extractor.subprocess.run",
-        side_effect=subprocess.TimeoutExpired(cmd="worker", timeout=90),
-    ):
+    # Popen 返回「永不结束」的进程；time.time 第二次即超过 deadline 触发超时
+    fake = _fake_proc(0, running=True)
+    times = iter([0, 10 ** 9])
+    monkeypatch.setattr(extractor.time, "time", lambda: next(times, 10 ** 9))
+    monkeypatch.setattr(extractor.time, "sleep", lambda s: None)
+    with mock.patch("m3u8_downloader.extractor.subprocess.Popen", return_value=fake):
         with pytest.raises(DeepModeUnavailableError) as excinfo:
             extractor._deep_extract(PAGE_URL)
     assert "超时" in str(excinfo.value)
+
+
+def test_deep_extract_subprocess_stop_event_terminates(monkeypatch):
+    """stop_event 被设置 → 立即终止子进程并抛「已停止」（支持「停止提取」）."""
+    monkeypatch.setattr(extractor, "_find_system_python", lambda: [r"C:\py\python.exe"])
+    monkeypatch.setattr(extractor, "_deep_worker_path", lambda: "worker.py")
+    monkeypatch.setattr(extractor.os.path, "isfile", lambda p: True)
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", r"F:\gadgets\playwright-browsers")
+    monkeypatch.setattr(extractor, "_ensure_playwright_browsers_path", lambda: None)
+    monkeypatch.setattr(extractor.time, "sleep", lambda s: None)
+
+    fake = _fake_proc(0, running=True)  # 永不结束的进程
+    stop = threading.Event()
+    stop.set()
+    with mock.patch("m3u8_downloader.extractor.subprocess.Popen", return_value=fake):
+        with pytest.raises(DeepModeUnavailableError) as excinfo:
+            extractor._deep_extract_subprocess(PAGE_URL, stop_event=stop)
+    assert "停止" in str(excinfo.value)
 
 
 def test_deep_extract_subprocess_bad_json_raises(force_subprocess, monkeypatch):
     """stdout 不是合法 JSON → 明确提示，而非静默返回空列表."""
     monkeypatch.setattr(extractor, "_find_system_python", lambda: [r"C:\py\python.exe"])
     with mock.patch(
-        "m3u8_downloader.extractor.subprocess.run",
-        return_value=_completed(0, "<html>oops</html>"),
+        "m3u8_downloader.extractor.subprocess.Popen",
+        return_value=_fake_proc(0, "<html>oops</html>"),
     ):
         with pytest.raises(DeepModeUnavailableError) as excinfo:
             extractor._deep_extract(PAGE_URL)
@@ -348,6 +383,9 @@ def _make_fake_sync_playwright(url_schedule, vt, state):
         def content(self):
             return ""
 
+        def title(self):
+            return "测试页面标题"
+
         def close(self):
             pass
 
@@ -395,13 +433,14 @@ def test_deep_worker_collects_all_m3u8_including_late(monkeypatch):
     )
     monkeypatch.setattr(pw_api, "sync_playwright", fake)
 
-    urls = deep_worker._collect_urls(
+    urls, title = deep_worker._collect_urls(
         "https://www.example.com/play/1", timeout=30, wait_ms=6000
     )
 
     assert "https://cdn.example.com/hls/1080/index.m3u8" in urls
     assert "https://cdn.example.com/hls/720/index.m3u8" in urls, \
         "晚到的第二个 m3u8 必须被收集到"
+    assert title == "测试页面标题", "应带出页面标题"
     assert state["route_registered"] is True, "应注册安全请求拦截"
     assert "--no-sandbox" not in (state["launch_args"] or []), \
         "不应加 --no-sandbox（不可信网页需保留沙箱）"
@@ -422,13 +461,14 @@ def test_deep_extract_inprocess_collects_all_m3u8_including_late(monkeypatch):
     )
     monkeypatch.setattr(pw_api, "sync_playwright", fake)
 
-    cands = extractor._deep_extract_inprocess(
+    cands, title = extractor._deep_extract_inprocess(
         fake, "https://www.example.com/play/1", timeout=30, wait_ms=6000
     )
     urls = [c.url for c in cands]
     assert "https://cdn.example.com/hls/1080/index.m3u8" in urls
     assert "https://cdn.example.com/hls/720/index.m3u8" in urls, \
         "晚到的第二个 m3u8 必须被收集到"
+    assert title == "测试页面标题", "应带出页面标题"
     assert state["route_registered"] is True, "应注册安全请求拦截"
     assert "--no-sandbox" not in (state["launch_args"] or []), \
         "不应加 --no-sandbox（不可信网页需保留沙箱）"

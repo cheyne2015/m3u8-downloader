@@ -852,7 +852,8 @@ class TestWebExtractAndMultiDownload:
     def test_extract_worker_fills_tree_via_queue(self, gui_instance):
         cands = [Candidate(url="https://x/a.m3u8", title="A")]
         with patch(
-            "m3u8_downloader.extractor.extract_m3u8_from_page", return_value=cands
+            "m3u8_downloader.extractor.extract_m3u8_from_page_with_title",
+            return_value=(cands, "标题A"),
         ):
             gui_instance._tree.get_children.return_value = []
             gui_instance._extract_worker("https://x/page", False)
@@ -871,7 +872,7 @@ class TestWebExtractAndMultiDownload:
 
     def test_extract_worker_survives_exception(self, gui_instance):
         with patch(
-            "m3u8_downloader.extractor.extract_m3u8_from_page",
+            "m3u8_downloader.extractor.extract_m3u8_from_page_with_title",
             side_effect=RuntimeError("boom"),
         ):
             gui_instance._extract_worker("https://x/page", False)
@@ -936,3 +937,27 @@ class TestWebExtractAndMultiDownload:
         )
         gui_instance._on_tree_double_click(None)
         gui_instance._url_var.set.assert_called_with("https://x/a.m3u8")
+
+    def test_flush_pending_extract_displays_pending(self, gui_instance):
+        """下载完成后应显示挂起的预加载提取结果（候选 + 标题自动命名）."""
+        cands = [Candidate(url="https://x/b.m3u8")]
+        gui_instance._pending_extract = [(cands, "预加载标题", "预加载标题 - 完整")]
+        gui_instance._candidates = []
+        gui_instance._filename_touched = False
+        gui_instance._tree.get_children.return_value = []
+        gui_instance._flush_pending_extract()
+        assert gui_instance._pending_extract == []
+        assert gui_instance._tree.insert.called, "应填充候选列表"
+        gui_instance._filename_var.set.assert_called_with("预加载标题")
+
+    def test_resolve_output_path_collision_auto_rename(self, gui_instance, tmp_path):
+        """同名文件且选「否（自动改名）」→ 返回不冲突的新路径."""
+        import os as _os
+        existing = tmp_path / "foo.mp4"
+        existing.write_bytes(b"x")
+        with patch("m3u8_downloader.gui.messagebox.askyesnocancel", return_value=False):
+            result = gui_instance._resolve_output_path_collision(str(existing))
+        assert result is not None
+        assert result != str(existing)
+        assert not _os.path.exists(result)
+        assert result.endswith(".mp4")

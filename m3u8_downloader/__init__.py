@@ -1,3 +1,3 @@
 """m3u8-downloader: 本地 m3u8 下载工具."""
 
-__version__ = "1.4.6"
+__version__ = "1.5.0"

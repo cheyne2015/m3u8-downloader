@@ -23,10 +23,11 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 from urllib.parse import urljoin
 
 import requests
@@ -789,9 +790,28 @@ def _explain_worker_failure(returncode: int, stderr: str) -> str:
     return f"深度模式执行失败（退出码 {returncode}）：\n{detail}"
 
 
+def _terminate_process(proc) -> None:
+    """尽力终止子进程（先 terminate，超时后 kill），不抛异常."""
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
 def _deep_extract_subprocess(
-    url: str, timeout: int = 30, wait_ms: int = DEEP_WAIT_MS, proxy: Optional[str] = None
-) -> List[Candidate]:
+    url: str,
+    timeout: int = 30,
+    wait_ms: int = DEEP_WAIT_MS,
+    proxy: Optional[str] = None,
+    stop_event: Optional[threading.Event] = None,
+) -> Tuple[List[Candidate], str]:
     """子进程路线深度抽取：调用系统 Python 执行随包分发的 ``deep_worker.py``.
 
     冻结 EXE 内无法 import 外部 site-packages，这是**冻结环境下唯一可用**的
@@ -802,12 +822,16 @@ def _deep_extract_subprocess(
         url: 页面绝对 URL.
         timeout: 导航超时秒数.
         wait_ms: 网络静默后额外等待毫秒数.
+        stop_event: 可选停止信号；被设置时立即终止子进程并抛
+            :class:`DeepModeUnavailableError`（用于「停止提取」）。
 
     Returns:
-        去重后的候选列表（可能为空）.
+        ``(candidates, title)`` 元组：去重后的候选列表（可能为空）+ 页面标题
+        （由 worker 从 ``page.title()`` 带出，可能为空字符串）.
 
     Raises:
-        DeepModeUnavailableError: 无可用解释器 / worker 缺失 / worker 失败 / 输出无法解析.
+        DeepModeUnavailableError: 无可用解释器 / worker 缺失 / worker 失败 / 输出无法解析
+            / 被停止 / 超时.
     """
     python_cmd = _find_system_python()
     if not python_cmd:
@@ -843,42 +867,59 @@ def _deep_extract_subprocess(
         env["M3U8_DEEP_PROXY"] = utils._normalize_proxy(proxy)
 
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=total_timeout,
             env=env,
             creationflags=(
                 getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
             ),
         )
-    except subprocess.TimeoutExpired as exc:
-        raise DeepModeUnavailableError(
-            f"深度模式执行超时（超过 {total_timeout} 秒仍未返回），"
-            "可增大 --timeout 或检查网络连通性。"
-        ) from exc
     except OSError as exc:
         raise DeepModeUnavailableError(
             f"无法启动系统 Python（{' '.join(python_cmd)}）：{exc}"
         ) from exc
 
+    # 轮询等待进程结束，支持超时与外部停止信号（停止提取时能及时 kill 掉 worker）
+    deadline = time.time() + total_timeout
+    while proc.poll() is None:
+        if stop_event is not None and stop_event.is_set():
+            _terminate_process(proc)
+            raise DeepModeUnavailableError("深度模式已停止")
+        if time.time() > deadline:
+            _terminate_process(proc)
+            raise DeepModeUnavailableError(
+                f"深度模式执行超时（超过 {total_timeout} 秒仍未返回），"
+                "可增大 --timeout 或检查网络连通性。"
+            )
+        time.sleep(0.1)
+
+    stdout = (proc.stdout.read() if proc.stdout else "") or ""
+    stderr = (proc.stderr.read() if proc.stderr else "") or ""
+
     if proc.returncode != 0:
         raise DeepModeUnavailableError(
-            _explain_worker_failure(int(proc.returncode), proc.stderr or "")
+            _explain_worker_failure(int(proc.returncode), stderr)
         )
 
     raw_urls: List[str] = []
+    title = ""
     try:
-        parsed = json.loads((proc.stdout or "").strip() or "[]")
+        parsed = json.loads(stdout.strip() or "[]")
         if isinstance(parsed, list):
+            # 兼容旧版 worker（纯 URL 列表，无标题）
             raw_urls = [str(item) for item in parsed]
+        elif isinstance(parsed, dict):
+            raw_urls = [str(item) for item in (parsed.get("urls") or [])]
+            title = str(parsed.get("title") or "").strip()
     except (ValueError, TypeError) as exc:
         raise DeepModeUnavailableError(
             "深度模式抓取脚本返回了无法解析的输出（可能版本不匹配）：\n"
-            f"{(proc.stdout or '')[:200]}"
+            f"{stdout[:200]}"
         ) from exc
 
     candidates: List[Candidate] = []
@@ -886,7 +927,7 @@ def _deep_extract_subprocess(
         normalized = _normalize_candidate_url(raw, url)
         if normalized:
             candidates.append(_new_candidate(normalized, "deep"))
-    return _dedupe(candidates)
+    return _dedupe(candidates), title
 
 
 # 深度模式可用性缓存（GUI 启动时会调用，避免重复探测）
@@ -969,8 +1010,13 @@ def _safe_abort(route) -> None:
 
 
 def _deep_extract_inprocess(
-    sync_playwright, url: str, timeout: int = 30, wait_ms: int = DEEP_WAIT_MS, proxy: Optional[str] = None
-) -> List[Candidate]:
+    sync_playwright,
+    url: str,
+    timeout: int = 30,
+    wait_ms: int = DEEP_WAIT_MS,
+    proxy: Optional[str] = None,
+    stop_event: Optional[threading.Event] = None,
+) -> Tuple[List[Candidate], str]:
     """进程内深度抽取（当前进程已能 import playwright 时走这条路，最快）.
 
     Args:
@@ -979,9 +1025,11 @@ def _deep_extract_inprocess(
         timeout: 导航超时秒数.
         wait_ms: 网络静默后额外等待毫秒数.
         proxy: 手动代理地址（如 ``127.0.0.1:7897``）；非空时浏览器走代理.
+        stop_event: 可选停止信号；被设置时提前结束静默等待并关闭浏览器（用于「停止提取」）.
 
     Returns:
-        去重后的候选列表（可能为空）.
+        ``(candidates, title)`` 元组：去重后的候选列表（可能为空）+ 页面标题
+        （``page.title()``，可能为空字符串）.
 
     Raises:
         DeepModeUnavailableError: 浏览器启动或页面执行失败.
@@ -993,6 +1041,7 @@ def _deep_extract_inprocess(
     collected: List[str] = []
     _last_new = [time.time()]
     content = ""
+    title = ""
     try:
         with sync_playwright() as p:
             # 精简启动参数：禁用 GPU / dev-shm / 扩展 / 首次运行提示；
@@ -1032,6 +1081,8 @@ def _deep_extract_inprocess(
             deadline = time.time() + int(wait_ms) / 1000.0
             start = time.time()
             while time.time() < deadline:
+                if stop_event is not None and stop_event.is_set():
+                    break  # 被停止：提前结束静默等待
                 quiet_ms = (time.time() - _last_new[0]) * 1000
                 if (
                     collected
@@ -1047,6 +1098,10 @@ def _deep_extract_inprocess(
                 content = page.content() or ""
             except Exception:
                 content = ""
+            try:
+                title = page.title() or ""
+            except Exception:
+                title = ""
             browser.close()
     except Exception as exc:
         raise DeepModeUnavailableError(
@@ -1061,13 +1116,17 @@ def _deep_extract_inprocess(
 
     # 最终 DOM 文本也扫一遍（兼容脚本里拼接、但未走网络请求的情形）
     candidates.extend(_scan_text(content, url, "deep"))
-    return _dedupe(candidates)
+    return _dedupe(candidates), title
 
 
-def _deep_extract(
-    url: str, timeout: int = 30, wait_ms: int = DEEP_WAIT_MS, proxy: Optional[str] = None
-) -> List[Candidate]:
-    """无头浏览器深度抽取（playwright）.
+def _deep_extract_with_title(
+    url: str,
+    timeout: int = 30,
+    wait_ms: int = DEEP_WAIT_MS,
+    proxy: Optional[str] = None,
+    stop_event: Optional[threading.Event] = None,
+) -> Tuple[List[Candidate], str]:
+    """无头浏览器深度抽取（playwright），额外返回页面标题.
 
     两条路线，按顺序择优：
 
@@ -1080,9 +1139,10 @@ def _deep_extract(
         url: 页面绝对 URL.
         timeout: 导航超时秒数.
         wait_ms: 网络静默后额外等待毫秒数.
+        stop_event: 可选停止信号（用于「停止提取」），透传给底层路线.
 
     Returns:
-        去重后的候选列表（可能为空）.
+        ``(candidates, title)`` 元组：去重后的候选列表（可能为空）+ 页面标题（可能为空）.
 
     Raises:
         DeepModeUnavailableError: playwright 缺失、浏览器未安装或执行失败.
@@ -1093,7 +1153,9 @@ def _deep_extract(
 
     sync_playwright = _try_import_sync_playwright()
     if sync_playwright is not None:
-        return _deep_extract_inprocess(sync_playwright, url, timeout, wait_ms, proxy=proxy)
+        return _deep_extract_inprocess(
+            sync_playwright, url, timeout, wait_ms, proxy=proxy, stop_event=stop_event
+        )
 
     # 进程内跑不通 → 无条件回退子进程。
     #
@@ -1105,11 +1167,26 @@ def _deep_extract(
     # GUI 不可用）。子进程路线用的同样是系统 Python，不存在"掩盖问题"的顾虑。
     # 无条件回退子进程。「无可用解释器」「worker 缺失」等具体诊断由
     # _deep_extract_subprocess 给出，比在此处笼统提示更精确。
-    return _deep_extract_subprocess(url, timeout, wait_ms, proxy=proxy)
+    return _deep_extract_subprocess(url, timeout, wait_ms, proxy=proxy, stop_event=stop_event)
+
+
+def _deep_extract(
+    url: str,
+    timeout: int = 30,
+    wait_ms: int = DEEP_WAIT_MS,
+    proxy: Optional[str] = None,
+    stop_event: Optional[threading.Event] = None,
+) -> List[Candidate]:
+    """无头浏览器深度抽取（playwright），仅返回候选列表（丢弃页面标题）.
+
+    内部复用 :func:`_deep_extract_with_title`；需要标题时请直接调用后者。
+    """
+    candidates, _ = _deep_extract_with_title(url, timeout, wait_ms, proxy=proxy, stop_event=stop_event)
+    return candidates
 
 
 # ===== 门面 =====
-def extract_m3u8_from_page(
+def extract_m3u8_from_page_with_title(
     url: str,
     session: Optional[requests.Session] = None,
     deep: bool = False,
@@ -1118,8 +1195,13 @@ def extract_m3u8_from_page(
     max_workers: int = 8,
     no_proxy: bool = False,
     proxy: Optional[str] = None,
-) -> List[Candidate]:
-    """从网页抽取所有 m3u8 候选链接（可选估算大小）.
+    stop_event: Optional[threading.Event] = None,
+) -> Tuple[List[Candidate], str]:
+    """从网页抽取所有 m3u8 候选链接 + 页面标题（可选估算大小）.
+
+    与 :func:`extract_m3u8_from_page` 等价，但额外返回页面标题。标题的取得**零额外
+    请求**：深度模式来自 playwright ``page.title()``，普通模式复用已抓取的 HTML
+    解析 ``<title>``（避免二次抓取导致慢 / 拿不到）。
 
     **本函数只抛出** :class:`ExtractError` 子类；网络/解析异常会被包装为对应异常，
     绝不向外抛裸 ``requests``/``bs4`` 异常。
@@ -1134,9 +1216,11 @@ def extract_m3u8_from_page(
         no_proxy: 为 True 时所有请求直连、跳过系统代理环境变量.
         proxy: 手动指定代理地址（如 ``127.0.0.1:7897``）；与 no_proxy 互斥，
             同时传入时 no_proxy 优先（直连）。
+        stop_event: 可选停止信号（用于「停止提取」）；深度模式下被设置时终止抓取。
 
     Returns:
-        候选列表（已去重、排序：reachable 优先 → 大小降序 → url 字典序）.
+        ``(candidates, title)`` 元组：候选列表（已去重、排序：reachable 优先 →
+        大小降序 → url 字典序）+ 页面标题（可能为空字符串）.
 
     Raises:
         PageFetchError: 网页拉取失败 / 这是 m3u8 直链.
@@ -1151,18 +1235,23 @@ def extract_m3u8_from_page(
 
     page_url = utils.normalize_page_url(url)
     workers = max(1, min(int(max_workers or 1), MAX_ESTIMATE_WORKERS))
+    title = ""
 
     try:
         if deep:
             # no_proxy 优先：直连时不给 headless 浏览器传代理
             proxy_for_deep = None if no_proxy else proxy
-            candidates = _deep_extract(page_url, timeout, proxy=proxy_for_deep)
+            candidates, title = _deep_extract_with_title(
+                page_url, timeout, proxy=proxy_for_deep, stop_event=stop_event
+            )
         else:
             try:
                 html = _fetch_page(page_url, session, timeout)
             except PageFetchError:
                 raise
 
+            # 复用已抓取的 HTML 解析标题，避免二次抓取（快 + 对反爬更鲁棒）
+            title = _parse_page_title(html)
             candidates = _extract_from_html(html, page_url)
 
             # 并发下载外链 JS 并扫描
@@ -1218,10 +1307,39 @@ def extract_m3u8_from_page(
 
         # 排序：reachable 优先 → 大小降序 → url 字典序
         candidates.sort(key=lambda c: (not c.reachable, -c.estimated_size, c.url))
-        return candidates
+        return candidates, title
     finally:
         if own_session and session is not None:
             try:
                 session.close()
             except Exception:
                 pass
+
+
+def extract_m3u8_from_page(
+    url: str,
+    session: Optional[requests.Session] = None,
+    deep: bool = False,
+    timeout: int = 30,
+    estimate: bool = True,
+    max_workers: int = 8,
+    no_proxy: bool = False,
+    proxy: Optional[str] = None,
+    stop_event: Optional[threading.Event] = None,
+) -> List[Candidate]:
+    """从网页抽取所有 m3u8 候选链接（可选估算大小），仅返回候选列表.
+
+    需要标题时请改用 :func:`extract_m3u8_from_page_with_title`。
+    """
+    candidates, _ = extract_m3u8_from_page_with_title(
+        url,
+        session=session,
+        deep=deep,
+        timeout=timeout,
+        estimate=estimate,
+        max_workers=max_workers,
+        no_proxy=no_proxy,
+        proxy=proxy,
+        stop_event=stop_event,
+    )
+    return candidates

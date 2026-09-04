@@ -56,6 +56,8 @@ class M3U8DownloaderGUI:
         self._candidates: list = []
         self._pending_jobs: list = []
         self._extracting: bool = False
+        # 下载中预加载的提取结果（挂起）：[(candidates, title_seg, title), ...]
+        self._pending_extract: list = []
 
         # 构建 UI
         self._build_ui()
@@ -436,6 +438,50 @@ class M3U8DownloaderGUI:
         if selected:
             self._tmpdir_var.set(selected)
 
+    def _auto_rename_path(self, output_path: str) -> str:
+        """自动改名：``foo.mp4`` → ``foo-1.mp4`` → ``foo-2.mp4``，直到不冲突."""
+        base, ext = os.path.splitext(output_path)
+        for i in range(1, 1000):
+            candidate = f"{base}-{i}{ext}"
+            if not os.path.exists(candidate):
+                return candidate
+        # 极端情况：-1..-999 全被占，退回带时间戳的名字兜底
+        import time as _time
+        return f"{base}-{int(_time.time())}{ext}"
+
+    def _resolve_output_path_collision(self, output_path: str) -> "Optional[str]":
+        """同名文件覆盖提醒：返回最终保存路径（可能自动改名），取消时返回 None.
+
+        仅在 UI 线程调用（弹出 messagebox 阻塞询问）。
+        """
+        if not os.path.exists(output_path):
+            return output_path
+        result = messagebox.askyesnocancel(
+            "文件已存在",
+            f"保存路径已存在同名文件：\n{output_path}\n\n"
+            "「是」= 覆盖\n「否」= 自动改名（追加 -1、-2 后缀）\n「取消」= 放弃本次下载",
+        )
+        if result is None:  # 取消
+            return None
+        if result:  # 是 = 覆盖
+            return output_path
+        # 否 = 自动改名
+        return self._auto_rename_path(output_path)
+
+    def _confirm_duplicate(self, url: str) -> bool:
+        """重复链接提醒：URL 已下载过则弹窗询问是否仍要下载，返回是否继续.
+
+        仅在 UI 线程调用（弹 messagebox 阻塞询问）。
+        """
+        from m3u8_downloader.history import is_downloaded
+
+        if not is_downloaded(url):
+            return True
+        return bool(messagebox.askyesno(
+            "重复链接",
+            f"该链接已下载过：\n{url}\n\n是否仍要下载？\n「是」= 继续下载\n「否」= 跳过",
+        ))
+
     def _start_download(self) -> None:
         """点击开始下载按钮的回调."""
         # 参数校验
@@ -457,12 +503,27 @@ class M3U8DownloaderGUI:
             self._log("错误：请选择保存目录")
             return
 
+        # 重复链接提醒（已下载过则询问是否仍要下载）
+        if not self._confirm_duplicate(url):
+            self._log("已跳过重复链接")
+            return
+
         output_path = os.path.join(save_dir, filename)
         # 规范化：保证最终保存文件后缀为 .mp4 且仅有一个 .mp4
         output_path = normalize_mp4_filename(output_path)
         # 把规范化后的名称回填到输入框，让用户清楚实际会保存成什么文件
         self._filename_var.set(os.path.basename(output_path))
         self._log(f"保存文件: {output_path}")
+
+        # 同名文件覆盖提醒（覆盖 / 自动改名 / 取消）
+        output_path = self._resolve_output_path_collision(output_path)
+        if output_path is None:
+            self._log("已取消下载")
+            return
+        if os.path.basename(output_path) != self._filename_var.get():
+            # 自动改名后，回填新文件名让用户看到最终保存名
+            self._filename_var.set(os.path.basename(output_path))
+            self._log(f"已自动改名，保存文件: {output_path}")
 
         workers = self._workers_var.get()
         retries = self._retries_var.get()
@@ -489,10 +550,13 @@ class M3U8DownloaderGUI:
         self._download_thread.start()
 
     def _stop_download(self) -> None:
-        """点击停止下载按钮的回调."""
-        if self._downloading:
+        """点击停止按钮的回调：下载或提取进行中都能停止."""
+        if self._downloading or self._extracting:
             self._stop_flag.set()
-            self._log("正在停止下载...")
+            if self._downloading:
+                self._log("正在停止下载...")
+            else:
+                self._log("正在停止提取...")
             self._status_var.set("正在停止...")
 
     def _resolve_proxy(self) -> "tuple[str, bool]":
@@ -736,6 +800,9 @@ class M3U8DownloaderGUI:
         self._queue_message("log", f"输出文件: {os.path.abspath(output_path)}")
         self._queue_message("log", f"文件大小: {format_file_size(output_size)}")
         self._queue_message("log", f"总耗时: {format_duration(elapsed)}")
+        # 记录到下载历史（去 query 后），供「重复链接提醒」跨会话去重
+        from m3u8_downloader.history import record_download
+        record_download(downloader._url)
         self._queue_message("done", "success")
 
     # ===== 消息队列与 UI 更新 =====
@@ -845,11 +912,17 @@ class M3U8DownloaderGUI:
         elif result == "error":
             self._status_var.set("下载失败")
 
+        # 下载（含串行队列）全部结束后，显示挂起的预加载提取结果
+        self._flush_pending_extract()
+
     # ===== 网页抽取与多选下载 =====
 
     def _start_extract(self) -> None:
-        """点击「提取网页」按钮的回调：起 daemon 线程抽取页内 m3u8."""
-        if self._extracting or self._downloading:
+        """点击「提取网页」按钮的回调：起 daemon 线程抽取页内 m3u8.
+
+        下载进行中也可提取（「网页预加载」）：结果会挂起，等当前下载+合成完成后再显示。
+        """
+        if self._extracting:
             return
         page_url = self._url_var.get().strip()
         if not page_url:
@@ -860,9 +933,14 @@ class M3U8DownloaderGUI:
             self._url_var.set(page_url)
 
         self._extracting = True
+        self._stop_flag.clear()
         self._extract_btn.configure(state=tk.DISABLED)
         self._download_selected_btn.configure(state=tk.DISABLED)
-        self._clear_tree()
+        # 提取中可点「停止」中断；下载中提取时停止按钮本已启用，保持可用即可
+        if not self._downloading:
+            self._stop_btn.configure(state=tk.NORMAL)
+        if not self._downloading:
+            self._clear_tree()
         self._log("正在抽取网页中的 m3u8 ...")
         deep = bool(self._deep_var.get())
         proxy, no_proxy = self._resolve_proxy()
@@ -883,43 +961,48 @@ class M3U8DownloaderGUI:
             no_proxy: 为 True 时所有请求直连、跳过系统代理环境变量.
             proxy: 手动代理地址（如 ``127.0.0.1:7897``）；为空则不使用.
         """
-        from m3u8_downloader.extractor import (
-            extract_m3u8_from_page,
-            fetch_page_title,
-        )
+        from m3u8_downloader.extractor import extract_m3u8_from_page_with_title
+        from m3u8_downloader.utils import extract_title_segment
 
         mode_label = "深度模式（无头浏览器）" if deep else "普通模式（HTML + JS 静态扫描）"
         self._extract_mode = "深度" if deep else "普通"
         self._queue_message("log", f"提取模式：{mode_label}")
 
         try:
-            candidates = extract_m3u8_from_page(
+            # 一次拿到候选 + 标题；标题零额外请求（深度走 page.title，
+            # 普通复用已抓 HTML），避免二次抓取慢/拿不到。
+            candidates, title = extract_m3u8_from_page_with_title(
                 page_url,
                 deep=deep,
                 estimate=True,
                 no_proxy=no_proxy,
                 proxy=proxy,
+                stop_event=self._stop_flag,
             )
-            self._queue_message("candidates", candidates)
-            # 自动用网页标题（第一个 "-" 之前段落）填充输出文件名
-            if not no_proxy:
-                pass  # 占位，保持结构清晰
-            try:
-                title = fetch_page_title(
-                    page_url, no_proxy=no_proxy, proxy=proxy
-                )
-                if title:
-                    from m3u8_downloader.utils import extract_title_segment
+            seg = extract_title_segment(title) if title else ""
 
-                    seg = extract_title_segment(title)
+            if self._downloading:
+                # 网页预加载：下载进行中，挂起结果，等下载+合成完成后再显示
+                self._pending_extract.append((candidates, seg, title))
+                self._queue_message("log", "网页提取完成，等待当前下载结束后显示结果")
+                self._queue_message("extract_done", "pending")
+            else:
+                self._queue_message("candidates", candidates)
+                # 标题提取日志 + 自动命名
+                if title:
+                    self._queue_message("log", f"标题提取成功：{title}")
                     if seg:
                         self._queue_message("suggest_filename", seg)
-            except Exception:
-                pass
-            self._queue_message("extract_done", "success")
+                else:
+                    self._queue_message("log", "标题提取为空（页面可能无 <title> 或由 JS 动态生成）")
+                self._queue_message("extract_done", "success")
         except Exception as e:  # 任何异常都不让 GUI 崩溃
-            self._queue_message("log", f"抽取失败：{e}")
-            self._queue_message("extract_done", "error")
+            if self._stop_flag.is_set():
+                self._queue_message("log", "提取已停止")
+                self._queue_message("extract_done", "stopped")
+            else:
+                self._queue_message("log", f"抽取失败：{e}")
+                self._queue_message("extract_done", "error")
 
     def _clear_tree(self) -> None:
         """清空候选列表 Treeview."""
@@ -973,22 +1056,42 @@ class M3U8DownloaderGUI:
         """抽取完成的 UI 收尾.
 
         Args:
-            result: 抽取结果（"success" / "empty" / "error"）.
+            result: 抽取结果（"success" / "pending" / "empty" / "error" / "stopped"）.
         """
         self._extracting = False
         self._extract_btn.configure(state=tk.NORMAL)
         self._download_selected_btn.configure(
-            state=tk.NORMAL if self._candidates else tk.DISABLED
+            state=tk.NORMAL if (self._candidates and not self._downloading) else tk.DISABLED
         )
+        # 非下载状态（未在下载）时，抽取结束应还原停止按钮为禁用
+        if not self._downloading:
+            self._stop_btn.configure(state=tk.DISABLED)
         if result == "success":
             self._status_var.set("抽取完成")
             mode = getattr(self, "_extract_mode", "普通")
             self._log(f"本次提取模式：{mode}；以上大小均为估计值")
+        elif result == "pending":
+            # 下载中预加载：不覆盖「正在下载」状态，等下载完成后由 _flush_pending_extract 显示
+            pass
         elif result == "empty":
             self._status_var.set("未找到候选")
             self._log("提示：未从该网页找到任何 m3u8，可尝试勾选「深度模式」")
+        elif result == "stopped":
+            self._status_var.set("提取已停止")
         else:
             self._status_var.set("抽取失败")
+
+    def _flush_pending_extract(self) -> None:
+        """下载全部完成后，显示最近一次挂起的「预加载」提取结果."""
+        if not self._pending_extract:
+            return
+        candidates, seg, title = self._pending_extract[-1]
+        self._pending_extract.clear()
+        self._fill_tree(candidates)
+        if seg:
+            self._suggest_filename(seg)
+        self._log("已显示预加载网页的提取结果" + (f"：{title}" if title else ""))
+        self._status_var.set("抽取完成")
 
     def _on_tree_double_click(self, event) -> None:
         """双击候选行：把该行链接回填到地址框（单一下载快捷路径）."""
@@ -1038,30 +1141,56 @@ class M3U8DownloaderGUI:
         self._run_next_job()
 
     def _run_next_job(self) -> None:
-        """从串行队列弹出下一个任务并启动下载线程."""
-        if not self._pending_jobs:
-            return
-        url, output_path = self._pending_jobs.pop(0)
-        self._log(f"下载: {url}")
-        self._log(f"保存为: {output_path}")
+        """从串行队列弹出下一个任务并启动下载线程.
 
-        workers = self._workers_var.get()
-        retries = self._retries_var.get()
-        timeout = self._timeout_var.get()
-        use_ffmpeg = self._use_ffmpeg_var.get()
-        tmp_dir = self._tmpdir_var.get().strip()
+        同名文件被「取消」的任务会被跳过并继续弹下一个；若队列全部被取消
+        （未启动任何下载），则恢复按钮状态。
+        """
+        while self._pending_jobs:
+            url, output_path = self._pending_jobs.pop(0)
+            self._log(f"下载: {url}")
 
-        self._downloading = True
-        self._stop_flag.clear()
-        self._progress_var.set(0)
-        self._status_var.set("正在下载...")
+            # 重复链接提醒（已下载过则询问是否仍要下载）
+            if not self._confirm_duplicate(url):
+                self._log(f"已跳过重复链接: {url}")
+                continue  # 跳过重复任务，继续下一个
 
-        self._download_thread = threading.Thread(
-            target=self._download_worker,
-            args=(url, output_path, workers, retries, timeout, use_ffmpeg, tmp_dir),
-            daemon=True,
+            # 同名文件覆盖提醒（覆盖 / 自动改名 / 取消）
+            output_path = self._resolve_output_path_collision(output_path)
+            if output_path is None:
+                self._log(f"已取消下载: {url}")
+                continue  # 跳过被取消的任务，继续下一个
+
+            self._log(f"保存为: {output_path}")
+
+            workers = self._workers_var.get()
+            retries = self._retries_var.get()
+            timeout = self._timeout_var.get()
+            use_ffmpeg = self._use_ffmpeg_var.get()
+            tmp_dir = self._tmpdir_var.get().strip()
+
+            self._downloading = True
+            self._stop_flag.clear()
+            self._progress_var.set(0)
+            self._status_var.set("正在下载...")
+
+            self._download_thread = threading.Thread(
+                target=self._download_worker,
+                args=(url, output_path, workers, retries, timeout, use_ffmpeg, tmp_dir),
+                daemon=True,
+            )
+            self._download_thread.start()
+            return  # 已启动一个任务，等 done 回调再弹下一个
+
+        # 队列空（全部取消或本就没有任务）：未启动任何下载，恢复按钮
+        self._downloading = False
+        self._start_btn.configure(state=tk.NORMAL)
+        self._extract_btn.configure(state=tk.NORMAL)
+        self._download_selected_btn.configure(
+            state=tk.NORMAL if self._candidates else tk.DISABLED
         )
-        self._download_thread.start()
+        self._stop_btn.configure(state=tk.DISABLED)
+        self._status_var.set("已取消全部下载")
 
 
 def run_gui() -> None:

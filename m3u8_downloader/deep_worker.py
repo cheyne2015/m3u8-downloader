@@ -193,7 +193,8 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "") -> List
         proxy: 手动代理地址（如 ``127.0.0.1:7897``）；非空时浏览器走代理.
 
     Returns:
-        去重后的原始 URL 字符串列表（可能含相对路径，交给父进程 urljoin 归一化）.
+        ``(found, title)`` 元组：去重后的原始 URL 字符串列表（可能含相对路径，
+        交给父进程 urljoin 归一化）+ 页面标题（``page.title()``，可能为空）。
 
     Raises:
         ImportError: 缺少 playwright.
@@ -204,6 +205,7 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "") -> List
 
     found: List[str] = []
     seen: set = set()
+    title = ""
     # 最近一次「新发现 m3u8」的时间戳（静默窗口判定用），用列表包一层便于闭包改写。
     _last_new: List[float] = [time.time()]
 
@@ -275,6 +277,10 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "") -> List
                 content = page.content() or ""
             except Exception:
                 content = ""
+            try:
+                title = page.title() or ""
+            except Exception:
+                title = ""
         finally:
             try:
                 browser.close()
@@ -286,7 +292,7 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "") -> List
         _add(match.group(0))
     for match in M3U8_QUOTED_RE.finditer(content):
         _add(match.group(1))
-    return found
+    return found, title
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -343,7 +349,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     proxy = (args.proxy or os.environ.get("M3U8_DEEP_PROXY", "")).strip()
 
     try:
-        urls = _collect_urls(args.url, args.timeout, args.wait_ms, proxy=proxy)
+        urls, title = _collect_urls(args.url, args.timeout, args.wait_ms, proxy=proxy)
     except ImportError as exc:
         _log(f"[deep_worker] 缺少 playwright：{exc}")
         _log("[deep_worker] 请在系统 Python 中执行：pip install playwright")
@@ -357,8 +363,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         _log(f"[deep_worker] 执行失败：{exc}")
         return EXIT_RUNTIME_ERROR
 
-    # stdout 只允许这一行 JSON
-    print(json.dumps(urls, ensure_ascii=False))
+    # stdout 只允许这一行 JSON（URL 列表 + 页面标题）
+    print(json.dumps({"urls": urls, "title": title}, ensure_ascii=False))
     return EXIT_OK
 
 
