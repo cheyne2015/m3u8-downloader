@@ -43,8 +43,8 @@ class M3U8DownloaderGUI:
         """
         self._root = root
         self._root.title("m3u8 下载工具")
-        self._root.geometry("960x860")
-        self._root.minsize(760, 720)
+        self._root.geometry("980x900")
+        self._root.minsize(760, 760)
 
         # 下载状态变量
         self._downloading: bool = False
@@ -224,16 +224,18 @@ class M3U8DownloaderGUI:
 
         # ===== 网页提取结果区 =====
         extract_frame = ttk.LabelFrame(main_frame, text="网页提取结果", padding=8)
-        extract_frame.grid(row=row, column=0, columnspan=3, sticky=tk.EW, pady=(0, 10))
+        extract_frame.grid(row=row, column=0, columnspan=3, sticky=tk.NSEW, pady=(0, 10))
         extract_frame.columnconfigure(0, weight=1)
         extract_frame.rowconfigure(0, weight=1)
+        # 与日志行共享垂直剩余空间（权重 1：3，日志优先填满）
+        main_frame.rowconfigure(row, weight=1)
 
         self._tree = ttk.Treeview(
             extract_frame,
             columns=("no", "size", "duration", "bandwidth", "type", "mode", "title", "url"),
             show="headings",
             selectmode="extended",
-            height=12,
+            height=8,
         )
         self._tree.heading("no", text="#")
         self._tree.heading("size", text="估计大小")
@@ -312,11 +314,11 @@ class M3U8DownloaderGUI:
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
 
-        # 使最后一行占据剩余空间
-        main_frame.rowconfigure(row, weight=1)
+        # 日志行优先占满剩余空间（权重 3：1 vs extract 行）
+        main_frame.rowconfigure(row, weight=3)
 
         self._log_text = tk.Text(
-            log_frame, height=18, wrap=tk.WORD, state=tk.DISABLED, font=("Consolas", 9)
+            log_frame, height=24, wrap=tk.WORD, state=tk.DISABLED, font=("Consolas", 9)
         )
         log_scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self._log_text.yview)
         self._log_text.configure(yscrollcommand=log_scrollbar.set)
@@ -1072,6 +1074,6 @@ def run_gui() -> None:
     except Exception:
         pass
     _app = M3U8DownloaderGUI(root)
-    root.geometry("960x860")
-    root.minsize(760, 720)
+    root.geometry("980x900")
+    root.minsize(760, 760)
     root.mainloop()
