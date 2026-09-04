@@ -33,7 +33,7 @@ from urllib.parse import urljoin
 import requests
 
 from m3u8_downloader import utils
-from m3u8_downloader.estimator import MAX_ESTIMATE_WORKERS, SizeEstimate, estimate_many
+from m3u8_downloader.estimator import MAX_ESTIMATE_WORKERS, SizeEstimate, estimate_many, ESTIMATE_TIMEOUT
 from m3u8_downloader.utils import format_duration, format_file_size
 
 # bs4 为可选依赖：缺失时降级为纯正则扫描，功能不缺失（仅 title 更弱）。
@@ -1292,12 +1292,12 @@ def extract_m3u8_from_page_with_title(
                 "可尝试 --deep 深度模式（需安装 playwright）。"
             )
 
-        # 并发估算大小
+        # 并发估算大小（估算用独立的短超时，避免拖慢提取结果呈现）
         if estimate:
             results = estimate_many(
                 [c.url for c in candidates],
                 session=session,
-                timeout=timeout,
+                timeout=min(int(timeout or ESTIMATE_TIMEOUT), ESTIMATE_TIMEOUT),
                 max_workers=workers,
             )
             for c in candidates:

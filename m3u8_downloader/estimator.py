@@ -21,9 +21,12 @@ from m3u8_downloader.parser import M3U8Parser, M3U8Playlist
 from m3u8_downloader.utils import create_http_session
 
 # ===== 模块常量（不要在别处散落魔数） =====
-DEFAULT_HEAD_SAMPLES: int = 3        # media playlist 抽样片段数
+DEFAULT_HEAD_SAMPLES: int = 2        # media playlist 抽样片段数（折中：2 个片段兼顾速度与精度）
 MAX_ESTIMATE_WORKERS: int = 16       # 并发硬上限
 DEFAULT_ESTIMATE_WORKERS: int = 8    # 默认并发数
+# 估算专用超时（秒）：估算只是「参考大小」，网络慢时应快速失败显示「未知」，
+# 而不是像主下载那样等满 30s 拖慢提取结果呈现。
+ESTIMATE_TIMEOUT: int = 10
 
 # 估算方法枚举值
 METHOD_BANDWIDTH: str = "bandwidth"
