@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable, List, Optional
@@ -91,6 +92,7 @@ def _inject_system_playwright() -> bool:
                 [py, "-3.13", "-c",
                  "import site; sp=site.getsitepackages(); print(sp[0] if sp else '')"],
                 capture_output=True, text=True, timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             ).stdout.strip()
             if out and os.path.isdir(out):
                 candidates.append(out)
@@ -135,6 +137,13 @@ MAX_PAGE_BYTES: int = 5 * 1024 * 1024       # 网页/JS 单文件读取上限，
 DEEP_WAIT_MS: int = 5000                    # 深度模式等待网络静默毫秒数
 DEEP_SUBPROCESS_MARGIN_SEC: int = 60        # 子进程路线在导航超时外预留的启动/收尾时间
 DEEP_WORKER_NAME: str = "deep_worker.py"    # 随包分发的深度模式子进程脚本
+
+# 深度模式请求拦截：仅当 media 类型 URL 以这些分片扩展名结尾时才 abort
+_SEGMENT_EXTS = frozenset({".ts", ".mp4", ".m4s", ".m4a", ".aac", ".webm"})
+# 收集到 m3u8 后，再静默等待的毫秒数（确认没有新的 m3u8 才收工）
+_SETTLE_MS = 2500
+# 至少收集的毫秒数（避免页面刚打开时的瞬间早期请求造成过早停等）
+_MIN_COLLECT_MS = 800
 DEFAULT_PLAYWRIGHT_BROWSERS_PATH: str = r"F:\gadgets\playwright-browsers"
 MAX_CANDIDATE_URL_LEN: int = 512            # 候选 URL 长度上限，防超长脏串
 # 兜底：显式列出的系统 Python 解释器（无任何命令能解析到时使用）
@@ -925,6 +934,40 @@ def _on_response(resp, collected: List[str]) -> None:
         collected.append(req_url)
 
 
+def _safe_abort(route) -> None:
+    """「安全」请求拦截：只拦无助于 m3u8 发现的静态资源与分片，其余放行.
+
+    仅 abort ``image`` / ``font`` / ``stylesheet``；对 ``media`` 类型只在 URL 以常见
+    分片扩展名（.ts/.mp4/.m4s/.m4a/.aac/.webm）结尾时才拦截，避免误杀没有 ``.m3u8``
+    后缀的播放列表（有些站点用 /playlist/xxxx 这种地址提供 m3u8）。
+    """
+    try:
+        resource_type = (route.request.resource_type or "").lower()
+    except Exception:
+        resource_type = ""
+    if resource_type in ("image", "font", "stylesheet"):
+        try:
+            route.abort()
+        except Exception:
+            pass
+        return
+    if resource_type == "media":
+        try:
+            url_lower = (route.request.url or "").lower()
+        except Exception:
+            url_lower = ""
+        if any(url_lower.endswith(ext) for ext in _SEGMENT_EXTS):
+            try:
+                route.abort()
+            except Exception:
+                pass
+            return
+    try:
+        route.continue_()
+    except Exception:
+        pass
+
+
 def _deep_extract_inprocess(
     sync_playwright, url: str, timeout: int = 30, wait_ms: int = DEEP_WAIT_MS, proxy: Optional[str] = None
 ) -> List[Candidate]:
@@ -948,25 +991,62 @@ def _deep_extract_inprocess(
 
     candidates: List[Candidate] = []
     collected: List[str] = []
+    _last_new = [time.time()]
     content = ""
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            # 精简启动参数：禁用 GPU / dev-shm / 扩展 / 首次运行提示；
+            # 刻意不加 --no-sandbox：用户粘贴的是不可信网页，沙箱是必要安全边界。
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--disable-gpu", "--disable-dev-shm-usage", "--disable-extensions", "--no-first-run"],
+            )
             proxy_cfg: dict = {}
             if proxy:
                 proxy_cfg["proxy"] = {"server": utils._normalize_proxy(proxy)}
             page = browser.new_page(**proxy_cfg)
-            page.on("response", lambda resp: _on_response(resp, collected))
-            # 用 domcontentloaded 而非 networkidle：视频站有持续的广告/埋点/
-            # 视频分片请求，网络永不静默，networkidle 会一直等到超时。
-            page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
-            # DOM 就绪后轮询等待，收集到即提前返回，未收集到才用满预算。
-            remaining = int(wait_ms)
-            while remaining > 0 and not collected:
-                step = min(500, remaining)
-                page.wait_for_timeout(step)
-                remaining -= step
-            content = page.content()
+
+            # 「安全」请求拦截：只拦无助于 m3u8 发现的静态资源与分片。
+            try:
+                page.route("**/*", _safe_abort)
+            except Exception:
+                pass
+
+            def _on_response_cb(resp) -> None:
+                _on_response(resp, collected)
+                if ".m3u8" in (resp.url or "").lower():
+                    _last_new[0] = time.time()
+
+            page.on("response", _on_response_cb)
+            # 用 commit 而非 domcontentloaded：更早着手收集；导航失败也不直接抛异常，
+            # 带着已收集的候选返回，尽可能多给结果。
+            try:
+                page.goto(url, wait_until="commit", timeout=timeout * 1000)
+            except Exception as goto_exc:
+                print(
+                    f"深度模式导航未完成，仍返回已收集的候选：{goto_exc}",
+                    file=sys.stderr, flush=True,
+                )
+            # 静默窗口收集：收集到 m3u8 后继续静默 _SETTLE_MS 毫秒确认无新请求，
+            # 且至少收集 _MIN_COLLECT_MS 毫秒；wait_ms 为总预算上限。
+            deadline = time.time() + int(wait_ms) / 1000.0
+            start = time.time()
+            while time.time() < deadline:
+                quiet_ms = (time.time() - _last_new[0]) * 1000
+                if (
+                    collected
+                    and quiet_ms >= _SETTLE_MS
+                    and (time.time() - start) * 1000 >= _MIN_COLLECT_MS
+                ):
+                    break
+                try:
+                    page.wait_for_timeout(500)
+                except Exception:
+                    pass
+            try:
+                content = page.content() or ""
+            except Exception:
+                content = ""
             browser.close()
     except Exception as exc:
         raise DeepModeUnavailableError(

@@ -302,6 +302,7 @@ def is_ffmpeg_available() -> bool:
             capture_output=True,
             text=True,
             timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):

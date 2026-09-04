@@ -39,6 +39,7 @@ import json
 import os
 import re
 import sys
+import time
 from typing import Callable, List, Optional, Tuple
 
 # 浏览器目录默认值：与 extractor._ensure_playwright_browsers_path() 保持一致，
@@ -52,6 +53,13 @@ EXIT_RUNTIME_ERROR = 4
 
 # DOM 就绪后轮询等待的间隔（毫秒）。总预算仍是 --wait-ms，收集到 m3u8 即提前返回。
 _POLL_INTERVAL_MS = 500
+
+# 深度模式请求拦截：仅当 media 类型 URL 以这些分片扩展名结尾时才 abort
+_SEGMENT_EXTS = frozenset({".ts", ".mp4", ".m4s", ".m4a", ".aac", ".webm"})
+# 收集到 m3u8 后，再静默等待的毫秒数（确认没有新的 m3u8 才收工）
+_SETTLE_MS = 2500
+# 至少收集的毫秒数（避免页面刚打开时的瞬间早期请求造成过早停等）
+_MIN_COLLECT_MS = 800
 
 
 # ===== 判定逻辑（优先复用 extractor，回退内联副本） =====
@@ -138,6 +146,40 @@ def _normalize_proxy(proxy: str) -> str:
     return "http://" + proxy
 
 
+def _safe_abort(route) -> None:
+    """「安全」请求拦截：只拦无助于 m3u8 发现的静态资源与分片，其余放行.
+
+    仅 abort ``image`` / ``font`` / ``stylesheet``；对 ``media`` 类型只在 URL 以常见
+    分片扩展名（.ts/.mp4/.m4s/.m4a/.aac/.webm）结尾时才拦截，避免误杀没有 ``.m3u8``
+    后缀的播放列表（有些站点用 /playlist/xxxx 这种地址提供 m3u8）。
+    """
+    try:
+        resource_type = (route.request.resource_type or "").lower()
+    except Exception:
+        resource_type = ""
+    if resource_type in ("image", "font", "stylesheet"):
+        try:
+            route.abort()
+        except Exception:
+            pass
+        return
+    if resource_type == "media":
+        try:
+            url_lower = (route.request.url or "").lower()
+        except Exception:
+            url_lower = ""
+        if any(url_lower.endswith(ext) for ext in _SEGMENT_EXTS):
+            try:
+                route.abort()
+            except Exception:
+                pass
+            return
+    try:
+        route.continue_()
+    except Exception:
+        pass
+
+
 def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "") -> List[str]:
     """用 playwright 打开页面并收集 m3u8 链接.
 
@@ -162,6 +204,8 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "") -> List
 
     found: List[str] = []
     seen: set = set()
+    # 最近一次「新发现 m3u8」的时间戳（静默窗口判定用），用列表包一层便于闭包改写。
+    _last_new: List[float] = [time.time()]
 
     def _add(raw: str) -> None:
         """加入一条命中（清洗 + 去重），回调里抛异常会被 playwright 吞掉."""
@@ -172,15 +216,29 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "") -> List
         if cleaned and cleaned not in seen:
             seen.add(cleaned)
             found.append(cleaned)
+            _last_new[0] = time.time()
 
     content = ""
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        # 精简的启动参数：禁用 GPU / dev-shm / 扩展 / 首次运行提示；
+        # 刻意不加 --no-sandbox：用户在 GUI 里粘贴的是不可信网页，沙箱是必要的
+        # 安全边界，且 Windows 下以当前用户启动 chromium 本就无需 --no-sandbox。
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--disable-gpu", "--disable-dev-shm-usage", "--disable-extensions", "--no-first-run"],
+        )
         try:
             proxy_cfg: dict = {}
             if proxy:
                 proxy_cfg["proxy"] = {"server": _normalize_proxy(proxy)}
             page = browser.new_page(**proxy_cfg)
+
+            # 「安全」请求拦截：只拦无助于 m3u8 发现的静态资源与分片，
+            # 其余一律放行，避免误杀无扩展名的 m3u8 播放列表。
+            try:
+                page.route("**/*", _safe_abort)
+            except Exception:
+                pass
 
             def _on_response(resp) -> None:
                 try:
@@ -189,17 +247,34 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "") -> List
                     pass
 
             page.on("response", _on_response)
-            # 用 domcontentloaded 而非 networkidle：视频站存在持续的广告/埋点/
-            # 视频分片请求，网络永不静默，networkidle 会一直等到超时。
-            page.goto(url, wait_until="domcontentloaded", timeout=int(timeout) * 1000)
-            # DOM 就绪后轮询等待，给懒加载脚本时间去请求 m3u8；
-            # 一旦收集到就提前返回，未收集到才用满 wait_ms 预算。
-            remaining = int(wait_ms)
-            while remaining > 0 and not found:
-                step = min(_POLL_INTERVAL_MS, remaining)
-                page.wait_for_timeout(step)
-                remaining -= step
-            content = page.content() or ""
+            # 用 commit 而非 domcontentloaded：只要浏览器开始加载页面即着手收集，
+            # 更早拿到首屏发起的 m3u8 请求；导航失败（404/超时/无网）也不直接抛
+            # 异常，而是带着已收集到的候选返回，尽可能多给结果。
+            try:
+                page.goto(url, wait_until="commit", timeout=int(timeout) * 1000)
+            except Exception as goto_exc:
+                _log(f"[deep_worker] 导航未完成，仍返回已收集的候选：{goto_exc}")
+            # 静默窗口收集：首次收集到 m3u8 后，再静默 _SETTLE_MS 毫秒确认没有
+            # 新的 m3u8 才收工；同时保证至少收集 _MIN_COLLECT_MS 毫秒，避免页面刚
+            # 打开时瞬间的早期请求造成过早停等。wait_ms 作为总预算上限。
+            deadline = time.time() + int(wait_ms) / 1000.0
+            start = time.time()
+            while time.time() < deadline:
+                quiet_ms = (time.time() - _last_new[0]) * 1000
+                if (
+                    found
+                    and quiet_ms >= _SETTLE_MS
+                    and (time.time() - start) * 1000 >= _MIN_COLLECT_MS
+                ):
+                    break
+                try:
+                    page.wait_for_timeout(_POLL_INTERVAL_MS)
+                except Exception:
+                    pass
+            try:
+                content = page.content() or ""
+            except Exception:
+                content = ""
         finally:
             try:
                 browser.close()

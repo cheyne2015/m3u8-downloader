@@ -126,6 +126,7 @@ def merge_with_ffmpeg_concat(
             capture_output=True,
             text=True,
             timeout=3600,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
 
         if result.returncode != 0:
@@ -165,6 +166,7 @@ def convert_ts_to_mp4_ffmpeg(
         capture_output=True,
         text=True,
         timeout=3600,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
 
     if result.returncode != 0:

@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -308,3 +309,126 @@ def test_worker_normalize_proxy():
     # 与 extractor.utils 的实现保持一致（两侧不能漂移）
     from m3u8_downloader.utils import _normalize_proxy as ext_norm
     assert deep_worker._normalize_proxy("1.2.3.4:8080") == ext_norm("1.2.3.4:8080")
+
+
+# ===== 6. 静默窗口：必须收集全部 m3u8（含晚到的），不能首个命中即停 =====
+def _make_fake_sync_playwright(url_schedule, vt, state):
+    """构造虚拟时钟驱动的假 playwright，零真浏览器验证收集逻辑.
+
+    url_schedule: ``[(虚拟时刻ms, url), ...]``，模拟响应在何时到达；
+    vt: ``{"t": 0.0}`` 虚拟时钟，由 monkeypatch 后的模块 ``time.time`` 读取；
+    state: 用于回传 route 是否注册、launch 参数等信息供断言。
+    """
+    emitted = set()
+
+    def emit_due():
+        for at_ms, url in url_schedule:
+            if at_ms <= vt["t"] * 1000 and url not in emitted:
+                emitted.add(url)
+                if state["response_cb"] is not None:
+                    # 注意：不能用 ``class _R: url = url``（同名会让右侧 url 解析到
+                    # class 自身命名空间，抛 NameError），用 SimpleNamespace 规避。
+                    state["response_cb"](SimpleNamespace(url=url))
+
+    class _Page:
+        def route(self, pattern, handler):
+            state["route_registered"] = True
+
+        def on(self, event, cb):
+            if event == "response":
+                state["response_cb"] = cb
+
+        def goto(self, url, wait_until="commit", timeout=30000):
+            emit_due()
+
+        def wait_for_timeout(self, ms):
+            vt["t"] += ms / 1000.0
+            emit_due()
+
+        def content(self):
+            return ""
+
+        def close(self):
+            pass
+
+    class _Browser:
+        def new_page(self, **kw):
+            return _Page()
+
+        def close(self):
+            pass
+
+    class _Chromium:
+        def launch(self, headless=True, args=None):
+            state["launch_args"] = args
+            return _Browser()
+
+    class _PW:
+        def __enter__(self):
+            # playwright 的 p.chromium 是 BrowserType 属性（p.chromium.launch()），
+            # 不是方法，这里用实例属性模拟。
+            self.chromium = _Chromium()
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    return lambda: _PW()
+
+
+def test_deep_worker_collects_all_m3u8_including_late(monkeypatch):
+    """深度模式（子进程路线）：首个 m3u8 之后仍持续收集，不能漏掉晚到的.
+
+    旧逻辑 ``while remaining > 0 and not found`` 收到第一个 m3u8 后立即停等，
+    会漏掉晚到的二级源；新逻辑用「静默窗口」（收集到后继续静默 2.5s）收工。
+    """
+    pytest.importorskip("playwright")
+    import playwright.sync_api as pw_api
+
+    vt = {"t": 0.0}
+    state = {"route_registered": False, "launch_args": None, "response_cb": None}
+    monkeypatch.setattr(deep_worker.time, "time", lambda: vt["t"])
+    fake = _make_fake_sync_playwright(
+        [(100, "https://cdn.example.com/hls/1080/index.m3u8"),
+         (3000, "https://cdn.example.com/hls/720/index.m3u8")],
+        vt, state,
+    )
+    monkeypatch.setattr(pw_api, "sync_playwright", fake)
+
+    urls = deep_worker._collect_urls(
+        "https://www.example.com/play/1", timeout=30, wait_ms=6000
+    )
+
+    assert "https://cdn.example.com/hls/1080/index.m3u8" in urls
+    assert "https://cdn.example.com/hls/720/index.m3u8" in urls, \
+        "晚到的第二个 m3u8 必须被收集到"
+    assert state["route_registered"] is True, "应注册安全请求拦截"
+    assert "--no-sandbox" not in (state["launch_args"] or []), \
+        "不应加 --no-sandbox（不可信网页需保留沙箱）"
+
+
+def test_deep_extract_inprocess_collects_all_m3u8_including_late(monkeypatch):
+    """深度模式（进程内路线）：同样必须收集全部 m3u8，且不加 --no-sandbox."""
+    pytest.importorskip("playwright")
+    import playwright.sync_api as pw_api
+
+    vt = {"t": 0.0}
+    state = {"route_registered": False, "launch_args": None, "response_cb": None}
+    monkeypatch.setattr(extractor.time, "time", lambda: vt["t"])
+    fake = _make_fake_sync_playwright(
+        [(100, "https://cdn.example.com/hls/1080/index.m3u8"),
+         (3000, "https://cdn.example.com/hls/720/index.m3u8")],
+        vt, state,
+    )
+    monkeypatch.setattr(pw_api, "sync_playwright", fake)
+
+    cands = extractor._deep_extract_inprocess(
+        fake, "https://www.example.com/play/1", timeout=30, wait_ms=6000
+    )
+    urls = [c.url for c in cands]
+    assert "https://cdn.example.com/hls/1080/index.m3u8" in urls
+    assert "https://cdn.example.com/hls/720/index.m3u8" in urls, \
+        "晚到的第二个 m3u8 必须被收集到"
+    assert state["route_registered"] is True, "应注册安全请求拦截"
+    assert "--no-sandbox" not in (state["launch_args"] or []), \
+        "不应加 --no-sandbox（不可信网页需保留沙箱）"
