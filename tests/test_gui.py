@@ -1009,3 +1009,50 @@ class TestWebExtractAndMultiDownload:
         assert result != str(existing)
         assert not _os.path.exists(result)
         assert result.endswith(".mp4")
+
+    def test_tree_toggle_select_adds_when_not_selected(self, gui_instance):
+        """未选中的行 → 单击后应被选中."""
+        gui_instance._tree.selection.return_value = []
+        gui_instance._tree_toggle_select("i1")
+        gui_instance._tree.selection_add.assert_called_with("i1")
+        gui_instance._tree.selection_remove.assert_not_called()
+
+    def test_tree_toggle_select_removes_when_selected(self, gui_instance):
+        """已选中的行 → 单击后应被取消选中."""
+        gui_instance._tree.selection.return_value = ["i1", "i2"]
+        gui_instance._tree_toggle_select("i1")
+        gui_instance._tree.selection_remove.assert_called_with("i1")
+        gui_instance._tree.selection_add.assert_not_called()
+
+    def test_tree_single_click_schedules_toggle(self, gui_instance):
+        """无修饰键单击 → 应延迟调度 toggle，且不返回 None（即 break 阻止默认行为）."""
+        gui_instance._root.after.reset_mock()
+        evt = MagicMock()
+        evt.state = 0
+        evt.y = 100
+        gui_instance._tree.identify_row.return_value = "i1"
+        gui_instance._root.after.return_value = "after_id"
+        result = gui_instance._on_tree_single_click(evt)
+        gui_instance._root.after.assert_called_once()
+        assert result == "break"
+
+    def test_tree_single_click_ctrl_delegates_to_default(self, gui_instance):
+        """Ctrl/Shift 修饰键单击 → 应放行给 Treeview 默认行为（返回 None）."""
+        gui_instance._root.after.reset_mock()
+        evt = MagicMock()
+        evt.state = 0x0004  # Ctrl
+        evt.y = 100
+        result = gui_instance._on_tree_single_click(evt)
+        assert result is None
+        gui_instance._root.after.assert_not_called()
+
+    def test_tree_single_click_empty_row_no_toggle(self, gui_instance):
+        """点击空白行（无 row）→ 不调度 toggle."""
+        gui_instance._root.after.reset_mock()
+        evt = MagicMock()
+        evt.state = 0
+        evt.y = 100
+        gui_instance._tree.identify_row.return_value = ""
+        gui_instance._on_tree_single_click(evt)
+        gui_instance._root.after.assert_not_called()
+

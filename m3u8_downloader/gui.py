@@ -262,7 +262,10 @@ class M3U8DownloaderGUI:
         self._tree.configure(yscrollcommand=tree_scroll.set)
         self._tree.grid(row=0, column=0, sticky=tk.NSEW)
         tree_scroll.grid(row=0, column=1, sticky=tk.NS)
+        # 单击切换多选：点一下选中、再点一下取消，且不影响其他已选行（无需 Ctrl/Shift）
+        self._tree.bind("<Button-1>", self._on_tree_single_click)
         self._tree.bind("<Double-1>", self._on_tree_double_click)
+        self._tree_click_after_id = None  # 区分单击/双击的延迟定时器
 
         self._download_selected_btn = ttk.Button(
             extract_frame,
@@ -1106,8 +1109,53 @@ class M3U8DownloaderGUI:
         self._status_var.set("抽取完成")
         return False
 
+    def _on_tree_single_click(self, event) -> None:
+        """单击候选行：切换该行选中状态，不影响其他已选行（无需 Ctrl/Shift）.
+
+        用 after 延迟 200ms 区分单击与双击：双击时取消本次单击处理，
+        只走 _on_tree_double_click（回填链接），避免双击触发两次 toggle。
+
+        保留 Ctrl+单击 / Shift+单击 的标准行为：有修饰键时放行给 Treeview
+        默认处理（Ctrl=切换单行、Shift=范围选择），仅无修饰键时接管为 toggle。
+        """
+        # Ctrl(0x0004) / Shift(0x0001) 按下时，交给 Treeview 默认选择行为
+        if event.state & 0x0005:
+            return None
+
+        # 取消上一次未执行的单击定时器
+        if self._tree_click_after_id is not None:
+            try:
+                self._root.after_cancel(self._tree_click_after_id)
+            except Exception:
+                pass
+            self._tree_click_after_id = None
+
+        row_id = self._tree.identify_row(event.y)
+        if not row_id:
+            return "break"
+        self._tree_click_after_id = self._root.after(
+            200, lambda: self._tree_toggle_select(row_id)
+        )
+        # 阻止 Treeview 默认的「单击选中并取消其他行」行为，由我们接管切换逻辑
+        return "break"
+
+    def _tree_toggle_select(self, row_id: str) -> None:
+        """切换某行的选中状态（已选则取消、未选则选中），不影响其他行."""
+        self._tree_click_after_id = None
+        if row_id in self._tree.selection():
+            self._tree.selection_remove(row_id)
+        else:
+            self._tree.selection_add(row_id)
+
     def _on_tree_double_click(self, event) -> None:
         """双击候选行：把该行链接回填到地址框（单一下载快捷路径）."""
+        # 取消待执行的单击切换，避免双击时 toggle 两次
+        if self._tree_click_after_id is not None:
+            try:
+                self._root.after_cancel(self._tree_click_after_id)
+            except Exception:
+                pass
+            self._tree_click_after_id = None
         sel = self._tree.selection()
         if not sel:
             return
