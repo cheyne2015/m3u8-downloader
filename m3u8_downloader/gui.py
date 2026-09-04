@@ -540,6 +540,7 @@ class M3U8DownloaderGUI:
         # 重置进度
         self._progress_var.set(0)
         self._status_var.set("正在下载...")
+        self._log("下载进行中可粘贴新网页链接并点击「提取网页」预加载，结果将在下载完成后显示")
 
         # 启动下载线程
         self._download_thread = threading.Thread(
@@ -988,13 +989,9 @@ class M3U8DownloaderGUI:
                 self._queue_message("extract_done", "pending")
             else:
                 self._queue_message("candidates", candidates)
-                # 标题提取日志 + 自动命名
-                if title:
-                    self._queue_message("log", f"标题提取成功：{title}")
-                    if seg:
-                        self._queue_message("suggest_filename", seg)
-                else:
-                    self._queue_message("log", "标题提取为空（页面可能无 <title> 或由 JS 动态生成）")
+                # 仅在有标题段落时自动命名；不再单独打印标题提取日志，避免与命名日志重复
+                if seg:
+                    self._queue_message("suggest_filename", seg)
                 self._queue_message("extract_done", "success")
         except Exception as e:  # 任何异常都不让 GUI 崩溃
             if self._stop_flag.is_set():
@@ -1085,12 +1082,12 @@ class M3U8DownloaderGUI:
         """下载全部完成后，显示最近一次挂起的「预加载」提取结果."""
         if not self._pending_extract:
             return
-        candidates, seg, title = self._pending_extract[-1]
+        candidates, seg, _ = self._pending_extract[-1]
         self._pending_extract.clear()
         self._fill_tree(candidates)
         if seg:
             self._suggest_filename(seg)
-        self._log("已显示预加载网页的提取结果" + (f"：{title}" if title else ""))
+        self._log("已显示预加载网页的提取结果")
         self._status_var.set("抽取完成")
 
     def _on_tree_double_click(self, event) -> None:
@@ -1135,8 +1132,9 @@ class M3U8DownloaderGUI:
 
         self._pending_jobs = jobs
         self._log(f"已加入 {len(jobs)} 个下载任务，开始串行下载")
+        self._log("下载进行中可粘贴新网页链接并点击「提取网页」预加载，结果将在下载完成后显示")
         self._start_btn.configure(state=tk.DISABLED)
-        self._extract_btn.configure(state=tk.DISABLED)
+        # 下载进行中保留「提取网页」可用，实现网页预加载（结果挂起，下载完成后显示）
         self._download_selected_btn.configure(state=tk.DISABLED)
         self._run_next_job()
 
