@@ -914,7 +914,13 @@ class M3U8DownloaderGUI:
             self._status_var.set("下载失败")
 
         # 下载（含串行队列）全部结束后，显示挂起的预加载提取结果
-        self._flush_pending_extract()
+        has_prefill = self._flush_pending_extract()
+
+        # 下载完成后的文件名栏收尾：无预填标题 → 清空文件名栏；同时重置手动标志，
+        # 让下一轮抽取能正常自动命名。（有预填时标题已由 _flush_pending_extract 填入）
+        if not has_prefill:
+            self._filename_var.set("")
+        self._filename_touched = False
 
     # ===== 网页抽取与多选下载 =====
 
@@ -1078,17 +1084,27 @@ class M3U8DownloaderGUI:
         else:
             self._status_var.set("抽取失败")
 
-    def _flush_pending_extract(self) -> None:
-        """下载全部完成后，显示最近一次挂起的「预加载」提取结果."""
+    def _flush_pending_extract(self) -> bool:
+        """下载全部完成后，显示最近一次挂起的「预加载」提取结果.
+
+        Returns:
+            True 表示有预填标题已填入文件名栏；False 表示无预填（可清空文件名栏）.
+        """
         if not self._pending_extract:
-            return
+            return False
         candidates, seg, _ = self._pending_extract[-1]
         self._pending_extract.clear()
         self._fill_tree(candidates)
         if seg:
+            # 下载完成后进入新一轮，重置手动标志，让预填标题稳定填入文件名栏
+            self._filename_touched = False
             self._suggest_filename(seg)
+            self._log("已显示预加载网页的提取结果")
+            self._status_var.set("抽取完成")
+            return True
         self._log("已显示预加载网页的提取结果")
         self._status_var.set("抽取完成")
+        return False
 
     def _on_tree_double_click(self, event) -> None:
         """双击候选行：把该行链接回填到地址框（单一下载快捷路径）."""
@@ -1134,6 +1150,7 @@ class M3U8DownloaderGUI:
         self._log(f"已加入 {len(jobs)} 个下载任务，开始串行下载")
         self._log("下载进行中可粘贴新网页链接并点击「提取网页」预加载，结果将在下载完成后显示")
         self._start_btn.configure(state=tk.DISABLED)
+        self._stop_btn.configure(state=tk.NORMAL)
         # 下载进行中保留「提取网页」可用，实现网页预加载（结果挂起，下载完成后显示）
         self._download_selected_btn.configure(state=tk.DISABLED)
         self._run_next_job()
@@ -1171,6 +1188,7 @@ class M3U8DownloaderGUI:
             self._stop_flag.clear()
             self._progress_var.set(0)
             self._status_var.set("正在下载...")
+            self._stop_btn.configure(state=tk.NORMAL)
 
             self._download_thread = threading.Thread(
                 target=self._download_worker,

@@ -945,10 +945,58 @@ class TestWebExtractAndMultiDownload:
         gui_instance._candidates = []
         gui_instance._filename_touched = False
         gui_instance._tree.get_children.return_value = []
-        gui_instance._flush_pending_extract()
+        result = gui_instance._flush_pending_extract()
+        assert result is True, "有预填标题时应返回 True"
         assert gui_instance._pending_extract == []
         assert gui_instance._tree.insert.called, "应填充候选列表"
         gui_instance._filename_var.set.assert_called_with("预加载标题")
+
+    def test_flush_pending_extract_empty_returns_false(self, gui_instance):
+        """无挂起预加载结果时返回 False，不触碰文件名栏."""
+        gui_instance._pending_extract = []
+        result = gui_instance._flush_pending_extract()
+        assert result is False
+
+    def test_on_download_done_clears_filename_when_no_prefill(self, gui_instance):
+        """无预填时，下载完成后应清空文件名称栏."""
+        gui_instance._pending_jobs = []
+        gui_instance._pending_extract = []
+        gui_instance._candidates = []
+        gui_instance._filename_touched = True
+        gui_instance._filename_var.get.return_value = "旧文件名.mp4"
+        gui_instance._on_download_done("success")
+        gui_instance._filename_var.set.assert_called_with("")
+        assert gui_instance._filename_touched is False
+
+    def test_on_download_done_keeps_prefill_title(self, gui_instance):
+        """有预填标题时，下载完成后应保留标题（不清空）."""
+        cands = [Candidate(url="https://x/b.m3u8")]
+        gui_instance._pending_jobs = []
+        gui_instance._pending_extract = [(cands, "预加载标题", "完整标题")]
+        gui_instance._candidates = []
+        gui_instance._filename_touched = True
+        gui_instance._tree.get_children.return_value = []
+        gui_instance._on_download_done("success")
+        # 预填标题应被填入（下载完成后重置手动标志后强制填入）
+        gui_instance._filename_var.set.assert_any_call("预加载标题")
+        # 不应被清空为空串
+        set_calls = [c.args[0] for c in gui_instance._filename_var.set.call_args_list]
+        assert "" not in set_calls
+
+    def test_download_selected_enables_stop_button(self, gui_instance):
+        """「下载选中」启动串行下载后，停止按钮应可用."""
+        gui_instance._candidates = [
+            Candidate(url="https://x/a.m3u8"),
+        ]
+        gui_instance._filename_var.get.return_value = "v.mp4"
+        gui_instance._dir_var.get.return_value = "/tmp/out"
+        gui_instance._tree.selection.return_value = ["i1"]
+        gui_instance._tree.item.return_value = (
+            1, "≈ 1MB", "01:00", "2 Mbps", "media", "普通", "A", "https://x/a.m3u8"
+        )
+        with patch.object(gui_instance, "_run_next_job"):
+            gui_instance._download_selected()
+        gui_instance._stop_btn.configure.assert_any_call(state=tk.NORMAL)
 
     def test_resolve_output_path_collision_auto_rename(self, gui_instance, tmp_path):
         """同名文件且选「否（自动改名）」→ 返回不冲突的新路径."""
