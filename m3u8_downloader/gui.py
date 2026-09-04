@@ -43,8 +43,8 @@ class M3U8DownloaderGUI:
         """
         self._root = root
         self._root.title("m3u8 下载工具")
-        self._root.geometry("900x800")
-        self._root.minsize(760, 620)
+        self._root.geometry("960x860")
+        self._root.minsize(760, 720)
 
         # 下载状态变量
         self._downloading: bool = False
@@ -233,7 +233,7 @@ class M3U8DownloaderGUI:
             columns=("no", "size", "duration", "bandwidth", "type", "mode", "title", "url"),
             show="headings",
             selectmode="extended",
-            height=8,
+            height=12,
         )
         self._tree.heading("no", text="#")
         self._tree.heading("size", text="估计大小")
@@ -1072,6 +1072,6 @@ def run_gui() -> None:
     except Exception:
         pass
     _app = M3U8DownloaderGUI(root)
-    root.geometry("920x680")
-    root.minsize(720, 560)
+    root.geometry("960x860")
+    root.minsize(760, 720)
     root.mainloop()
