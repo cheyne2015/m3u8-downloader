@@ -17,6 +17,7 @@
   :func:`_explain_worker_failure`）。
 """
 
+import copy
 import json
 import os
 import queue
@@ -87,6 +88,12 @@ def _inject_system_playwright() -> bool:
     candidates: List[str] = []
 
     # 1) 通过 py 启动器探测 Python 3.13 的 site-packages（最常见安装位置）
+    # 源码运行时当前解释器最可靠，也不依赖 py/python 是否加入 PATH。
+    # 冻结程序的 sys.executable 指向自身 EXE，不能拿来执行 worker 脚本。
+    current_python = sys.executable
+    if not getattr(sys, "frozen", False) and current_python and os.path.isfile(current_python):
+        return [current_python]
+
     py = shutil.which("py") or shutil.which("py.exe")
     if py:
         try:
@@ -685,14 +692,21 @@ def _find_system_python() -> Optional[List[str]]:
     冻结 EXE 内无法 import 外部 site-packages，深度模式改为**调用系统 Python
     执行随包分发的** ``deep_worker.py``。按顺序探测：
 
-    1. ``py -3.13``（Windows Python 启动器，首选）；
-    2. ``python``（PATH 上的默认解释器）；
-    3. ``LOCALAPPDATA\\Programs\\Python\\Python3xx\\python.exe`` 与显式兜底路径。
+    1. 源码运行所用的当前 Python；
+    2. ``py -3.13``（Windows Python 启动器）；
+    3. ``python``（PATH 上的默认解释器）；
+    4. ``LOCALAPPDATA\\Programs\\Python\\Python3xx\\python.exe`` 与显式兜底路径。
 
     Returns:
         可直接交给 :func:`subprocess.run` 的命令列表（解释器路径 + 版本参数）；
         一个可用解释器都找不到时返回 None.
     """
+    # 源码运行时当前解释器最可靠，也不依赖 py/python 是否加入 PATH。
+    # 冻结程序的 sys.executable 指向自身 EXE，不能拿来执行 worker 脚本。
+    current_python = sys.executable
+    if not getattr(sys, "frozen", False) and current_python and os.path.isfile(current_python):
+        return [current_python]
+
     py = shutil.which("py") or shutil.which("py.exe")
     if py and os.path.isfile(py):
         return [py, "-3.13"]
@@ -1298,6 +1312,9 @@ def _estimate_stream(
     updates = queue.Queue()
     by_url = {candidate.url: candidate for candidate in candidates}
     background_session = requests.Session()
+    background_session.adapters.clear()
+    for prefix, adapter in session.adapters.items():
+        background_session.mount(prefix, copy.deepcopy(adapter))
     background_session.headers.update(session.headers)
     background_session.cookies.update(session.cookies)
     background_session.auth = session.auth
@@ -1307,6 +1324,7 @@ def _estimate_stream(
     background_session.trust_env = session.trust_env
     background_session.max_redirects = session.max_redirects
     background_session.params.update(session.params)
+    background_session.hooks = copy.deepcopy(session.hooks)
 
     def work():
         try:

@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from m3u8_downloader.extractor import extract_m3u8_from_page_with_title
+from m3u8_downloader.extractor import Candidate, _estimate_stream, extract_m3u8_from_page_with_title
 
 
 @pytest.fixture
@@ -384,6 +384,34 @@ def test_stop_during_slow_estimate_returns_existing_candidates_promptly(video_pa
         video_page.release_estimate.set()
         thread.join(timeout=15)
         session.close()
+
+
+def test_estimate_stream_clones_custom_adapter_and_hooks(monkeypatch):
+    """后台估算会话应保留调用者定制的请求行为，但不能共享适配器生命周期。"""
+    import requests
+
+    captured = {}
+
+    class CustomAdapter(requests.adapters.HTTPAdapter):
+        pass
+
+    def estimate_many(urls, *, session, **_kwargs):
+        captured["session"] = session
+
+    monkeypatch.setattr("m3u8_downloader.extractor.estimate_many", estimate_many)
+    source = requests.Session()
+    adapter = CustomAdapter(max_retries=2)
+    hook = lambda response, *args, **kwargs: response
+    source.mount("mock://", adapter)
+    source.hooks["response"].append(hook)
+
+    _estimate_stream([Candidate(url="mock://video")], source, 1, 1, None, None)
+
+    background = captured["session"]
+    assert type(background.adapters["mock://"]) is CustomAdapter
+    assert background.adapters["mock://"] is not adapter
+    assert hook in background.hooks["response"]
+    source.close()
 
 
 def test_fast_metadata_is_reported_without_waiting_for_slow_candidate(video_page):

@@ -9,6 +9,7 @@ import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass, replace
+from enum import Enum
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Optional
@@ -34,6 +35,18 @@ class DownloadJob:
     url: str
     output_path: str
     title: str
+    source_page_url: str = ""
+
+
+@dataclass(frozen=True)
+class PageTitleUpdate:
+    page_url: str
+    title: str
+
+
+class PreloadState(str, Enum):
+    SUCCESS = "success"
+    STOPPED = "stopped"
 
 
 @dataclass(frozen=True)
@@ -41,7 +54,8 @@ class PreloadResult:
     candidates: list
     filename_title: str
     page_title: str
-    state: str = "success"
+    page_url: str
+    state: PreloadState = PreloadState.SUCCESS
 
 
 class M3U8DownloaderGUI:
@@ -75,6 +89,8 @@ class M3U8DownloaderGUI:
         self._extract_stop_flag = threading.Event()
         self._candidate_items: dict = {}
         self._page_title: str = ""
+        self._candidate_page_url: str = ""
+        self._current_source_page_url: str = ""
         # 只保留最近一次完成的预载，链接与标题作为一个对象交接。
         self._pending_extract: list = []
 
@@ -607,6 +623,7 @@ class M3U8DownloaderGUI:
         self._status_var.set("正在下载...")
         candidate_urls = {candidate.url for candidate in self._candidates}
         display_title = self._page_title if url in candidate_urls and self._page_title else ""
+        self._current_source_page_url = self._candidate_page_url if url in candidate_urls else ""
         self._set_current_download_info(output_path, display_title)
         self._log("下载进行中可预载下一网页，链接和标题将在当前下载结束后一起回填")
 
@@ -645,6 +662,19 @@ class M3U8DownloaderGUI:
     def _clear_current_download_info(self) -> None:
         self._current_title_var.set("当前标题：—")
         self._current_output_var.set("保存文件：—")
+        self._current_source_page_url = ""
+
+    def _apply_page_title(self, page_url: str, title: str) -> None:
+        """记录完整网页标题，并补写从早到候选启动的下载任务。"""
+        if not title or page_url != self._candidate_page_url:
+            return
+        self._page_title = title
+        self._pending_jobs = [
+            replace(job, title=title) if job.source_page_url == page_url else job
+            for job in self._pending_jobs
+        ]
+        if self._downloading and self._current_source_page_url == page_url:
+            self._current_title_var.set(f"当前标题：{title}")
 
     def _resolve_proxy(self) -> "tuple[str, bool]":
         """根据 UI 解析代理配置.
@@ -936,7 +966,7 @@ class M3U8DownloaderGUI:
             # 结果和标题在主线程一起交接，避免下载完成与工作线程暂存结果竞态。
             if self._downloading:
                 self._pending_extract[:] = [preload_result]
-                if preload_result.state == "success":
+                if preload_result.state == PreloadState.SUCCESS:
                     self._preload_status_var.set(
                         f"预载：成功，找到 {len(preload_result.candidates)} 条，等待当前下载结束"
                     )
@@ -944,12 +974,14 @@ class M3U8DownloaderGUI:
                     self._preload_status_var.set("预载：已停止，保留已找到结果")
                 self._log("网页预载完成，链接和标题等待当前下载结束后一起回填")
                 self._on_extract_done(
-                    "pending" if preload_result.state == "success" else preload_result.state
+                    "pending" if preload_result.state == PreloadState.SUCCESS else preload_result.state
                 )
             else:
                 # 下载先结束、预载后完成时，直接显示这组配套结果。
                 self._pending_extract.clear()
                 self._fill_tree(preload_result.candidates)
+                self._candidate_page_url = preload_result.page_url
+                self._apply_page_title(preload_result.page_url, preload_result.page_title)
                 if preload_result.filename_title:
                     self._suggest_filename(preload_result.filename_title)
                 self._preload_status_var.set(
@@ -958,6 +990,8 @@ class M3U8DownloaderGUI:
                 self._on_extract_done(preload_result.state)
         elif msg_type == "preload_status":
             self._preload_status_var.set(str(data))
+        elif msg_type == "page_title" and isinstance(data, PageTitleUpdate):
+            self._apply_page_title(data.page_url, data.title)
         elif msg_type == "suggest_filename":
             # 抽取成功后用网页标题段落自动填充输出文件名（仅当用户未改过默认名）
             if not self._downloading:
@@ -1067,6 +1101,7 @@ class M3U8DownloaderGUI:
             self._preload_status_var.set("预载：正在提取下一网页…")
         if not preload:
             self._page_title = ""
+            self._candidate_page_url = page_url
             self._clear_tree()
         self._log("正在抽取网页中的 m3u8 ...")
         proxy, no_proxy = self._resolve_proxy()
@@ -1106,27 +1141,32 @@ class M3U8DownloaderGUI:
                 no_proxy=no_proxy,
                 proxy=proxy,
                 stop_event=self._extract_stop_flag,
-                **({"on_candidate": (lambda c: None) if preload else
+                **({"on_candidate":
                    (lambda c: self._queue_message("candidate_update", replace(c)))}
-                   if deep else {}),
+                   if deep and not preload else {}),
             )
             seg = extract_title_segment(title) if title else ""
 
             if preload:
-                result = "stopped" if self._extract_stop_flag.is_set() else "success"
+                result = (PreloadState.STOPPED if self._extract_stop_flag.is_set()
+                          else PreloadState.SUCCESS)
                 self._queue_message(
-                    "preloaded_extract", PreloadResult(candidates, seg, title, result)
+                    "preloaded_extract", PreloadResult(candidates, seg, title, page_url, result)
                 )
             elif deep:
                 # 按 URL 更新原行，不清空列表、不重新排序，保留选择和滚动位置。
                 for candidate in candidates:
                     self._queue_message("candidate_update", replace(candidate))
+                if title:
+                    self._queue_message("page_title", PageTitleUpdate(page_url, title))
                 if seg:
                     self._queue_message("suggest_filename", seg)
                 result = "stopped" if self._extract_stop_flag.is_set() else "success"
                 self._queue_message("extract_done", result)
             else:
                 self._queue_message("candidates", candidates)
+                if title:
+                    self._queue_message("page_title", PageTitleUpdate(page_url, title))
                 # 仅在有标题段落时自动命名；不再单独打印标题提取日志，避免与命名日志重复
                 if seg:
                     self._queue_message("suggest_filename", seg)
@@ -1213,7 +1253,6 @@ class M3U8DownloaderGUI:
         """
         if not base_name:
             return
-        self._page_title = base_name
         if self._filename_touched:
             return
         self._filename_var.set(base_name)
@@ -1263,6 +1302,8 @@ class M3U8DownloaderGUI:
         preload_result = self._pending_extract[-1]
         self._pending_extract.clear()
         self._fill_tree(preload_result.candidates)
+        self._candidate_page_url = preload_result.page_url
+        self._apply_page_title(preload_result.page_url, preload_result.page_title)
         self._preload_status_var.set(
             f"预载：已载入 {len(preload_result.candidates)} 条结果"
         )
@@ -1396,7 +1437,9 @@ class M3U8DownloaderGUI:
             output_path = normalize_mp4_filename(
                 os.path.join(save_dir, output_name)
             )
-            jobs.append(DownloadJob(url, output_path, self._page_title or row_title))
+            jobs.append(DownloadJob(
+                url, output_path, self._page_title or row_title, self._candidate_page_url,
+            ))
 
         if not jobs:
             return
@@ -1443,6 +1486,7 @@ class M3U8DownloaderGUI:
             self._stop_flag.clear()
             self._progress_var.set(0)
             self._status_var.set("正在下载...")
+            self._current_source_page_url = job.source_page_url
             self._set_current_download_info(output_path, job.title)
             self._stop_btn.configure(state=tk.NORMAL)
 

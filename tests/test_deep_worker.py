@@ -133,6 +133,18 @@ def test_deep_worker_path_source_mode():
     assert os.path.isfile(path)
 
 
+def test_find_system_python_uses_current_source_interpreter_without_path(monkeypatch, tmp_path):
+    """源码解释器可用时，即使 py/python 不在 PATH 也应能启动可取消 worker。"""
+    current_python = tmp_path / "python.exe"
+    current_python.write_bytes(b"")
+    monkeypatch.setattr(extractor.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(extractor, "_FALLBACK_PYTHON_PATHS", ())
+    monkeypatch.setattr(extractor.sys, "executable", str(current_python))
+    monkeypatch.setattr(extractor.sys, "frozen", False, raising=False)
+
+    assert extractor._find_system_python() == [str(current_python)]
+
+
 def test_deep_worker_path_frozen_mode(monkeypatch, tmp_path):
     """冻结运行：worker 来自 sys._MEIPASS\\m3u8_downloader\\deep_worker.py."""
     pkg_dir = tmp_path / "m3u8_downloader"

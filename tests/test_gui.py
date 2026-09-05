@@ -10,7 +10,9 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from m3u8_downloader.gui import DownloadJob, M3U8DownloaderGUI, PreloadResult, run_gui
+from m3u8_downloader.gui import (
+    DownloadJob, M3U8DownloaderGUI, PageTitleUpdate, PreloadResult, PreloadState, run_gui,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -885,6 +887,34 @@ class TestWebExtractAndMultiDownload:
         assert ("candidates", cands) in messages
         assert not any(kind == "preloaded_extract" for kind, _ in messages)
 
+    def test_deep_preload_does_not_pass_noop_candidate_callback(self, gui_instance):
+        """预载只靠显式 preload 状态，不用空回调暗示执行模式。"""
+        with patch(
+            "m3u8_downloader.extractor.extract_m3u8_from_page_with_title",
+            return_value=([], "下一集"),
+        ) as extract:
+            gui_instance._extract_worker("https://x/page", True, preload=True)
+        assert "on_candidate" not in extract.call_args.kwargs
+
+    def test_late_page_title_updates_active_and_queued_downloads(self, gui_instance):
+        """深度候选先出现并开始下载后，稍后取得的完整网页标题仍应回填。"""
+        page_url = "https://x/page"
+        gui_instance._candidate_page_url = page_url
+        gui_instance._current_source_page_url = page_url
+        gui_instance._downloading = True
+        gui_instance._pending_jobs = [
+            DownloadJob("https://x/b.m3u8", "/tmp/b.mp4", "旧标题", page_url)
+        ]
+
+        gui_instance._handle_message(
+            "page_title", PageTitleUpdate(page_url, "剧集标题 - 视频站")
+        )
+        gui_instance._suggest_filename("剧集标题")
+
+        assert gui_instance._page_title == "剧集标题 - 视频站"
+        gui_instance._current_title_var.set.assert_called_with("当前标题：剧集标题 - 视频站")
+        assert gui_instance._pending_jobs[0].title == "剧集标题 - 视频站"
+
     def test_extract_worker_survives_exception(self, gui_instance):
         with patch(
             "m3u8_downloader.extractor.extract_m3u8_from_page_with_title",
@@ -958,7 +988,9 @@ class TestWebExtractAndMultiDownload:
     def test_flush_pending_extract_displays_pending(self, gui_instance):
         """下载完成后应显示挂起的预加载提取结果（候选 + 标题自动命名）."""
         cands = [Candidate(url="https://x/b.m3u8")]
-        gui_instance._pending_extract = [PreloadResult(cands, "预加载标题", "预加载标题 - 完整")]
+        gui_instance._pending_extract = [
+            PreloadResult(cands, "预加载标题", "预加载标题 - 完整", "https://x/next")
+        ]
         gui_instance._candidates = []
         gui_instance._filename_touched = False
         gui_instance._tree.get_children.return_value = []
@@ -989,7 +1021,11 @@ class TestWebExtractAndMultiDownload:
         """有预填标题时，下载完成后应保留标题（不清空）."""
         cands = [Candidate(url="https://x/b.m3u8")]
         gui_instance._pending_jobs = []
-        gui_instance._pending_extract = [PreloadResult(cands, "预加载标题", "完整标题")]
+        gui_instance._pending_extract = [
+            PreloadResult(
+                cands, "预加载标题", "完整标题", "https://x/next", PreloadState.SUCCESS
+            )
+        ]
         gui_instance._candidates = []
         gui_instance._filename_touched = True
         gui_instance._tree.get_children.return_value = []
