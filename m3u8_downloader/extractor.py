@@ -88,12 +88,6 @@ def _inject_system_playwright() -> bool:
     candidates: List[str] = []
 
     # 1) 通过 py 启动器探测 Python 3.13 的 site-packages（最常见安装位置）
-    # 源码运行时当前解释器最可靠，也不依赖 py/python 是否加入 PATH。
-    # 冻结程序的 sys.executable 指向自身 EXE，不能拿来执行 worker 脚本。
-    current_python = sys.executable
-    if not getattr(sys, "frozen", False) and current_python and os.path.isfile(current_python):
-        return [current_python]
-
     py = shutil.which("py") or shutil.which("py.exe")
     if py:
         try:
@@ -704,7 +698,12 @@ def _find_system_python() -> Optional[List[str]]:
     # 源码运行时当前解释器最可靠，也不依赖 py/python 是否加入 PATH。
     # 冻结程序的 sys.executable 指向自身 EXE，不能拿来执行 worker 脚本。
     current_python = sys.executable
-    if not getattr(sys, "frozen", False) and current_python and os.path.isfile(current_python):
+    if (
+        not getattr(sys, "frozen", False)
+        and current_python
+        and os.path.isfile(current_python)
+        and _playwright_importable()
+    ):
         return [current_python]
 
     py = shutil.which("py") or shutil.which("py.exe")

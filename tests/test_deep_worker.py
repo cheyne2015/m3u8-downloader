@@ -141,8 +141,25 @@ def test_find_system_python_uses_current_source_interpreter_without_path(monkeyp
     monkeypatch.setattr(extractor, "_FALLBACK_PYTHON_PATHS", ())
     monkeypatch.setattr(extractor.sys, "executable", str(current_python))
     monkeypatch.setattr(extractor.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(extractor, "_playwright_importable", lambda: True)
 
     assert extractor._find_system_python() == [str(current_python)]
+
+
+def test_find_system_python_skips_current_interpreter_without_playwright(monkeypatch, tmp_path):
+    """当前解释器缺 Playwright 时应继续寻找已配置的系统解释器。"""
+    current_python = tmp_path / "python.exe"
+    current_python.write_bytes(b"")
+    fallback_python = tmp_path / "python313.exe"
+    fallback_python.write_bytes(b"")
+    monkeypatch.setattr(extractor.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(extractor, "_FALLBACK_PYTHON_PATHS", (str(fallback_python),))
+    monkeypatch.setattr(extractor.sys, "executable", str(current_python))
+    monkeypatch.setattr(extractor.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(extractor, "_playwright_importable", lambda: False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+
+    assert extractor._find_system_python() == [str(fallback_python)]
 
 
 def test_deep_worker_path_frozen_mode(monkeypatch, tmp_path):
