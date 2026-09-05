@@ -13,7 +13,8 @@
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from threading import Event
+from typing import Callable, Dict, List, Optional
 
 import requests
 
@@ -391,6 +392,8 @@ def estimate_many(
     session: Optional[requests.Session] = None,
     timeout: int = 30,
     max_workers: int = DEFAULT_ESTIMATE_WORKERS,
+    on_result: Optional[Callable[[str, SizeEstimate], None]] = None,
+    stop_event: Optional[Event] = None,
 ) -> Dict[str, SizeEstimate]:
     """并发估算多个 m3u8 链接.
 
@@ -402,6 +405,8 @@ def estimate_many(
         session: 复用的 HTTP 会话；为 None 时内部自建并在结束时关闭.
         timeout: HTTP 超时秒数.
         max_workers: 并发数，内部会被钳制到 ``1..MAX_ESTIMATE_WORKERS``.
+        on_result: 在调用线程中逐个报告 ``(url, estimate)``，不必等待最慢的 URL。
+        stop_event: 停止后跳过尚未开始的探测；已发送请求按原超时结束。
 
     Returns:
         ``{url: SizeEstimate}``，key 为输入的原样 URL.
@@ -427,19 +432,27 @@ def estimate_many(
 
     workers = max(1, min(int(max_workers or 1), MAX_ESTIMATE_WORKERS, len(unique_urls)))
 
+    def probe(target_url):
+        if stop_event and stop_event.is_set():
+            return SizeEstimate(error="已停止估算")
+        return _safe_estimate(target_url, session, timeout, DEFAULT_HEAD_SAMPLES)
+
+    def report(target_url):
+        if on_result and not (stop_event and stop_event.is_set()):
+            on_result(target_url, results[target_url])
+
     try:
         if workers == 1:
             for target_url in unique_urls:
-                results[target_url] = _safe_estimate(
-                    target_url, session, timeout, DEFAULT_HEAD_SAMPLES
-                )
+                if stop_event and stop_event.is_set():
+                    break
+                results[target_url] = probe(target_url)
+                report(target_url)
             return results
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(
-                    _safe_estimate, target_url, session, timeout, DEFAULT_HEAD_SAMPLES
-                ): target_url
+                executor.submit(probe, target_url): target_url
                 for target_url in unique_urls
             }
             for future in as_completed(futures):
@@ -450,6 +463,7 @@ def estimate_many(
                     results[target_url] = SizeEstimate(
                         error=str(exc) or type(exc).__name__
                     )
+                report(target_url)
         return results
     finally:
         if own_session and session is not None:

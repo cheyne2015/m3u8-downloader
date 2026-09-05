@@ -7,7 +7,7 @@
 冻结 EXE（PyInstaller）内**无法** import 外部 site-packages（FrozenImporter 使
 PathFinder 无法接管），因此 :func:`m3u8_downloader.extractor._deep_extract` 在
 冻结环境下改为「调用系统 Python 执行本脚本」：本脚本用 playwright 打开页面、
-收集 m3u8 链接，结果以 JSON 数组打印到 stdout，EXE 侧解析 JSON 构造候选。
+收集 m3u8 链接，结果以 JSON 打印到 stdout，EXE 侧解析并构造候选。
 
 用法::
 
@@ -16,8 +16,9 @@ PathFinder 无法接管），因此 :func:`m3u8_downloader.extractor._deep_extra
 
 协议
 ----
-* 成功：stdout 输出单行 JSON 数组（原始 URL 字符串列表，可能含相对路径），
-  退出码 ``0``；
+* 成功：stdout 输出单行 ``{"urls": [...], "title": "..."}``，退出码 ``0``；
+* ``--stream``：发现链接时先输出 ``{"event": "candidate", "url": "..."}``，
+  每行立即刷新，最后仍输出完整结果；默认协议不变。
 * 失败：原因写到 stderr，退出码非 0：
 
   * ``2`` —— 缺少 playwright（``ModuleNotFoundError``）；
@@ -41,6 +42,7 @@ import re
 import sys
 import time
 from typing import Callable, List, Optional, Tuple
+from urllib.parse import urljoin
 
 # 浏览器目录默认值：与 extractor._ensure_playwright_browsers_path() 保持一致，
 # 仅在环境变量与命令行参数都未指定时使用（setdefault 语义，不覆盖用户设置）。
@@ -180,7 +182,8 @@ def _safe_abort(route) -> None:
         pass
 
 
-def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "") -> List[str]:
+def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "",
+                  on_candidate: Optional[Callable[[str], None]] = None) -> Tuple[List[str], str]:
     """用 playwright 打开页面并收集 m3u8 链接.
 
     收集两条路：网络响应中的 URL + 最终 DOM 文本扫描（兼容脚本拼接但
@@ -213,12 +216,16 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "") -> List
         """加入一条命中（清洗 + 去重），回调里抛异常会被 playwright 吞掉."""
         try:
             cleaned = _is_m3u8_like(raw or "")
+            if cleaned:
+                cleaned = urljoin(url, cleaned)
         except Exception:
             return
         if cleaned and cleaned not in seen:
             seen.add(cleaned)
             found.append(cleaned)
             _last_new[0] = time.time()
+            if on_candidate:
+                on_candidate(cleaned)
 
     content = ""
     with sync_playwright() as p:
@@ -302,6 +309,7 @@ def _build_parser() -> argparse.ArgumentParser:
         description="深度模式子进程：用 playwright 抓取页面中的 m3u8 链接（JSON 输出）",
     )
     parser.add_argument("--url", required=True, help="待抓取的页面 URL")
+    parser.add_argument("--stream", action="store_true", help="逐行输出候选事件，最后输出完整结果")
     parser.add_argument("--timeout", type=int, default=30, help="导航超时秒数（默认 30）")
     parser.add_argument(
         "--wait-ms", type=int, default=5000, help="网络静默后额外等待毫秒数（默认 5000）"
@@ -349,7 +357,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     proxy = (args.proxy or os.environ.get("M3U8_DEEP_PROXY", "")).strip()
 
     try:
-        urls, title = _collect_urls(args.url, args.timeout, args.wait_ms, proxy=proxy)
+        def emit_candidate(raw: str) -> None:
+            print(json.dumps({"event": "candidate", "url": raw}, ensure_ascii=False), flush=True)
+
+        urls, title = _collect_urls(
+            args.url, args.timeout, args.wait_ms, proxy=proxy,
+            **({"on_candidate": emit_candidate} if args.stream else {}),
+        )
     except ImportError as exc:
         _log(f"[deep_worker] 缺少 playwright：{exc}")
         _log("[deep_worker] 请在系统 Python 中执行：pip install playwright")
@@ -363,8 +377,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         _log(f"[deep_worker] 执行失败：{exc}")
         return EXIT_RUNTIME_ERROR
 
-    # stdout 只允许这一行 JSON（URL 列表 + 页面标题）
-    print(json.dumps({"urls": urls, "title": title}, ensure_ascii=False))
+    # 默认保持单个 JSON 的旧协议；--stream 时前面可以有逐行候选事件。
+    print(json.dumps({"urls": urls, "title": title}, ensure_ascii=False), flush=True)
     return EXIT_OK
 
 

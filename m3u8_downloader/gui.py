@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from dataclasses import replace
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Optional
@@ -56,6 +57,8 @@ class M3U8DownloaderGUI:
         self._candidates: list = []
         self._pending_jobs: list = []
         self._extracting: bool = False
+        self._extract_stop_flag = threading.Event()
+        self._candidate_items: dict = {}
         # 下载中预加载的提取结果（挂起）：[(candidates, title_seg, title), ...]
         self._pending_extract: list = []
 
@@ -95,6 +98,11 @@ class M3U8DownloaderGUI:
             url_frame, text="提取网页", command=self._start_extract, width=10
         )
         self._extract_btn.grid(row=0, column=2, padx=(5, 0))
+        self._stop_extract_btn = ttk.Button(
+            url_frame, text="停止提取", command=self._stop_extract,
+            width=10, state=tk.DISABLED,
+        )
+        self._stop_extract_btn.grid(row=0, column=3, padx=(5, 0))
 
         row += 1
 
@@ -265,16 +273,45 @@ class M3U8DownloaderGUI:
         # 单击切换多选：点一下选中、再点一下取消，且不影响其他已选行（无需 Ctrl/Shift）
         self._tree.bind("<Button-1>", self._on_tree_single_click)
         self._tree.bind("<Double-1>", self._on_tree_double_click)
+        self._tree.bind("<<TreeviewSelect>>", self._on_tree_selection_changed)
         self._tree_click_after_id = None  # 区分单击/双击的延迟定时器
 
+        result_bar = ttk.Frame(extract_frame)
+        result_bar.grid(row=1, column=0, columnspan=2, sticky=tk.EW, pady=(5, 0))
+        result_bar.columnconfigure(5, weight=1)
+
         self._download_selected_btn = ttk.Button(
-            extract_frame,
+            result_bar,
             text="下载选中",
             command=self._download_selected,
             state=tk.DISABLED,
-            width=15,
+            width=12,
         )
-        self._download_selected_btn.grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
+        self._download_selected_btn.grid(row=0, column=0, padx=(0, 5))
+        self._select_all_btn = ttk.Button(
+            result_bar, text="全选", command=self._select_all_candidates,
+            state=tk.DISABLED, width=7,
+        )
+        self._select_all_btn.grid(row=0, column=1, padx=(0, 5))
+        self._clear_selection_btn = ttk.Button(
+            result_bar, text="取消选择", command=self._clear_candidate_selection,
+            state=tk.DISABLED, width=9,
+        )
+        self._clear_selection_btn.grid(row=0, column=2, padx=(0, 5))
+        self._copy_links_btn = ttk.Button(
+            result_bar, text="复制链接", command=self._copy_selected_links,
+            state=tk.DISABLED, width=9,
+        )
+        self._copy_links_btn.grid(row=0, column=3, padx=(0, 10))
+        self._selection_summary_var = tk.StringVar(value="共 0 条，已选 0 条")
+        ttk.Label(result_bar, textvariable=self._selection_summary_var).grid(
+            row=0, column=4, sticky=tk.W,
+        )
+
+        self._preload_status_var = tk.StringVar(value="预载：未开始")
+        ttk.Label(extract_frame, textvariable=self._preload_status_var).grid(
+            row=2, column=0, columnspan=2, sticky=tk.W, pady=(5, 0),
+        )
 
         row += 1
 
@@ -310,6 +347,15 @@ class M3U8DownloaderGUI:
         self._status_var = tk.StringVar(value="就绪")
         status_label = ttk.Label(progress_frame, textvariable=self._status_var, anchor=tk.W)
         status_label.grid(row=1, column=0, sticky=tk.EW)
+
+        self._current_title_var = tk.StringVar(value="当前标题：—")
+        self._current_output_var = tk.StringVar(value="保存文件：—")
+        ttk.Label(progress_frame, textvariable=self._current_title_var, anchor=tk.W).grid(
+            row=2, column=0, sticky=tk.EW, pady=(5, 0),
+        )
+        ttk.Label(progress_frame, textvariable=self._current_output_var, anchor=tk.W).grid(
+            row=3, column=0, sticky=tk.EW,
+        )
 
         row += 1
 
@@ -543,7 +589,8 @@ class M3U8DownloaderGUI:
         # 重置进度
         self._progress_var.set(0)
         self._status_var.set("正在下载...")
-        self._log("下载进行中可粘贴新网页链接并点击「提取网页」预加载，结果将在下载完成后显示")
+        self._set_current_download_info(output_path)
+        self._log("下载进行中可预载下一网页，链接和标题将在当前下载结束后一起回填")
 
         # 启动下载线程
         self._download_thread = threading.Thread(
@@ -554,14 +601,32 @@ class M3U8DownloaderGUI:
         self._download_thread.start()
 
     def _stop_download(self) -> None:
-        """点击停止按钮的回调：下载或提取进行中都能停止."""
-        if self._downloading or self._extracting:
+        """停止下载，不影响独立进行的网页扫描。"""
+        if self._downloading:
             self._stop_flag.set()
+            self._pending_jobs.clear()
+            self._log("正在停止下载...")
+            self._status_var.set("正在停止下载...")
+
+    def _stop_extract(self) -> None:
+        """停止扫描，保留已有候选，不设置下载停止信号。"""
+        if self._extracting:
+            self._extract_stop_flag.set()
+            self._stop_extract_btn.configure(state=tk.DISABLED)
             if self._downloading:
-                self._log("正在停止下载...")
-            else:
-                self._log("正在停止提取...")
-            self._status_var.set("正在停止...")
+                self._preload_status_var.set("预载：正在停止，已有结果将保留")
+            self._log("正在停止提取，已找到的结果将保留")
+
+    def _set_current_download_info(self, output_path: str) -> None:
+        """在固定状态区显示当前任务，避免与预载网页混淆。"""
+        filename = os.path.basename(output_path)
+        title = os.path.splitext(filename)[0] or "—"
+        self._current_title_var.set(f"当前标题：{title}")
+        self._current_output_var.set(f"保存文件：{filename or '—'}")
+
+    def _clear_current_download_info(self) -> None:
+        self._current_title_var.set("当前标题：—")
+        self._current_output_var.set("保存文件：—")
 
     def _resolve_proxy(self) -> "tuple[str, bool]":
         """根据 UI 解析代理配置.
@@ -846,9 +911,35 @@ class M3U8DownloaderGUI:
             self._on_download_done(str(data))
         elif msg_type == "candidates":
             self._fill_tree(data if isinstance(data, list) else [])
+        elif msg_type == "candidate_update":
+            self._upsert_candidate(data)
+        elif msg_type == "preloaded_extract":
+            candidates, segment, title, result = data
+            # 结果和标题在主线程一起交接，避免下载完成与工作线程暂存结果竞态。
+            if self._downloading:
+                self._pending_extract[:] = [(candidates, segment, title)]
+                if result == "success":
+                    self._preload_status_var.set(
+                        f"预载：成功，找到 {len(candidates)} 条，等待当前下载结束"
+                    )
+                else:
+                    self._preload_status_var.set("预载：已停止，保留已找到结果")
+                self._log("网页预载完成，链接和标题等待当前下载结束后一起回填")
+                self._on_extract_done("pending" if result == "success" else result)
+            else:
+                # 下载先结束、预载后完成时，直接显示这组配套结果。
+                self._pending_extract.clear()
+                self._fill_tree(candidates)
+                if segment:
+                    self._suggest_filename(segment)
+                self._preload_status_var.set(f"预载：已载入 {len(candidates)} 条结果")
+                self._on_extract_done(result)
+        elif msg_type == "preload_status":
+            self._preload_status_var.set(str(data))
         elif msg_type == "suggest_filename":
             # 抽取成功后用网页标题段落自动填充输出文件名（仅当用户未改过默认名）
-            self._suggest_filename(str(data))
+            if not self._downloading:
+                self._suggest_filename(str(data))
         elif msg_type == "extract_done":
             self._on_extract_done(str(data))
 
@@ -900,9 +991,10 @@ class M3U8DownloaderGUI:
             return
 
         self._downloading = False
+        self._clear_current_download_info()
         self._start_btn.configure(state=tk.NORMAL)
         self._stop_btn.configure(state=tk.DISABLED)
-        self._extract_btn.configure(state=tk.NORMAL)
+        self._extract_btn.configure(state=tk.DISABLED if self._extracting else tk.NORMAL)
         self._download_selected_btn.configure(
             state=tk.NORMAL if self._candidates else tk.DISABLED
         )
@@ -930,7 +1022,7 @@ class M3U8DownloaderGUI:
     def _start_extract(self) -> None:
         """点击「提取网页」按钮的回调：起 daemon 线程抽取页内 m3u8.
 
-        下载进行中也可提取（「网页预加载」）：结果会挂起，等当前下载+合成完成后再显示。
+        下载中预载的链接和标题在当前下载结束后一起回填；空闲时深度结果实时显示。
         """
         if self._extracting:
             return
@@ -943,25 +1035,27 @@ class M3U8DownloaderGUI:
             self._url_var.set(page_url)
 
         self._extracting = True
-        self._stop_flag.clear()
+        self._extract_stop_flag.clear()
         self._extract_btn.configure(state=tk.DISABLED)
+        self._stop_extract_btn.configure(state=tk.NORMAL)
         self._download_selected_btn.configure(state=tk.DISABLED)
-        # 提取中可点「停止」中断；下载中提取时停止按钮本已启用，保持可用即可
-        if not self._downloading:
-            self._stop_btn.configure(state=tk.NORMAL)
-        if not self._downloading:
+        deep = bool(self._deep_var.get())
+        preload = self._downloading
+        if preload:
+            self._preload_status_var.set("预载：正在提取下一网页…")
+        if not preload:
             self._clear_tree()
         self._log("正在抽取网页中的 m3u8 ...")
-        deep = bool(self._deep_var.get())
         proxy, no_proxy = self._resolve_proxy()
         threading.Thread(
             target=self._extract_worker,
-            args=(page_url, deep, no_proxy, proxy),
+            args=(page_url, deep, no_proxy, proxy, preload),
             daemon=True,
         ).start()
 
     def _extract_worker(
-        self, page_url: str, deep: bool, no_proxy: bool = False, proxy: str = ""
+        self, page_url: str, deep: bool, no_proxy: bool = False, proxy: str = "",
+        preload: bool = False,
     ) -> None:
         """抽取工作线程：调用 extractor，通过队列回传候选/完成消息.
 
@@ -970,6 +1064,7 @@ class M3U8DownloaderGUI:
             deep: 是否深度模式.
             no_proxy: 为 True 时所有请求直连、跳过系统代理环境变量.
             proxy: 手动代理地址（如 ``127.0.0.1:7897``）；为空则不使用.
+            preload: 启动提取时是否已有下载；固定本次行为，不随下载完成时机改变。
         """
         from m3u8_downloader.extractor import extract_m3u8_from_page_with_title
         from m3u8_downloader.utils import extract_title_segment
@@ -987,11 +1082,25 @@ class M3U8DownloaderGUI:
                 estimate=True,
                 no_proxy=no_proxy,
                 proxy=proxy,
-                stop_event=self._stop_flag,
+                stop_event=self._extract_stop_flag,
+                **({"on_candidate": (lambda c: None) if preload else
+                   (lambda c: self._queue_message("candidate_update", replace(c)))}
+                   if deep else {}),
             )
             seg = extract_title_segment(title) if title else ""
 
-            if self._downloading:
+            if preload:
+                result = "stopped" if self._extract_stop_flag.is_set() else "success"
+                self._queue_message("preloaded_extract", (candidates, seg, title, result))
+            elif deep:
+                # 按 URL 更新原行，不清空列表、不重新排序，保留选择和滚动位置。
+                for candidate in candidates:
+                    self._queue_message("candidate_update", replace(candidate))
+                if seg:
+                    self._queue_message("suggest_filename", seg)
+                result = "stopped" if self._extract_stop_flag.is_set() else "success"
+                self._queue_message("extract_done", result)
+            elif self._downloading:
                 # 网页预加载：下载进行中，挂起结果，等下载+合成完成后再显示
                 self._pending_extract.append((candidates, seg, title))
                 self._queue_message("log", "网页提取完成，等待当前下载结束后显示结果")
@@ -1003,17 +1112,46 @@ class M3U8DownloaderGUI:
                     self._queue_message("suggest_filename", seg)
                 self._queue_message("extract_done", "success")
         except Exception as e:  # 任何异常都不让 GUI 崩溃
-            if self._stop_flag.is_set():
+            if self._extract_stop_flag.is_set():
+                if preload:
+                    self._queue_message("preload_status", "预载：已停止")
                 self._queue_message("log", "提取已停止")
                 self._queue_message("extract_done", "stopped")
             else:
+                if preload:
+                    self._queue_message("preload_status", "预载：失败，请查看日志")
                 self._queue_message("log", f"抽取失败：{e}")
                 self._queue_message("extract_done", "error")
 
     def _clear_tree(self) -> None:
         """清空候选列表 Treeview."""
+        self._candidates = []
+        self._candidate_items.clear()
         for item in self._tree.get_children():
             self._tree.delete(item)
+        self._update_result_actions()
+
+    def _upsert_candidate(self, candidate) -> None:
+        """同一 URL 更新已有行，新 URL 追加；仅在 Tk 主线程调用。"""
+        existing = self._candidate_items.get(candidate.url)
+        if existing:
+            item, index = existing
+            self._candidates[index] = candidate
+        else:
+            index = len(self._candidates)
+            self._candidates.append(candidate)
+            item = self._tree.insert("", tk.END)
+            self._candidate_items[candidate.url] = (item, index)
+        ctype = "master" if candidate.is_master else ("media" if candidate.reachable else "-")
+        self._tree.item(item, values=(
+            index + 1, candidate.display_size(), candidate.display_duration(),
+            candidate.display_bandwidth(), ctype, candidate.display_mode(),
+            candidate.title or ("-" if candidate.reachable else "(不可达)"), candidate.url,
+        ))
+        self._update_result_actions()
+        self._download_selected_btn.configure(state=tk.DISABLED if self._downloading else tk.NORMAL)
+        if self._extracting and not self._downloading:
+            self._status_var.set(f"已找到 {len(self._candidates)} 个结果，可选择下载；正在继续提取…")
 
     def _fill_tree(self, candidates: list) -> None:
         """把候选列表填入 Treeview.
@@ -1026,7 +1164,7 @@ class M3U8DownloaderGUI:
         for i, c in enumerate(candidates, 1):
             ctype = "master" if c.is_master else ("-" if not c.reachable else "media")
             title = c.title or ("(不可达)" if not c.reachable else "-")
-            self._tree.insert(
+            item = self._tree.insert(
                 "",
                 tk.END,
                 values=(
@@ -1040,6 +1178,8 @@ class M3U8DownloaderGUI:
                     c.url,
                 ),
             )
+            self._candidate_items[c.url] = (item, i - 1)
+        self._update_result_actions()
         if candidates:
             self._download_selected_btn.configure(state=tk.NORMAL)
 
@@ -1066,12 +1206,16 @@ class M3U8DownloaderGUI:
         """
         self._extracting = False
         self._extract_btn.configure(state=tk.NORMAL)
+        self._stop_extract_btn.configure(state=tk.DISABLED)
         self._download_selected_btn.configure(
             state=tk.NORMAL if (self._candidates and not self._downloading) else tk.DISABLED
         )
         # 非下载状态（未在下载）时，抽取结束应还原停止按钮为禁用
         if not self._downloading:
             self._stop_btn.configure(state=tk.DISABLED)
+        else:
+            self._log("提取已停止，保留已有结果" if result == "stopped" else "网页提取结束，下载继续")
+            return
         if result == "success":
             self._status_var.set("抽取完成")
             mode = getattr(self, "_extract_mode", "普通")
@@ -1098,6 +1242,7 @@ class M3U8DownloaderGUI:
         candidates, seg, _ = self._pending_extract[-1]
         self._pending_extract.clear()
         self._fill_tree(candidates)
+        self._preload_status_var.set(f"预载：已载入 {len(candidates)} 条结果")
         if seg:
             # 下载完成后进入新一轮，重置手动标志，让预填标题稳定填入文件名栏
             self._filename_touched = False
@@ -1108,6 +1253,43 @@ class M3U8DownloaderGUI:
         self._log("已显示预加载网页的提取结果")
         self._status_var.set("抽取完成")
         return False
+
+    def _on_tree_selection_changed(self, _event=None) -> None:
+        self._update_result_actions()
+
+    def _update_result_actions(self) -> None:
+        """同步候选计数和选择工具状态。"""
+        total = len(self._tree.get_children())
+        selected = len(self._tree.selection())
+        self._selection_summary_var.set(f"共 {total} 条，已选 {selected} 条")
+        self._select_all_btn.configure(state=tk.NORMAL if total else tk.DISABLED)
+        selected_state = tk.NORMAL if selected else tk.DISABLED
+        self._clear_selection_btn.configure(state=selected_state)
+        self._copy_links_btn.configure(state=selected_state)
+
+    def _select_all_candidates(self) -> None:
+        items = self._tree.get_children()
+        if items:
+            self._tree.selection_set(items)
+        self._update_result_actions()
+
+    def _clear_candidate_selection(self) -> None:
+        self._tree.selection_remove(self._tree.selection())
+        self._update_result_actions()
+
+    def _copy_selected_links(self) -> None:
+        links = []
+        for item in self._tree.selection():
+            values = self._tree.item(item, "values")
+            if values and len(values) > 7:
+                links.append(str(values[7]))
+        if not links:
+            self._log("提示：请先选择要复制的链接")
+            return
+        self._root.clipboard_clear()
+        self._root.clipboard_append("\n".join(links))
+        self._root.update_idletasks()
+        self._log(f"已复制 {len(links)} 条链接")
 
     def _on_tree_single_click(self, event) -> None:
         """单击候选行：切换该行选中状态，不影响其他已选行（无需 Ctrl/Shift）.
@@ -1146,6 +1328,7 @@ class M3U8DownloaderGUI:
             self._tree.selection_remove(row_id)
         else:
             self._tree.selection_add(row_id)
+        self._update_result_actions()
 
     def _on_tree_double_click(self, event) -> None:
         """双击候选行：把该行链接回填到地址框（单一下载快捷路径）."""
@@ -1167,7 +1350,7 @@ class M3U8DownloaderGUI:
 
     def _download_selected(self) -> None:
         """点击「下载选中」：把多选行组装为串行下载任务队列."""
-        if self._downloading or self._extracting:
+        if self._downloading:
             return
         sel = self._tree.selection()
         if not sel:
@@ -1196,7 +1379,7 @@ class M3U8DownloaderGUI:
 
         self._pending_jobs = jobs
         self._log(f"已加入 {len(jobs)} 个下载任务，开始串行下载")
-        self._log("下载进行中可粘贴新网页链接并点击「提取网页」预加载，结果将在下载完成后显示")
+        self._log("下载进行中可预载下一网页，链接和标题将在当前下载结束后一起回填")
         self._start_btn.configure(state=tk.DISABLED)
         self._stop_btn.configure(state=tk.NORMAL)
         # 下载进行中保留「提取网页」可用，实现网页预加载（结果挂起，下载完成后显示）
@@ -1236,6 +1419,7 @@ class M3U8DownloaderGUI:
             self._stop_flag.clear()
             self._progress_var.set(0)
             self._status_var.set("正在下载...")
+            self._set_current_download_info(output_path)
             self._stop_btn.configure(state=tk.NORMAL)
 
             self._download_thread = threading.Thread(
@@ -1248,8 +1432,9 @@ class M3U8DownloaderGUI:
 
         # 队列空（全部取消或本就没有任务）：未启动任何下载，恢复按钮
         self._downloading = False
+        self._clear_current_download_info()
         self._start_btn.configure(state=tk.NORMAL)
-        self._extract_btn.configure(state=tk.NORMAL)
+        self._extract_btn.configure(state=tk.DISABLED if self._extracting else tk.NORMAL)
         self._download_selected_btn.configure(
             state=tk.NORMAL if self._candidates else tk.DISABLED
         )

@@ -19,6 +19,7 @@
 
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -811,6 +812,7 @@ def _deep_extract_subprocess(
     wait_ms: int = DEEP_WAIT_MS,
     proxy: Optional[str] = None,
     stop_event: Optional[threading.Event] = None,
+    on_candidate: Optional[Callable[[Candidate], None]] = None,
 ) -> Tuple[List[Candidate], str]:
     """子进程路线深度抽取：调用系统 Python 执行随包分发的 ``deep_worker.py``.
 
@@ -857,6 +859,8 @@ def _deep_extract_subprocess(
         "--browsers-path", os.environ["PLAYWRIGHT_BROWSERS_PATH"],
     ]
     total_timeout = int(timeout) + int(wait_ms) // 1000 + DEEP_SUBPROCESS_MARGIN_SEC
+    if on_candidate:
+        cmd.append("--stream")
 
     # 强制子进程以 UTF-8 输出：中文 Windows 下子进程 stderr 默认用 GBK 写，
     # 而本侧按 UTF-8 解码会导致中文报错乱码（与 worker 内的 reconfigure 双保险）。
@@ -865,6 +869,8 @@ def _deep_extract_subprocess(
     # 把手动代理透传给子进程 worker（no_proxy 时 extract_m3u8_from_page 已置 proxy=None）
     if proxy:
         env["M3U8_DEEP_PROXY"] = utils._normalize_proxy(proxy)
+    else:
+        env.pop("M3U8_DEEP_PROXY", None)
 
     try:
         proc = subprocess.Popen(
@@ -884,7 +890,10 @@ def _deep_extract_subprocess(
             f"无法启动系统 Python（{' '.join(python_cmd)}）：{exc}"
         ) from exc
 
-    # 轮询等待进程结束，支持超时与外部停止信号（停止提取时能及时 kill 掉 worker）
+    if on_candidate:
+        return _read_deep_stream(proc, url, total_timeout, stop_event, on_candidate)
+
+    # 旧协议保持兼容，不带回调时仍返回最终 JSON。
     deadline = time.time() + total_timeout
     while proc.poll() is None:
         if stop_event is not None and stop_event.is_set():
@@ -928,6 +937,76 @@ def _deep_extract_subprocess(
         if normalized:
             candidates.append(_new_candidate(normalized, "deep"))
     return _dedupe(candidates), title
+
+
+def _read_deep_stream(
+    proc: subprocess.Popen, page_url: str, timeout: int,
+    stop_event: Optional[threading.Event], on_candidate: Callable[[Candidate], None],
+) -> Tuple[List[Candidate], str]:
+    """持续排空两个管道，在调用线程分发事件，防止输出填满后互相等待。"""
+    messages = queue.Queue()
+
+    def read_pipe(pipe, kind):
+        try:
+            for line in iter(pipe.readline, ""):
+                messages.put((kind, line))
+        finally:
+            messages.put((kind, None))
+
+    readers = [threading.Thread(target=read_pipe, args=(pipe, kind), daemon=True)
+               for pipe, kind in ((proc.stdout, "out"), (proc.stderr, "err"))]
+    for reader in readers:
+        reader.start()
+    found = {}
+    title = ""
+    errors = ""
+    closed = 0
+    final_seen = False
+    deadline = time.monotonic() + timeout
+    try:
+        while closed < 2 or proc.poll() is None:
+            if stop_event and stop_event.is_set():
+                return list(found.values()), title
+            if time.monotonic() >= deadline:
+                raise DeepModeUnavailableError(f"深度模式执行超时（超过 {timeout} 秒）")
+            try:
+                kind, line = messages.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if line is None:
+                closed += 1
+                continue
+            if kind == "err":
+                errors = (errors + line)[-8000:]
+                continue
+            try:
+                payload = json.loads(line)
+                if payload.get("event") == "candidate":
+                    urls = [payload["url"]]
+                else:
+                    urls = payload["urls"]
+                    title = str(payload.get("title") or "")
+                    final_seen = True
+                for raw in urls:
+                    normalized = _normalize_candidate_url(raw, page_url)
+                    if normalized and normalized not in found:
+                        candidate = _new_candidate(normalized, "deep")
+                        found[normalized] = candidate
+                        on_candidate(candidate)
+            except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                raise DeepModeUnavailableError("深度模式抓取脚本返回了无法解析的流式输出") from exc
+        if proc.returncode != 0:
+            raise DeepModeUnavailableError(_explain_worker_failure(proc.returncode, errors))
+        if not final_seen:
+            raise DeepModeUnavailableError("深度模式抓取脚本未返回完整结果")
+        return list(found.values()), title
+    finally:
+        if proc.poll() is None:
+            _terminate_process(proc)
+        for reader in readers:
+            reader.join(timeout=2)
+        for pipe in (proc.stdout, proc.stderr):
+            pipe.close()
 
 
 # 深度模式可用性缓存（GUI 启动时会调用，避免重复探测）
@@ -1016,6 +1095,7 @@ def _deep_extract_inprocess(
     wait_ms: int = DEEP_WAIT_MS,
     proxy: Optional[str] = None,
     stop_event: Optional[threading.Event] = None,
+    on_candidate: Optional[Callable[[Candidate], None]] = None,
 ) -> Tuple[List[Candidate], str]:
     """进程内深度抽取（当前进程已能 import playwright 时走这条路，最快）.
 
@@ -1039,6 +1119,7 @@ def _deep_extract_inprocess(
 
     candidates: List[Candidate] = []
     collected: List[str] = []
+    seen: set = set()
     _last_new = [time.time()]
     content = ""
     title = ""
@@ -1062,9 +1143,13 @@ def _deep_extract_inprocess(
                 pass
 
             def _on_response_cb(resp) -> None:
-                _on_response(resp, collected)
-                if ".m3u8" in (resp.url or "").lower():
+                normalized = _normalize_candidate_url(resp.url or "", url)
+                if normalized and normalized not in seen:
+                    seen.add(normalized)
+                    collected.append(normalized)
                     _last_new[0] = time.time()
+                    if on_candidate:
+                        on_candidate(_new_candidate(normalized, "deep"))
 
             page.on("response", _on_response_cb)
             # 用 commit 而非 domcontentloaded：更早着手收集；导航失败也不直接抛异常，
@@ -1125,6 +1210,7 @@ def _deep_extract_with_title(
     wait_ms: int = DEEP_WAIT_MS,
     proxy: Optional[str] = None,
     stop_event: Optional[threading.Event] = None,
+    on_candidate: Optional[Callable[[Candidate], None]] = None,
 ) -> Tuple[List[Candidate], str]:
     """无头浏览器深度抽取（playwright），额外返回页面标题.
 
@@ -1152,9 +1238,11 @@ def _deep_extract_with_title(
         _inject_system_playwright()
 
     sync_playwright = _try_import_sync_playwright()
+    callback_args = {"on_candidate": on_candidate} if on_candidate else {}
     if sync_playwright is not None:
         return _deep_extract_inprocess(
-            sync_playwright, url, timeout, wait_ms, proxy=proxy, stop_event=stop_event
+            sync_playwright, url, timeout, wait_ms, proxy=proxy, stop_event=stop_event,
+            **callback_args,
         )
 
     # 进程内跑不通 → 无条件回退子进程。
@@ -1167,7 +1255,8 @@ def _deep_extract_with_title(
     # GUI 不可用）。子进程路线用的同样是系统 Python，不存在"掩盖问题"的顾虑。
     # 无条件回退子进程。「无可用解释器」「worker 缺失」等具体诊断由
     # _deep_extract_subprocess 给出，比在此处笼统提示更精确。
-    return _deep_extract_subprocess(url, timeout, wait_ms, proxy=proxy, stop_event=stop_event)
+    return _deep_extract_subprocess(url, timeout, wait_ms, proxy=proxy, stop_event=stop_event,
+                                    **callback_args)
 
 
 def _deep_extract(
@@ -1186,6 +1275,52 @@ def _deep_extract(
 
 
 # ===== 门面 =====
+def _estimate_stream(
+    candidates: List[Candidate], session: requests.Session, timeout: int, workers: int,
+    stop_event: Optional[threading.Event], on_candidate: Callable[[Candidate], None],
+    close_session: bool,
+) -> None:
+    """估算在后台完成；取消后不再回调，HTTP 会话在在途请求结束后关闭。"""
+    updates = queue.Queue()
+    by_url = {candidate.url: candidate for candidate in candidates}
+
+    def work():
+        try:
+            estimate_many(
+                list(by_url), session=session, timeout=timeout, max_workers=workers,
+                on_result=lambda url, result: updates.put((url, result)), stop_event=stop_event,
+            )
+        except Exception as exc:
+            updates.put((None, exc))
+        finally:
+            try:
+                if close_session:
+                    session.close()
+            finally:
+                updates.put(None)
+
+    worker = threading.Thread(target=work, daemon=True, name="m3u8-estimate")
+    try:
+        worker.start()
+    except Exception:
+        if close_session:
+            session.close()
+        raise
+    while not (stop_event and stop_event.is_set()):
+        try:
+            update = updates.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        if update is None:
+            return
+        url, result = update
+        if url is None:
+            raise ExtractError(f"大小估算失败：{result}") from result
+        candidate = by_url[url]
+        candidate.apply_estimate(result)
+        on_candidate(candidate)
+
+
 def extract_m3u8_from_page_with_title(
     url: str,
     session: Optional[requests.Session] = None,
@@ -1196,6 +1331,7 @@ def extract_m3u8_from_page_with_title(
     no_proxy: bool = False,
     proxy: Optional[str] = None,
     stop_event: Optional[threading.Event] = None,
+    on_candidate: Optional[Callable[[Candidate], None]] = None,
 ) -> Tuple[List[Candidate], str]:
     """从网页抽取所有 m3u8 候选链接 + 页面标题（可选估算大小）.
 
@@ -1217,6 +1353,8 @@ def extract_m3u8_from_page_with_title(
         proxy: 手动指定代理地址（如 ``127.0.0.1:7897``）；与 no_proxy 互斥，
             同时传入时 no_proxy 优先（直连）。
         stop_event: 可选停止信号（用于「停止提取」）；深度模式下被设置时终止抓取。
+        on_candidate: 在调用线程中即时报告候选；估算后再次报告同一 URL 的更新。
+            回调应快速返回，GUI 应通过消息队列接收，不直接操作控件。
 
     Returns:
         ``(candidates, title)`` 元组：候选列表（已去重、排序：reachable 优先 →
@@ -1236,13 +1374,21 @@ def extract_m3u8_from_page_with_title(
     page_url = utils.normalize_page_url(url)
     workers = max(1, min(int(max_workers or 1), MAX_ESTIMATE_WORKERS))
     title = ""
+    reported: set = set()
+
+    def report(candidate: Candidate) -> None:
+        if candidate.url not in reported:
+            reported.add(candidate.url)
+            if on_candidate:
+                on_candidate(candidate)
 
     try:
         if deep:
             # no_proxy 优先：直连时不给 headless 浏览器传代理
             proxy_for_deep = None if no_proxy else proxy
             candidates, title = _deep_extract_with_title(
-                page_url, timeout, proxy=proxy_for_deep, stop_event=stop_event
+                page_url, timeout, proxy=proxy_for_deep, stop_event=stop_event,
+                **({"on_candidate": report} if on_candidate else {}),
             )
         else:
             try:
@@ -1292,18 +1438,26 @@ def extract_m3u8_from_page_with_title(
                 "可尝试 --deep 深度模式（需安装 playwright）。"
             )
 
-        # 并发估算大小（估算用独立的短超时，避免拖慢提取结果呈现）
-        if estimate:
-            results = estimate_many(
-                [c.url for c in candidates],
-                session=session,
-                timeout=min(int(timeout or ESTIMATE_TIMEOUT), ESTIMATE_TIMEOUT),
-                max_workers=workers,
-            )
-            for c in candidates:
-                est = results.get(c.url)
-                if est is not None:
-                    c.apply_estimate(est)
+        for candidate in candidates:
+            report(candidate)
+
+        # 先报告候选，再补充估算；停止扫描时保留已经发现的候选。
+        if estimate and not (stop_event and stop_event.is_set()):
+            estimate_timeout = min(int(timeout or ESTIMATE_TIMEOUT), ESTIMATE_TIMEOUT)
+            if on_candidate:
+                # 将自建会话的关闭责任转交估算线程，避免取消时提前关闭在途请求。
+                close_session, own_session = own_session, False
+                _estimate_stream(candidates, session, estimate_timeout, workers,
+                                 stop_event, on_candidate, close_session)
+            else:
+                results = estimate_many(
+                    [c.url for c in candidates], session=session,
+                    timeout=estimate_timeout, max_workers=workers,
+                )
+                for c in candidates:
+                    est = results.get(c.url)
+                    if est is not None:
+                        c.apply_estimate(est)
 
         # 排序：reachable 优先 → 大小降序 → url 字典序
         candidates.sort(key=lambda c: (not c.reachable, -c.estimated_size, c.url))
