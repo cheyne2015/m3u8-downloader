@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from m3u8_downloader.gui import M3U8DownloaderGUI, run_gui
+from m3u8_downloader.gui import DownloadJob, M3U8DownloaderGUI, PreloadResult, run_gui
 
 
 # ---------------------------------------------------------------------------
@@ -870,6 +870,21 @@ class TestWebExtractAndMultiDownload:
             gui_instance._handle_message(t, d)
         assert gui_instance._tree.insert.call_count == 1
 
+    def test_ordinary_extract_keeps_start_time_non_preload_behavior(self, gui_instance):
+        """空闲时启动的普通提取，不应因稍后开始下载而被改判成预载。"""
+        cands = [Candidate(url="https://x/new.m3u8", title="new")]
+        gui_instance._downloading = True
+        with patch(
+            "m3u8_downloader.extractor.extract_m3u8_from_page_with_title",
+            return_value=(cands, "新标题"),
+        ):
+            gui_instance._extract_worker("https://x/page", False, preload=False)
+        messages = []
+        while not gui_instance._message_queue.empty():
+            messages.append(gui_instance._message_queue.get_nowait())
+        assert ("candidates", cands) in messages
+        assert not any(kind == "preloaded_extract" for kind, _ in messages)
+
     def test_extract_worker_survives_exception(self, gui_instance):
         with patch(
             "m3u8_downloader.extractor.extract_m3u8_from_page_with_title",
@@ -891,6 +906,7 @@ class TestWebExtractAndMultiDownload:
             Candidate(url="https://x/b.m3u8"),
         ]
         gui_instance._filename_var.get.return_value = "v.mp4"
+        gui_instance._page_title = "网页标题"
         gui_instance._dir_var.get.return_value = "/tmp/out"
         gui_instance._tree.get_children.return_value = []
         gui_instance._tree.selection.return_value = ["i1", "i2"]
@@ -901,9 +917,10 @@ class TestWebExtractAndMultiDownload:
         with patch.object(gui_instance, "_run_next_job") as rnr:
             gui_instance._download_selected()
         assert len(gui_instance._pending_jobs) == 2
-        assert gui_instance._pending_jobs[0][0] == "https://x/a.m3u8"
-        assert gui_instance._pending_jobs[0][1].endswith("v_1.mp4")
-        assert gui_instance._pending_jobs[1][1].endswith("v_2.mp4")
+        assert gui_instance._pending_jobs[0].url == "https://x/a.m3u8"
+        assert gui_instance._pending_jobs[0].output_path.endswith("v_1.mp4")
+        assert gui_instance._pending_jobs[0].title == "网页标题"
+        assert gui_instance._pending_jobs[1].output_path.endswith("v_2.mp4")
         rnr.assert_called_once()
 
     def test_download_selected_ignores_empty_selection(self, gui_instance):
@@ -914,7 +931,7 @@ class TestWebExtractAndMultiDownload:
         rnr.assert_not_called()
 
     def test_on_download_done_continues_queue(self, gui_instance):
-        gui_instance._pending_jobs = [("https://x/c.m3u8", "/tmp/c.mp4")]
+        gui_instance._pending_jobs = [DownloadJob("https://x/c.m3u8", "/tmp/c.mp4", "C")]
         with patch.object(gui_instance, "_run_next_job") as rnr:
             gui_instance._on_download_done("success")
         rnr.assert_called_once()
@@ -941,7 +958,7 @@ class TestWebExtractAndMultiDownload:
     def test_flush_pending_extract_displays_pending(self, gui_instance):
         """下载完成后应显示挂起的预加载提取结果（候选 + 标题自动命名）."""
         cands = [Candidate(url="https://x/b.m3u8")]
-        gui_instance._pending_extract = [(cands, "预加载标题", "预加载标题 - 完整")]
+        gui_instance._pending_extract = [PreloadResult(cands, "预加载标题", "预加载标题 - 完整")]
         gui_instance._candidates = []
         gui_instance._filename_touched = False
         gui_instance._tree.get_children.return_value = []
@@ -972,7 +989,7 @@ class TestWebExtractAndMultiDownload:
         """有预填标题时，下载完成后应保留标题（不清空）."""
         cands = [Candidate(url="https://x/b.m3u8")]
         gui_instance._pending_jobs = []
-        gui_instance._pending_extract = [(cands, "预加载标题", "完整标题")]
+        gui_instance._pending_extract = [PreloadResult(cands, "预加载标题", "完整标题")]
         gui_instance._candidates = []
         gui_instance._filename_touched = True
         gui_instance._tree.get_children.return_value = []
@@ -1055,4 +1072,3 @@ class TestWebExtractAndMultiDownload:
         gui_instance._tree.identify_row.return_value = ""
         gui_instance._on_tree_single_click(evt)
         gui_instance._root.after.assert_not_called()
-

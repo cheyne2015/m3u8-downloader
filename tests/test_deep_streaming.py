@@ -25,6 +25,9 @@ def video_page():
     preload_started = threading.Event()
     release_preload = threading.Event()
     release_preload.set()
+    navigation_started = threading.Event()
+    release_navigation = threading.Event()
+    release_navigation.set()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -35,7 +38,12 @@ def video_page():
             if hold and (hold != "second" or self.path == "/second.m3u8"):
                 estimate_started.set()
                 release_estimate.wait(10)
-            if self.path == "/?next":
+            if self.path == "/?hang":
+                navigation_started.set()
+                release_navigation.wait(20)
+                body = b"<title>Slow navigation</title>"
+                kind = "text/html"
+            elif self.path == "/?next":
                 preload_started.set()
                 release_preload.wait(20)
                 body = b"<title>Next episode</title><script>fetch('/next.m3u8')</script>"
@@ -58,14 +66,21 @@ def video_page():
             self.send_header("Content-Type", kind)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
         def do_HEAD(self):
             self.send_response(200)
             self.send_header("Content-Length", str(len(segment)))
             self.end_headers()
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    class QuietServer(ThreadingHTTPServer):
+        def handle_error(self, request, client_address):
+            pass
+
+    server = QuietServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     class PageURL(str):
@@ -79,10 +94,13 @@ def video_page():
     url.release_estimate = release_estimate
     url.preload_started = preload_started
     url.release_preload = release_preload
+    url.navigation_started = navigation_started
+    url.release_navigation = release_navigation
     yield url
     release_download.set()
     release_estimate.set()
     release_preload.set()
+    release_navigation.set()
     server.shutdown()
     server.server_close()
     thread.join()
@@ -301,6 +319,37 @@ def test_public_extractor_subprocess_retains_candidate_on_stop(video_page, monke
     )
     assert received == [video_page + "first.m3u8"]
     assert [c.url for c in candidates] == received
+
+
+def test_stop_interrupts_navigation_promptly(video_page):
+    stopped = threading.Event()
+    result = []
+    failure = []
+    video_page.release_navigation.clear()
+
+    def extract():
+        try:
+            result.extend(extract_m3u8_from_page_with_title(
+                video_page + "?hang", deep=True, no_proxy=True,
+                stop_event=stopped, on_candidate=lambda _candidate: None,
+            )[0])
+        except Exception as exc:
+            failure.append(exc)
+
+    thread = threading.Thread(target=extract)
+    thread.start()
+    try:
+        assert video_page.navigation_started.wait(20)
+        started = time.monotonic()
+        stopped.set()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert time.monotonic() - started < 2
+        assert result == []
+        assert failure == []
+    finally:
+        video_page.release_navigation.set()
+        thread.join(timeout=10)
 
 
 def test_stop_during_slow_estimate_returns_existing_candidates_promptly(video_page):

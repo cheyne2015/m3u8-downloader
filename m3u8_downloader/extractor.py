@@ -835,6 +835,9 @@ def _deep_extract_subprocess(
         DeepModeUnavailableError: 无可用解释器 / worker 缺失 / worker 失败 / 输出无法解析
             / 被停止 / 超时.
     """
+    if stop_event is not None and stop_event.is_set():
+        raise DeepModeUnavailableError("深度模式已停止")
+
     python_cmd = _find_system_python()
     if not python_cmd:
         raise DeepModeUnavailableError(
@@ -859,7 +862,8 @@ def _deep_extract_subprocess(
         "--browsers-path", os.environ["PLAYWRIGHT_BROWSERS_PATH"],
     ]
     total_timeout = int(timeout) + int(wait_ms) // 1000 + DEEP_SUBPROCESS_MARGIN_SEC
-    if on_candidate:
+    stream_output = on_candidate is not None or stop_event is not None
+    if stream_output:
         cmd.append("--stream")
 
     # 强制子进程以 UTF-8 输出：中文 Windows 下子进程 stderr 默认用 GBK 写，
@@ -890,7 +894,7 @@ def _deep_extract_subprocess(
             f"无法启动系统 Python（{' '.join(python_cmd)}）：{exc}"
         ) from exc
 
-    if on_candidate:
+    if stream_output:
         return _read_deep_stream(proc, url, total_timeout, stop_event, on_candidate)
 
     # 旧协议保持兼容，不带回调时仍返回最终 JSON。
@@ -941,7 +945,8 @@ def _deep_extract_subprocess(
 
 def _read_deep_stream(
     proc: subprocess.Popen, page_url: str, timeout: int,
-    stop_event: Optional[threading.Event], on_candidate: Callable[[Candidate], None],
+    stop_event: Optional[threading.Event],
+    on_candidate: Optional[Callable[[Candidate], None]],
 ) -> Tuple[List[Candidate], str]:
     """持续排空两个管道，在调用线程分发事件，防止输出填满后互相等待。"""
     messages = queue.Queue()
@@ -992,7 +997,8 @@ def _read_deep_stream(
                     if normalized and normalized not in found:
                         candidate = _new_candidate(normalized, "deep")
                         found[normalized] = candidate
-                        on_candidate(candidate)
+                        if on_candidate:
+                            on_candidate(candidate)
             except (ValueError, TypeError, KeyError, AttributeError) as exc:
                 raise DeepModeUnavailableError("深度模式抓取脚本返回了无法解析的流式输出") from exc
         if proc.returncode != 0:
@@ -1233,6 +1239,14 @@ def _deep_extract_with_title(
     Raises:
         DeepModeUnavailableError: playwright 缺失、浏览器未安装或执行失败.
     """
+    # 带停止信号时由父进程监管 worker；即使 Playwright 卡在 page.goto，
+    # 父进程也能立即终止它。没有停止信号时保留进程内最快路径。
+    if stop_event is not None and _deep_worker_available():
+        return _deep_extract_subprocess(
+            url, timeout, wait_ms, proxy=proxy, stop_event=stop_event,
+            on_candidate=on_candidate,
+        )
+
     if not _playwright_importable():
         # 冻结 EXE 未打包 playwright：先尝试从本机系统 Python 注入，复用用户已装 playwright
         _inject_system_playwright()
@@ -1277,25 +1291,34 @@ def _deep_extract(
 # ===== 门面 =====
 def _estimate_stream(
     candidates: List[Candidate], session: requests.Session, timeout: int, workers: int,
-    stop_event: Optional[threading.Event], on_candidate: Callable[[Candidate], None],
-    close_session: bool,
+    stop_event: Optional[threading.Event],
+    on_candidate: Optional[Callable[[Candidate], None]],
 ) -> None:
-    """估算在后台完成；取消后不再回调，HTTP 会话在在途请求结束后关闭。"""
+    """用独立会话估算；取消后调用者可返回，在途请求自行收尾。"""
     updates = queue.Queue()
     by_url = {candidate.url: candidate for candidate in candidates}
+    background_session = requests.Session()
+    background_session.headers.update(session.headers)
+    background_session.cookies.update(session.cookies)
+    background_session.auth = session.auth
+    background_session.proxies.update(session.proxies)
+    background_session.verify = session.verify
+    background_session.cert = session.cert
+    background_session.trust_env = session.trust_env
+    background_session.max_redirects = session.max_redirects
+    background_session.params.update(session.params)
 
     def work():
         try:
             estimate_many(
-                list(by_url), session=session, timeout=timeout, max_workers=workers,
+                list(by_url), session=background_session, timeout=timeout, max_workers=workers,
                 on_result=lambda url, result: updates.put((url, result)), stop_event=stop_event,
             )
         except Exception as exc:
             updates.put((None, exc))
         finally:
             try:
-                if close_session:
-                    session.close()
+                background_session.close()
             finally:
                 updates.put(None)
 
@@ -1303,8 +1326,7 @@ def _estimate_stream(
     try:
         worker.start()
     except Exception:
-        if close_session:
-            session.close()
+        background_session.close()
         raise
     while not (stop_event and stop_event.is_set()):
         try:
@@ -1318,7 +1340,8 @@ def _estimate_stream(
             raise ExtractError(f"大小估算失败：{result}") from result
         candidate = by_url[url]
         candidate.apply_estimate(result)
-        on_candidate(candidate)
+        if on_candidate:
+            on_candidate(candidate)
 
 
 def extract_m3u8_from_page_with_title(
@@ -1427,6 +1450,9 @@ def extract_m3u8_from_page_with_title(
 
             candidates = _dedupe(candidates)
 
+        if not candidates and stop_event is not None and stop_event.is_set():
+            return candidates, title
+
         if not candidates:
             if deep:
                 raise NoCandidateFoundError(
@@ -1444,11 +1470,10 @@ def extract_m3u8_from_page_with_title(
         # 先报告候选，再补充估算；停止扫描时保留已经发现的候选。
         if estimate and not (stop_event and stop_event.is_set()):
             estimate_timeout = min(int(timeout or ESTIMATE_TIMEOUT), ESTIMATE_TIMEOUT)
-            if on_candidate:
-                # 将自建会话的关闭责任转交估算线程，避免取消时提前关闭在途请求。
-                close_session, own_session = own_session, False
-                _estimate_stream(candidates, session, estimate_timeout, workers,
-                                 stop_event, on_candidate, close_session)
+            if stop_event is not None or on_candidate is not None:
+                _estimate_stream(
+                    candidates, session, estimate_timeout, workers, stop_event, on_candidate
+                )
             else:
                 results = estimate_many(
                     [c.url for c in candidates], session=session,
