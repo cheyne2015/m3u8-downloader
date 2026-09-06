@@ -123,6 +123,33 @@ def test_first_candidate_arrives_before_scan_finishes(video_page):
     print(f"first={received[0][1] - started:.3f}s total={finished - started:.3f}s")
 
 
+def test_title_arrives_before_first_candidate(video_page):
+    """标题应在第一个候选链接之前（或同时）到达。
+
+    回归背景：标题此前在整页扫描结束后才由最终 JSON 带出，导致「先出链接、
+    后出标题」。现在 worker 在导航 commit 后立即取 page.title 并流式回传。
+    """
+    events = []  # ("title", value) 或 ("candidate", url)，按到达顺序
+
+    def on_title(t):
+        events.append(("title", t))
+
+    def on_candidate(c):
+        events.append(("candidate", c.url))
+
+    candidates, title = extract_m3u8_from_page_with_title(
+        video_page, deep=True, estimate=False, no_proxy=True,
+        on_candidate=on_candidate, on_title=on_title,
+    )
+    assert title == "Streaming test"
+    # 第一个事件必须是标题，且早于第一个候选
+    assert events[0] == ("title", "Streaming test")
+    candidate_positions = [i for i, (k, _) in enumerate(events) if k == "candidate"]
+    title_position = next(i for i, (k, _) in enumerate(events) if k == "title")
+    assert title_position < candidate_positions[0], "标题必须早于第一个候选链接"
+
+
+
 def test_worker_streams_candidates_before_final_json(video_page):
     worker = Path(__file__).resolve().parents[1] / "m3u8_downloader" / "deep_worker.py"
     with subprocess.Popen(
@@ -134,7 +161,11 @@ def test_worker_streams_candidates_before_final_json(video_page):
             first_line = process.stdout.readline()
             assert first_line, process.stderr.read()
             first = json.loads(first_line)
-            assert first == {"event": "candidate", "url": video_page + "first.m3u8"}
+            # 标题应在第一个候选之前到达（worker 在导航 commit 后立即取 page.title）
+            assert first == {"event": "title", "title": "Streaming test"}
+            # 后续逐行应是候选事件，直到最终 JSON
+            candidate = json.loads(process.stdout.readline())
+            assert candidate == {"event": "candidate", "url": video_page + "first.m3u8"}
             assert process.poll() is None
             stdout, stderr = process.communicate(timeout=25)
             assert process.returncode == 0, stderr
@@ -270,7 +301,7 @@ def test_result_toolbar_selects_clears_and_copies_links(video_page, desktop_gui)
 
 def test_stop_scan_keeps_result_and_active_download(video_page, desktop_gui, tmp_path, monkeypatch):
     from tkinter import ttk, messagebox
-    root, _ = desktop_gui
+    root, app = desktop_gui
     # Only suppress the external modal notification, keeping the real download and merge.
     monkeypatch.setattr(messagebox, "showinfo", lambda *a, **kw: None)
     entries = [w for w in widgets(root) if isinstance(w, ttk.Entry)]
@@ -278,6 +309,8 @@ def test_stop_scan_keeps_result_and_active_download(video_page, desktop_gui, tmp
     entries[1].insert(0, str(tmp_path))
     entries[2].delete(0, "end")
     entries[2].insert(0, "stream-test.mp4")
+    # 模拟用户手动输入文件名：置 _filename_touched，使提前到达的标题不覆盖用户命名
+    app._filename_touched = True
     ffmpeg = next(w for w in widgets(root) if isinstance(w, ttk.Checkbutton) and "ffmpeg" in w.cget("text"))
     root.setvar(ffmpeg.cget("variable"), False)
     tree = next(w for w in widgets(root) if isinstance(w, ttk.Treeview))
@@ -290,7 +323,8 @@ def test_stop_scan_keeps_result_and_active_download(video_page, desktop_gui, tmp
         button(root, "下载选中").invoke()
         pump_until(root, video_page.download_started.is_set)
         labels = visible_text(root)
-        assert "当前标题：stream-test" in labels
+        # 标题已在扫描期间提前到达，下载启动时应显示真实网页标题（而非文件名兜底）
+        assert "当前标题：Streaming test" in labels
         assert "保存文件：stream-test.mp4" in labels
         assert str(button(root, "停止提取").cget("state")) == "normal"
         button(root, "停止提取").invoke()

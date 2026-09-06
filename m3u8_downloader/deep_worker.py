@@ -183,7 +183,8 @@ def _safe_abort(route) -> None:
 
 
 def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "",
-                  on_candidate: Optional[Callable[[str], None]] = None) -> Tuple[List[str], str]:
+                  on_candidate: Optional[Callable[[str], None]] = None,
+                  on_title: Optional[Callable[[str], None]] = None) -> Tuple[List[str], str]:
     """用 playwright 打开页面并收集 m3u8 链接.
 
     收集两条路：网络响应中的 URL + 最终 DOM 文本扫描（兼容脚本拼接但
@@ -194,6 +195,8 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "",
         timeout: 导航超时秒数.
         wait_ms: 网络静默后额外等待毫秒数.
         proxy: 手动代理地址（如 ``127.0.0.1:7897``）；非空时浏览器走代理.
+        on_candidate: 每发现一条候选时回调（流式）。
+        on_title: 标题一旦可用即回调（在导航 commit 后立即触发，早于候选链接）.
 
     Returns:
         ``(found, title)`` 元组：去重后的原始 URL 字符串列表（可能含相对路径，
@@ -263,6 +266,14 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "",
                 page.goto(url, wait_until="commit", timeout=int(timeout) * 1000)
             except Exception as goto_exc:
                 _log(f"[deep_worker] 导航未完成，仍返回已收集的候选：{goto_exc}")
+            # 标题尽快拿到并回传：导航 commit 后立即读取一次 <title>，
+            # 保证标题不晚于（通常早于）第一个候选链接到达父进程。
+            try:
+                title = page.title() or ""
+            except Exception:
+                title = ""
+            if on_title and title:
+                on_title(title)
             # 静默窗口收集：首次收集到 m3u8 后，再静默 _SETTLE_MS 毫秒确认没有
             # 新的 m3u8 才收工；同时保证至少收集 _MIN_COLLECT_MS 毫秒，避免页面刚
             # 打开时瞬间的早期请求造成过早停等。wait_ms 作为总预算上限。
@@ -285,9 +296,9 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "",
             except Exception:
                 content = ""
             try:
-                title = page.title() or ""
+                title = page.title() or title
             except Exception:
-                title = ""
+                pass
         finally:
             try:
                 browser.close()
@@ -360,9 +371,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         def emit_candidate(raw: str) -> None:
             print(json.dumps({"event": "candidate", "url": raw}, ensure_ascii=False), flush=True)
 
+        def emit_title(t: str) -> None:
+            print(json.dumps({"event": "title", "title": t}, ensure_ascii=False), flush=True)
+
         urls, title = _collect_urls(
             args.url, args.timeout, args.wait_ms, proxy=proxy,
-            **({"on_candidate": emit_candidate} if args.stream else {}),
+            **({"on_candidate": emit_candidate, "on_title": emit_title} if args.stream else {}),
         )
     except ImportError as exc:
         _log(f"[deep_worker] 缺少 playwright：{exc}")

@@ -166,7 +166,8 @@ def test_deep_extract_without_playwright_falls_back_to_subprocess(monkeypatch):
 
     sentinel = {"called": False}
 
-    def _fake_subprocess(url, timeout=30, wait_ms=5000, proxy=None, stop_event=None):
+    def _fake_subprocess(url, timeout=30, wait_ms=5000, proxy=None, stop_event=None,
+                         on_candidate=None, on_title=None):
         sentinel["called"] = True
         sentinel["url"] = url
         sentinel["proxy"] = proxy

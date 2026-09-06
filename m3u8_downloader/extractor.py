@@ -826,6 +826,7 @@ def _deep_extract_subprocess(
     proxy: Optional[str] = None,
     stop_event: Optional[threading.Event] = None,
     on_candidate: Optional[Callable[[Candidate], None]] = None,
+    on_title: Optional[Callable[[str], None]] = None,
 ) -> Tuple[List[Candidate], str]:
     """子进程路线深度抽取：调用系统 Python 执行随包分发的 ``deep_worker.py``.
 
@@ -839,6 +840,8 @@ def _deep_extract_subprocess(
         wait_ms: 网络静默后额外等待毫秒数.
         stop_event: 可选停止信号；被设置时立即终止子进程并抛
             :class:`DeepModeUnavailableError`（用于「停止提取」）。
+        on_candidate: 可选回调，每流式拿到一条候选即调用（用于候选早于整页扫描结束显示）.
+        on_title: 可选回调，标题一旦从 worker 流式回传即调用（标题早于候选链接到达）.
 
     Returns:
         ``(candidates, title)`` 元组：去重后的候选列表（可能为空）+ 页面标题
@@ -908,7 +911,7 @@ def _deep_extract_subprocess(
         ) from exc
 
     if stream_output:
-        return _read_deep_stream(proc, url, total_timeout, stop_event, on_candidate)
+        return _read_deep_stream(proc, url, total_timeout, stop_event, on_candidate, on_title)
 
     # 旧协议保持兼容，不带回调时仍返回最终 JSON。
     deadline = time.time() + total_timeout
@@ -960,6 +963,7 @@ def _read_deep_stream(
     proc: subprocess.Popen, page_url: str, timeout: int,
     stop_event: Optional[threading.Event],
     on_candidate: Optional[Callable[[Candidate], None]],
+    on_title: Optional[Callable[[str], None]] = None,
 ) -> Tuple[List[Candidate], str]:
     """持续排空两个管道，在调用线程分发事件，防止输出填满后互相等待。"""
     messages = queue.Queue()
@@ -1001,6 +1005,12 @@ def _read_deep_stream(
                 payload = json.loads(line)
                 if payload.get("event") == "candidate":
                     urls = [payload["url"]]
+                elif payload.get("event") == "title":
+                    # 标题事件：标题早于候选到达，立即回传（不改变候选列表）
+                    title = str(payload.get("title") or "")
+                    if on_title and title:
+                        on_title(title)
+                    continue
                 else:
                     urls = payload["urls"]
                     title = str(payload.get("title") or "")
@@ -1115,6 +1125,7 @@ def _deep_extract_inprocess(
     proxy: Optional[str] = None,
     stop_event: Optional[threading.Event] = None,
     on_candidate: Optional[Callable[[Candidate], None]] = None,
+    on_title: Optional[Callable[[str], None]] = None,
 ) -> Tuple[List[Candidate], str]:
     """进程内深度抽取（当前进程已能 import playwright 时走这条路，最快）.
 
@@ -1125,6 +1136,8 @@ def _deep_extract_inprocess(
         wait_ms: 网络静默后额外等待毫秒数.
         proxy: 手动代理地址（如 ``127.0.0.1:7897``）；非空时浏览器走代理.
         stop_event: 可选停止信号；被设置时提前结束静默等待并关闭浏览器（用于「停止提取」）.
+        on_candidate: 可选回调，每流式拿到一条候选即调用.
+        on_title: 可选回调，标题在导航 commit 后立即回传（早于候选链接）.
 
     Returns:
         ``(candidates, title)`` 元组：去重后的候选列表（可能为空）+ 页面标题
@@ -1180,6 +1193,13 @@ def _deep_extract_inprocess(
                     f"深度模式导航未完成，仍返回已收集的候选：{goto_exc}",
                     file=sys.stderr, flush=True,
                 )
+            # 标题尽快拿到并回传：导航 commit 后立即读取 <title>，早于候选链接到达
+            try:
+                title = page.title() or ""
+            except Exception:
+                title = ""
+            if on_title and title:
+                on_title(title)
             # 静默窗口收集：收集到 m3u8 后继续静默 _SETTLE_MS 毫秒确认无新请求，
             # 且至少收集 _MIN_COLLECT_MS 毫秒；wait_ms 为总预算上限。
             deadline = time.time() + int(wait_ms) / 1000.0
@@ -1203,9 +1223,9 @@ def _deep_extract_inprocess(
             except Exception:
                 content = ""
             try:
-                title = page.title() or ""
+                title = page.title() or title
             except Exception:
-                title = ""
+                pass
             browser.close()
     except Exception as exc:
         raise DeepModeUnavailableError(
@@ -1230,6 +1250,7 @@ def _deep_extract_with_title(
     proxy: Optional[str] = None,
     stop_event: Optional[threading.Event] = None,
     on_candidate: Optional[Callable[[Candidate], None]] = None,
+    on_title: Optional[Callable[[str], None]] = None,
 ) -> Tuple[List[Candidate], str]:
     """无头浏览器深度抽取（playwright），额外返回页面标题.
 
@@ -1245,6 +1266,8 @@ def _deep_extract_with_title(
         timeout: 导航超时秒数.
         wait_ms: 网络静默后额外等待毫秒数.
         stop_event: 可选停止信号（用于「停止提取」），透传给底层路线.
+        on_candidate: 可选回调，每流式拿到一条候选即调用.
+        on_title: 可选回调，标题一旦从 worker 流式回传即调用（早于候选链接）.
 
     Returns:
         ``(candidates, title)`` 元组：去重后的候选列表（可能为空）+ 页面标题（可能为空）.
@@ -1257,7 +1280,7 @@ def _deep_extract_with_title(
     if stop_event is not None and _deep_worker_available():
         return _deep_extract_subprocess(
             url, timeout, wait_ms, proxy=proxy, stop_event=stop_event,
-            on_candidate=on_candidate,
+            on_candidate=on_candidate, on_title=on_title,
         )
 
     if not _playwright_importable():
@@ -1265,7 +1288,11 @@ def _deep_extract_with_title(
         _inject_system_playwright()
 
     sync_playwright = _try_import_sync_playwright()
-    callback_args = {"on_candidate": on_candidate} if on_candidate else {}
+    callback_args = {}
+    if on_candidate:
+        callback_args["on_candidate"] = on_candidate
+    if on_title:
+        callback_args["on_title"] = on_title
     if sync_playwright is not None:
         return _deep_extract_inprocess(
             sync_playwright, url, timeout, wait_ms, proxy=proxy, stop_event=stop_event,
@@ -1283,7 +1310,7 @@ def _deep_extract_with_title(
     # 无条件回退子进程。「无可用解释器」「worker 缺失」等具体诊断由
     # _deep_extract_subprocess 给出，比在此处笼统提示更精确。
     return _deep_extract_subprocess(url, timeout, wait_ms, proxy=proxy, stop_event=stop_event,
-                                    **callback_args)
+                                    on_candidate=on_candidate, on_title=on_title)
 
 
 def _deep_extract(
@@ -1372,6 +1399,7 @@ def extract_m3u8_from_page_with_title(
     proxy: Optional[str] = None,
     stop_event: Optional[threading.Event] = None,
     on_candidate: Optional[Callable[[Candidate], None]] = None,
+    on_title: Optional[Callable[[str], None]] = None,
 ) -> Tuple[List[Candidate], str]:
     """从网页抽取所有 m3u8 候选链接 + 页面标题（可选估算大小）.
 
@@ -1395,6 +1423,7 @@ def extract_m3u8_from_page_with_title(
         stop_event: 可选停止信号（用于「停止提取」）；深度模式下被设置时终止抓取。
         on_candidate: 在调用线程中即时报告候选；估算后再次报告同一 URL 的更新。
             回调应快速返回，GUI 应通过消息队列接收，不直接操作控件。
+        on_title: 可选回调，标题一旦从深度 worker 流式回传即调用（早于候选链接）。
 
     Returns:
         ``(candidates, title)`` 元组：候选列表（已去重、排序：reachable 优先 →
@@ -1429,6 +1458,7 @@ def extract_m3u8_from_page_with_title(
             candidates, title = _deep_extract_with_title(
                 page_url, timeout, proxy=proxy_for_deep, stop_event=stop_event,
                 **({"on_candidate": report} if on_candidate else {}),
+                **({"on_title": on_title} if on_title else {}),
             )
         else:
             try:
