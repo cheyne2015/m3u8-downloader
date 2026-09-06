@@ -1468,6 +1468,9 @@ def extract_m3u8_from_page_with_title(
 
             # 复用已抓取的 HTML 解析标题，避免二次抓取（快 + 对反爬更鲁棒）
             title = _parse_page_title(html)
+            # 标题在扫描候选前已可拿到，立即回传，使标题先于候选链接填充
+            if on_title and title:
+                on_title(title)
             candidates = _extract_from_html(html, page_url)
 
             # 并发下载外链 JS 并扫描

@@ -979,7 +979,7 @@ class M3U8DownloaderGUI:
         try:
             # 一次拿到候选 + 标题；标题零额外请求（深度走 page.title，
             # 普通复用已抓 HTML），避免二次抓取慢/拿不到。
-            # 深度模式下通过 on_title 流式回传标题，使标题不晚于（通常早于）
+            # 通过 on_title 流式回传标题（普通 + 深度皆可），使标题不晚于
             # 第一个候选链接到达；预载时不回传（标题须等当前下载结束后一起显示）。
             streamed_title = {"value": ""}
 
@@ -1003,7 +1003,7 @@ class M3U8DownloaderGUI:
                    (lambda c: self._queue_message("candidate_update", replace(c)))}
                    if deep and not preload else {}),
                 **({"on_title": on_title_cb}
-                   if deep and not preload else {}),
+                   if not preload else {}),
             )
             seg = extract_title_segment(title) if title else ""
 
@@ -1026,10 +1026,11 @@ class M3U8DownloaderGUI:
                 self._queue_message("extract_done", result)
             else:
                 self._queue_message("candidates", candidates)
-                if title:
+                # 标题已在流式阶段回传；若流式未触发，此处兜底补发。
+                if title and not streamed_title["value"]:
                     self._queue_message("page_title", PageTitleUpdate(page_url, title))
                 # 仅在有标题段落时自动命名；不再单独打印标题提取日志，避免与命名日志重复
-                if seg:
+                if seg and not streamed_title["value"]:
                     self._queue_message("suggest_filename", seg)
                 self._queue_message("extract_done", "success")
         except Exception as e:  # 任何异常都不让 GUI 崩溃
