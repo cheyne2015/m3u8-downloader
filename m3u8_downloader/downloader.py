@@ -1,9 +1,11 @@
 """核心下载逻辑模块：多线程并发下载、断点续传、HTTP 重试、加密密钥下载."""
 
+import json
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import requests
 
@@ -21,6 +23,56 @@ from m3u8_downloader.utils import (
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_DELAY = 1.0  # 秒
 DEFAULT_BACKOFF_FACTOR = 2.0
+DOWNLOAD_CHUNK_SIZE = 64 * 1024
+CACHE_MANIFEST_NAME = ".m3u8-download.json"
+
+
+class DownloadCancelled(RuntimeError):
+    """下载被调用方主动停止。"""
+
+
+def _wait_before_retry(
+    delay: float, stop_event: Optional[threading.Event],
+) -> None:
+    if stop_event is not None:
+        if stop_event.wait(delay):
+            raise DownloadCancelled("用户停止")
+    else:
+        time.sleep(delay)
+
+
+def _fetch_small_with_retry(
+    session: requests.Session,
+    url: str,
+    *,
+    timeout: int,
+    max_retries: int,
+    stop_event: Optional[threading.Event] = None,
+) -> bytes:
+    """下载播放列表或密钥等小资源，并对瞬时网络错误重试。"""
+    attempts = max(0, int(max_retries)) + 1
+    last_error: Optional[Exception] = None
+    for attempt in range(attempts):
+        if stop_event is not None and stop_event.is_set():
+            raise DownloadCancelled("用户停止")
+        response = None
+        try:
+            response = session.get(url, timeout=timeout)
+            response.raise_for_status()
+            return response.content
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt < attempts - 1:
+                _wait_before_retry(DEFAULT_RETRY_DELAY * (DEFAULT_BACKOFF_FACTOR ** attempt),
+                                   stop_event)
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+    assert last_error is not None
+    raise last_error
 
 
 def _download_with_retry(
@@ -31,6 +83,7 @@ def _download_with_retry(
     retry_delay: float = DEFAULT_RETRY_DELAY,
     backoff_factor: float = DEFAULT_BACKOFF_FACTOR,
     timeout: int = 30,
+    stop_event: Optional[threading.Event] = None,
 ) -> Tuple[bool, int]:
     """带重试机制的文件下载.
 
@@ -38,7 +91,7 @@ def _download_with_retry(
         session: HTTP Session.
         url: 下载 URL.
         output_path: 输出文件路径.
-        max_retries: 最大重试次数.
+        max_retries: 首次请求失败后的最大重试次数.
         retry_delay: 初始重试延迟（秒）.
         backoff_factor: 退避因子.
         timeout: 请求超时（秒）.
@@ -46,29 +99,66 @@ def _download_with_retry(
     Returns:
         (是否成功, 文件大小字节数).
     """
-    last_error: Optional[Exception] = None
+    output_dir = os.path.dirname(os.path.abspath(output_path))
+    os.makedirs(output_dir, exist_ok=True)
+    part_path = output_path + ".part"
+    attempts = max(0, int(max_retries)) + 1
 
-    for attempt in range(max_retries):
+    for attempt in range(attempts):
+        if stop_event is not None and stop_event.is_set():
+            raise DownloadCancelled("用户停止")
+        response = None
         try:
-            response = session.get(url, timeout=timeout, stream=True)
+            offset = os.path.getsize(part_path) if os.path.exists(part_path) else 0
+            headers = {"Range": f"bytes={offset}-"} if offset else {}
+            response = session.get(url, timeout=timeout, stream=True, headers=headers)
             response.raise_for_status()
 
-            # 确保输出目录存在
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-            with open(output_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
+            content_range = response.headers.get("Content-Range", "")
+            append = bool(
+                offset
+                and response.status_code == 206
+                and content_range.lower().startswith(f"bytes {offset}-")
+            )
+            mode = "ab" if append else "wb"
+            response_bytes = 0
+            with open(part_path, mode) as f:
+                for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
+                    if stop_event is not None and stop_event.is_set():
+                        raise DownloadCancelled("用户停止")
                     if chunk:
                         f.write(chunk)
+                        response_bytes += len(chunk)
 
+            declared_length = response.headers.get("Content-Length")
+            content_encoding = response.headers.get("Content-Encoding", "identity").lower()
+            try:
+                expected_bytes = int(declared_length) if declared_length else None
+            except (TypeError, ValueError):
+                expected_bytes = None
+            if (
+                expected_bytes is not None
+                and content_encoding in ("", "identity")
+                and response_bytes != expected_bytes
+            ):
+                raise requests.ConnectionError(
+                    f"响应体不完整：期望 {expected_bytes} 字节，实际 {response_bytes} 字节"
+                )
+            os.replace(part_path, output_path)
             file_size = os.path.getsize(output_path)
             return True, file_size
-
+        except DownloadCancelled:
+            raise
         except (requests.RequestException, OSError) as e:
-            last_error = e
-            if attempt < max_retries - 1:
+            if attempt < attempts - 1:
                 delay = retry_delay * (backoff_factor ** attempt)
-                time.sleep(delay)
+                _wait_before_retry(delay, stop_event)
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
 
     # 所有重试都失败
     return False, 0
@@ -78,6 +168,8 @@ def _download_key(
     session: requests.Session,
     key: M3U8Key,
     timeout: int = 30,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    stop_event: Optional[threading.Event] = None,
 ) -> None:
     """下载 AES-128 解密密钥.
 
@@ -85,6 +177,8 @@ def _download_key(
         session: HTTP Session.
         key: M3U8Key 对象（uri 字段将被下载并填充 key 字段）.
         timeout: 请求超时（秒）.
+        max_retries: 首次请求失败后的最大重试次数.
+        stop_event: 可选停止信号，可中断请求间的退避等待.
 
     Raises:
         RuntimeError: 如果密钥下载失败.
@@ -93,9 +187,10 @@ def _download_key(
         return
 
     try:
-        response = session.get(key.uri, timeout=timeout)
-        response.raise_for_status()
-        key.key = response.content
+        key.key = _fetch_small_with_retry(
+            session, key.uri, timeout=timeout, max_retries=max_retries,
+            stop_event=stop_event,
+        )
     except requests.RequestException as e:
         raise RuntimeError(f"下载解密密钥失败 ({key.uri}): {e}")
 
@@ -106,6 +201,7 @@ def _download_segment_task(
     output_path: str,
     max_retries: int = DEFAULT_MAX_RETRIES,
     timeout: int = 30,
+    stop_event: Optional[threading.Event] = None,
 ) -> Tuple[int, bool, int]:
     """下载单个 TS 片段（供线程池调用）.
 
@@ -129,6 +225,7 @@ def _download_segment_task(
         output_path=output_path,
         max_retries=max_retries,
         timeout=timeout,
+        stop_event=stop_event,
     )
     return segment.sequence, success, size
 
@@ -155,6 +252,9 @@ class M3U8Downloader:
         timeout: int = 30,
         no_proxy: bool = False,
         proxy: Optional[str] = None,
+        stop_event: Optional[threading.Event] = None,
+        progress_callback: Optional[Callable[[dict], None]] = None,
+        log_callback: Optional[Callable[[str], None]] = None,
     ) -> None:
         """初始化下载器.
 
@@ -176,8 +276,11 @@ class M3U8Downloader:
         self._max_retries = max_retries
         self._timeout = timeout
         self._use_ffmpeg = use_ffmpeg
+        self._stop_event = stop_event
+        self._progress_callback = progress_callback
+        self._log_callback = log_callback
         self._session = create_http_session(
-            timeout=timeout, no_proxy=no_proxy, proxy=proxy
+            timeout=timeout, no_proxy=no_proxy, proxy=proxy, pool_maxsize=max(1, workers)
         )
 
         # 设置临时目录
@@ -186,6 +289,47 @@ class M3U8Downloader:
         else:
             output_dir = os.path.dirname(os.path.abspath(output))
             self._tmp_dir = os.path.join(output_dir, ".tmp")
+
+    def _log(self, message: str) -> None:
+        if self._log_callback is not None:
+            self._log_callback(message)
+        else:
+            print(message)
+
+    def _check_stopped(self) -> None:
+        if self._stop_event is not None and self._stop_event.is_set():
+            raise DownloadCancelled("用户停止")
+
+    def _prepare_segment_cache(self, playlist: M3U8Playlist) -> None:
+        """只复用与当前播放列表完全匹配的已完成片段。"""
+        os.makedirs(self._tmp_dir, exist_ok=True)
+        manifest_path = os.path.join(self._tmp_dir, CACHE_MANIFEST_NAME)
+        expected = {
+            "version": 1,
+            "segments": [segment.url for segment in playlist.segments],
+        }
+        current = None
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as stream:
+                current = json.load(stream)
+        except (OSError, ValueError, TypeError):
+            pass
+
+        if current != expected:
+            for name in os.listdir(self._tmp_dir):
+                if name.startswith("seg_") and (
+                    name.endswith(".ts")
+                    or name.endswith(".ts.part")
+                    or name.endswith(".ts.dec")
+                ):
+                    try:
+                        os.remove(os.path.join(self._tmp_dir, name))
+                    except FileNotFoundError:
+                        pass
+            temp_manifest = manifest_path + ".tmp"
+            with open(temp_manifest, "w", encoding="utf-8") as stream:
+                json.dump(expected, stream, ensure_ascii=False, separators=(",", ":"))
+            os.replace(temp_manifest, manifest_path)
 
     def _fetch_m3u8_content(self, url: str) -> str:
         """获取 m3u8 文件内容.
@@ -200,9 +344,11 @@ class M3U8Downloader:
             RuntimeError: 如果获取失败.
         """
         try:
-            response = self._session.get(url, timeout=self._timeout)
-            response.raise_for_status()
-            return response.text
+            content = _fetch_small_with_retry(
+                self._session, url, timeout=self._timeout,
+                max_retries=self._max_retries, stop_event=self._stop_event,
+            )
+            return content.decode("utf-8-sig", errors="replace")
         except requests.RequestException as e:
             raise RuntimeError(f"获取 m3u8 文件失败 ({url}): {e}")
 
@@ -225,9 +371,9 @@ class M3U8Downloader:
         if playlist.is_master:
             # 选择最高码率流
             best_stream = select_best_stream(playlist)
-            print(f"检测到多码率列表，选择最高码率: "
-                  f"{best_stream.bandwidth} bps"
-                  f"{f' ({best_stream.resolution})' if best_stream.resolution else ''}")
+            self._log(f"检测到多码率列表，选择最高码率: "
+                      f"{best_stream.bandwidth} bps"
+                      f"{f' ({best_stream.resolution})' if best_stream.resolution else ''}")
 
             # 获取选中流的 m3u8 内容并再次解析
             content = self._fetch_m3u8_content(best_stream.url)
@@ -247,14 +393,18 @@ class M3U8Downloader:
         """
         seen_keys: dict = {}
         for segment in playlist.segments:
+            self._check_stopped()
             if segment.key and segment.key.uri and segment.key.key is None:
                 key_uri = segment.key.uri
                 if key_uri in seen_keys:
                     # 复用已下载的密钥
                     segment.key.key = seen_keys[key_uri]
                 else:
-                    print(f"下载解密密钥: {key_uri}")
-                    _download_key(self._session, segment.key, self._timeout)
+                    self._log(f"下载解密密钥: {key_uri}")
+                    _download_key(
+                        self._session, segment.key, self._timeout,
+                        self._max_retries, self._stop_event,
+                    )
                     seen_keys[key_uri] = segment.key.key
 
     def _download_segments(self, playlist: M3U8Playlist) -> List[str]:
@@ -269,10 +419,11 @@ class M3U8Downloader:
         Raises:
             RuntimeError: 如果有片段下载失败.
         """
-        os.makedirs(self._tmp_dir, exist_ok=True)
+        self._check_stopped()
+        self._prepare_segment_cache(playlist)
 
         total = len(playlist.segments)
-        print(f"共 {total} 个 TS 片段，使用 {self._workers} 线程并发下载")
+        self._log(f"共 {total} 个 TS 片段，使用 {self._workers} 线程并发下载")
 
         # 构建下载任务
         tasks: List[Tuple[M3U8Segment, str]] = []
@@ -287,47 +438,74 @@ class M3U8Downloader:
         total_bytes = 0
         start_time = time.time()
 
-        progress = ProgressBar(total=total, desc="下载进度", unit="个")
+        progress = ProgressBar(
+            total=total, desc="下载进度", unit="个",
+            disable=self._progress_callback is not None,
+        )
 
-        # 使用线程池并发下载
-        with ThreadPoolExecutor(max_workers=self._workers) as executor:
-            futures = {}
-            for segment, seg_path in tasks:
-                future = executor.submit(
-                    _download_segment_task,
-                    self._session,
-                    segment,
-                    seg_path,
-                    self._max_retries,
-                    self._timeout,
-                )
-                futures[future] = (segment, seg_path)
+        try:
+            # 使用线程池并发下载
+            with ThreadPoolExecutor(max_workers=self._workers) as executor:
+                futures = {}
+                for segment, seg_path in tasks:
+                    future = executor.submit(
+                        _download_segment_task,
+                        self._session,
+                        segment,
+                        seg_path,
+                        self._max_retries,
+                        self._timeout,
+                        self._stop_event,
+                    )
+                    futures[future] = (segment, seg_path)
 
-            for future in as_completed(futures):
-                segment, seg_path = futures[future]
-                try:
-                    seq, success, size = future.result()
-                    if success:
-                        success_count += 1
-                        total_bytes += size
-                    else:
+                for future in as_completed(futures):
+                    self._check_stopped()
+                    segment, seg_path = futures[future]
+                    try:
+                        seq, success, size = future.result()
+                        if success:
+                            success_count += 1
+                            total_bytes += size
+                        else:
+                            fail_count += 1
+                            self._log(f"片段 {seg_path} 下载失败")
+                    except DownloadCancelled:
+                        for pending in futures:
+                            pending.cancel()
+                        raise
+                    except Exception as e:
                         fail_count += 1
-                        print(f"\n片段 {seg_path} 下载失败")
-                except Exception as e:
-                    fail_count += 1
-                    print(f"\n片段 {seg_path} 下载异常: {e}")
+                        self._log(f"片段 {seg_path} 下载异常: {e}")
 
-                progress.update(1)
+                    progress.update(1)
+                    completed = success_count + fail_count
+                    elapsed_now = time.time() - start_time
+                    speed_now = total_bytes / elapsed_now if elapsed_now > 0 else 0
+                    eta = (
+                        elapsed_now / completed * (total - completed)
+                        if completed > 0 else 0
+                    )
+                    if self._progress_callback is not None:
+                        self._progress_callback({
+                            "percent": completed / total * 100 if total else 100,
+                            "completed": completed,
+                            "total": total,
+                            "speed": speed_now,
+                            "eta": eta,
+                            "total_bytes": total_bytes,
+                        })
 
-        progress.close()
+        finally:
+            progress.close()
 
         elapsed = time.time() - start_time
         avg_speed = total_bytes / elapsed if elapsed > 0 else 0
 
-        print(f"下载完成: 成功 {success_count}/{total}, "
-              f"总大小 {format_file_size(total_bytes)}, "
-              f"平均速度 {format_speed(avg_speed)}, "
-              f"耗时 {format_duration(elapsed)}")
+        self._log(f"下载完成: 成功 {success_count}/{total}, "
+                  f"总大小 {format_file_size(total_bytes)}, "
+                  f"平均速度 {format_speed(avg_speed)}, "
+                  f"耗时 {format_duration(elapsed)}")
 
         if fail_count > 0:
             raise RuntimeError(f"有 {fail_count} 个片段下载失败")
@@ -342,9 +520,9 @@ class M3U8Downloader:
             try:
                 import shutil
                 shutil.rmtree(self._tmp_dir)
-                print("临时文件已清理")
+                self._log("临时文件已清理")
             except OSError as e:
-                print(f"清理临时文件失败: {e}")
+                self._log(f"清理临时文件失败: {e}")
 
     def download(self) -> str:
         """执行完整的下载流程.
@@ -356,44 +534,44 @@ class M3U8Downloader:
             RuntimeError: 如果下载过程中出现不可恢复的错误.
         """
         start_time = time.time()
+        try:
+            self._check_stopped()
+            self._log(f"正在解析 m3u8: {self._url}")
+            playlist = self._resolve_playlist()
+            self._log(f"解析完成: {len(playlist.segments)} 个片段, "
+                      f"总时长 {format_duration(playlist.total_duration)}"
+                      f"{', 加密流' if playlist.has_encryption else ''}")
 
-        # 1. 解析 m3u8 播放列表
-        print(f"正在解析 m3u8: {self._url}")
-        playlist = self._resolve_playlist()
-        print(f"解析完成: {len(playlist.segments)} 个片段, "
-              f"总时长 {format_duration(playlist.total_duration)}"
-              f"{', 加密流' if playlist.has_encryption else ''}")
+            self._check_stopped()
+            if playlist.has_encryption:
+                self._download_keys(playlist)
 
-        # 2. 下载解密密钥（如果有加密）
-        if playlist.has_encryption:
-            self._download_keys(playlist)
+            segment_paths = self._download_segments(playlist)
 
-        # 3. 并发下载 TS 片段
-        segment_paths = self._download_segments(playlist)
+            self._check_stopped()
+            if playlist.has_encryption:
+                from m3u8_downloader.merger import decrypt_segments
+                self._log("正在解密 TS 片段...")
+                segment_paths = decrypt_segments(playlist.segments, segment_paths)
 
-        # 4. 解密片段（如果需要）
-        if playlist.has_encryption:
-            from m3u8_downloader.merger import decrypt_segments
-            print("正在解密 TS 片段...")
-            segment_paths = decrypt_segments(playlist.segments, segment_paths)
+            self._check_stopped()
+            from m3u8_downloader.merger import merge_segments_to_mp4
+            self._log("正在合并 TS 片段...")
+            output_path = merge_segments_to_mp4(
+                segment_paths=segment_paths,
+                output_path=self._output,
+                use_ffmpeg=self._use_ffmpeg,
+            )
 
-        # 5. 合并并转换为 MP4
-        from m3u8_downloader.merger import merge_segments_to_mp4
-        output_path = merge_segments_to_mp4(
-            segment_paths=segment_paths,
-            output_path=self._output,
-            use_ffmpeg=self._use_ffmpeg,
-        )
+            self._cleanup_tmp()
 
-        # 6. 清理临时文件
-        self._cleanup_tmp()
-
-        # 7. 输出统计信息
-        elapsed = time.time() - start_time
-        output_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
-        print(f"\n下载完成!")
-        print(f"输出文件: {os.path.abspath(output_path)}")
-        print(f"文件大小: {format_file_size(output_size)}")
-        print(f"总耗时: {format_duration(elapsed)}")
-
-        return output_path
+            elapsed = time.time() - start_time
+            output_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+            self._log("")
+            self._log("下载完成！")
+            self._log(f"输出文件: {os.path.abspath(output_path)}")
+            self._log(f"文件大小: {format_file_size(output_size)}")
+            self._log(f"总耗时: {format_duration(elapsed)}")
+            return output_path
+        finally:
+            self._session.close()

@@ -148,6 +148,7 @@ def create_http_session(
     headers: Optional[dict] = None,
     no_proxy: bool = False,
     proxy: Optional[str] = None,
+    pool_maxsize: int = 10,
 ) -> requests.Session:
     """创建带默认配置的 HTTP Session.
 
@@ -160,11 +161,19 @@ def create_http_session(
         proxy: 手动指定代理地址（如 ``127.0.0.1:7897``）。非空时自动补全协议头，
             同时作用于 http 与 https。与 ``no_proxy=True`` 互斥，二者同时传入时
             ``no_proxy`` 优先生效（直连）。
+        pool_maxsize: 每个协议连接池保留的连接数，下载时通常设为并发线程数。
 
     Returns:
         配置好的 requests.Session.
     """
     session = requests.Session()
+    for prefix in ("http://", "https://"):
+        session.mount(prefix, requests.adapters.HTTPAdapter(
+            pool_connections=max(1, pool_maxsize),
+            pool_maxsize=max(1, pool_maxsize),
+            pool_block=True,
+            max_retries=0,
+        ))
     default_headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

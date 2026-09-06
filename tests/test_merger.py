@@ -242,3 +242,28 @@ class TestDecryptSegments:
                 decrypted = f.read()
 
             assert decrypted == plaintext
+
+    def test_missing_iv_uses_media_sequence_number(self):
+        """HLS 未显式提供 IV 时，应使用片段 media sequence 的 128 位大端值。"""
+        from Crypto.Cipher import AES
+        from Crypto.Util.Padding import pad
+
+        key_data = b"\x11" * 16
+        sequence = 7
+        iv = sequence.to_bytes(16, "big")
+        plaintext = b"sequence based iv"
+        encrypted = AES.new(key_data, AES.MODE_CBC, iv).encrypt(pad(plaintext, AES.block_size))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "seg.ts")
+            with open(path, "wb") as stream:
+                stream.write(encrypted)
+            segment = M3U8Segment(
+                url="https://x/seg.ts",
+                sequence=sequence,
+                key=M3U8Key(method="AES-128", uri="https://x/key", key=key_data),
+            )
+
+            result = decrypt_segments([segment], [path])
+            with open(result[0], "rb") as stream:
+                assert stream.read() == plaintext

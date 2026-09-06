@@ -267,7 +267,10 @@ def decrypt_segments(
                 input_path=seg_path,
                 output_path=decrypted_path,
                 key=segment.key.key,
-                iv=segment.key.iv,
+                # RFC 8216: 未显式提供 IV 时，用 media sequence number 的
+                # 128 位大端表示；不能对每个片段都使用全零 IV。
+                iv=(segment.key.iv if segment.key.iv is not None
+                    else segment.sequence.to_bytes(16, "big")),
             )
             result_paths.append(decrypted_path)
         except Exception as e:

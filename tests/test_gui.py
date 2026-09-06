@@ -333,6 +333,32 @@ class TestDownloadStartStop:
         assert gui_instance._downloading is False
         gui_instance._status_var.set.assert_called_with("下载失败")
 
+    def test_download_worker_uses_core_callbacks_and_records_success(self, gui_instance):
+        """GUI 应复用核心下载流程，避免维护第二套解析/下载/合并实现。"""
+        fake_downloader = MagicMock()
+        fake_downloader.download.return_value = "D:/out/video.mp4"
+        gui_instance._resolve_proxy = MagicMock(return_value=("", True))
+
+        with patch("m3u8_downloader.gui.is_ffmpeg_available", return_value=True), patch(
+            "m3u8_downloader.gui.M3U8Downloader", return_value=fake_downloader
+        ) as downloader_class, patch(
+            "m3u8_downloader.history.record_download"
+        ) as record_download:
+            gui_instance._download_worker(
+                "https://x/video.m3u8", "D:/out/video.mp4", 8, 3, 30, True, ""
+            )
+
+        kwargs = downloader_class.call_args.kwargs
+        assert kwargs["stop_event"] is gui_instance._stop_flag
+        kwargs["log_callback"]("核心日志")
+        kwargs["progress_callback"]({"percent": 50})
+        messages = list(gui_instance._message_queue.queue)
+        assert ("log", "核心日志") in messages
+        assert ("progress", {"percent": 50}) in messages
+        assert ("done", "success") in messages
+        fake_downloader.download.assert_called_once_with()
+        record_download.assert_called_once_with("https://x/video.m3u8")
+
 
 # ---------------------------------------------------------------------------
 # GUI imports and module structure

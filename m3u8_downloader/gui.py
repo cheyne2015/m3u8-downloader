@@ -717,8 +717,6 @@ class M3U8DownloaderGUI:
                 self._queue_message("log", "未检测到 ffmpeg，将使用 TS 二进制拼接方式")
                 use_ffmpeg = False
 
-            self._queue_message("log", f"正在解析 m3u8: {url}")
-
             # 创建下载器实例（默认直连；勾选「使用代理」才走代理）
             proxy, no_proxy = self._resolve_proxy()
             downloader = M3U8Downloader(
@@ -731,10 +729,15 @@ class M3U8DownloaderGUI:
                 timeout=timeout,
                 no_proxy=no_proxy,
                 proxy=proxy,
+                stop_event=self._stop_flag,
+                progress_callback=lambda data: self._queue_message("progress", data),
+                log_callback=lambda message: self._queue_message("log", message),
             )
 
-            # 使用自定义的下载流程以便回调进度
-            self._run_download_with_progress(downloader)
+            downloader.download()
+            from m3u8_downloader.history import record_download
+            record_download(url)
+            self._queue_message("done", "success")
 
         except RuntimeError as e:
             if self._stop_flag.is_set():
@@ -750,177 +753,6 @@ class M3U8DownloaderGUI:
             else:
                 self._queue_message("log", f"未知错误：{e}")
                 self._queue_message("done", "error")
-
-    def _run_download_with_progress(self, downloader: M3U8Downloader) -> None:
-        """执行带进度回调的下载流程.
-
-        复用 M3U8Downloader 内部方法，但通过自定义回调更新 GUI 进度。
-
-        Args:
-            downloader: M3U8Downloader 实例.
-
-        Raises:
-            RuntimeError: 下载失败或被停止.
-        """
-        import time as _time
-
-        from m3u8_downloader.parser import M3U8Parser, select_best_stream
-
-        start_time = _time.time()
-
-        # 1. 解析 m3u8 播放列表
-        if self._stop_flag.is_set():
-            raise RuntimeError("用户停止")
-
-        content = downloader._fetch_m3u8_content(downloader._url)
-        parser = M3U8Parser(content, downloader._url)
-        playlist = parser.parse()
-
-        if playlist.is_master:
-            best_stream = select_best_stream(playlist)
-            self._queue_message(
-                "log",
-                f"检测到多码率列表，选择最高码率: {best_stream.bandwidth} bps"
-                f"{f' ({best_stream.resolution})' if best_stream.resolution else ''}",
-            )
-            content = downloader._fetch_m3u8_content(best_stream.url)
-            parser = M3U8Parser(content, best_stream.url)
-            playlist = parser.parse()
-
-        if not playlist.segments:
-            raise RuntimeError("m3u8 播放列表中没有找到任何 TS 片段")
-
-        total_segments = len(playlist.segments)
-        self._queue_message(
-            "log",
-            f"解析完成: {total_segments} 个片段, 总时长 {format_duration(playlist.total_duration)}"
-            f"{', 加密流' if playlist.has_encryption else ''}",
-        )
-
-        # 2. 下载解密密钥
-        if self._stop_flag.is_set():
-            raise RuntimeError("用户停止")
-
-        if playlist.has_encryption:
-            downloader._download_keys(playlist)
-
-        # 3. 并发下载 TS 片段（自定义逻辑以更新进度）
-        if self._stop_flag.is_set():
-            raise RuntimeError("用户停止")
-
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        from m3u8_downloader.downloader import _download_segment_task
-
-        os.makedirs(downloader._tmp_dir, exist_ok=True)
-        self._queue_message("log", f"共 {total_segments} 个 TS 片段，使用 {downloader._workers} 线程并发下载")
-
-        tasks = []
-        for i, segment in enumerate(playlist.segments):
-            seg_filename = f"seg_{i:05d}.ts"
-            seg_path = os.path.join(downloader._tmp_dir, seg_filename)
-            tasks.append((segment, seg_path))
-
-        success_count = 0
-        fail_count = 0
-        total_bytes = 0
-        download_start = _time.time()
-
-        with ThreadPoolExecutor(max_workers=downloader._workers) as executor:
-            futures = {}
-            for segment, seg_path in tasks:
-                future = executor.submit(
-                    _download_segment_task,
-                    downloader._session,
-                    segment,
-                    seg_path,
-                    downloader._max_retries,
-                    downloader._timeout,
-                )
-                futures[future] = (segment, seg_path)
-
-            for future in as_completed(futures):
-                if self._stop_flag.is_set():
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    raise RuntimeError("用户停止")
-
-                segment, seg_path = futures[future]
-                try:
-                    seq, success, size = future.result()
-                    if success:
-                        success_count += 1
-                        total_bytes += size
-                    else:
-                        fail_count += 1
-                        self._queue_message("log", f"片段 {seg_path} 下载失败")
-                except Exception as e:
-                    fail_count += 1
-                    self._queue_message("log", f"片段 {seg_path} 下载异常: {e}")
-
-                # 更新进度
-                completed = success_count + fail_count
-                percent = completed / total_segments * 100
-                elapsed = _time.time() - download_start
-                speed = total_bytes / elapsed if elapsed > 0 else 0
-                eta = (total_segments - completed) / speed * (total_bytes / completed) if completed > 0 and speed > 0 else 0
-                # 更简洁的 ETA 计算
-                if completed > 0 and elapsed > 0:
-                    avg_per_seg = elapsed / completed
-                    remaining_segments = total_segments - completed
-                    eta = avg_per_seg * remaining_segments
-                else:
-                    eta = 0
-
-                self._queue_message("progress", {
-                    "percent": percent,
-                    "completed": completed,
-                    "total": total_segments,
-                    "speed": speed,
-                    "eta": eta,
-                    "total_bytes": total_bytes,
-                })
-
-        if fail_count > 0:
-            raise RuntimeError(f"有 {fail_count} 个片段下载失败")
-
-        # 4. 解密片段
-        if self._stop_flag.is_set():
-            raise RuntimeError("用户停止")
-
-        segment_paths = [seg_path for _, seg_path in tasks]
-
-        if playlist.has_encryption:
-            from m3u8_downloader.merger import decrypt_segments
-            self._queue_message("log", "正在解密 TS 片段...")
-            segment_paths = decrypt_segments(playlist.segments, segment_paths)
-
-        # 5. 合并为 MP4
-        if self._stop_flag.is_set():
-            raise RuntimeError("用户停止")
-
-        from m3u8_downloader.merger import merge_segments_to_mp4
-        self._queue_message("log", "正在合并 TS 片段...")
-        output_path = merge_segments_to_mp4(
-            segment_paths=segment_paths,
-            output_path=downloader._output,
-            use_ffmpeg=downloader._use_ffmpeg,
-        )
-
-        # 6. 清理临时文件
-        downloader._cleanup_tmp()
-
-        # 7. 完成
-        elapsed = _time.time() - start_time
-        output_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
-        self._queue_message("log", "")
-        self._queue_message("log", "下载完成！")
-        self._queue_message("log", f"输出文件: {os.path.abspath(output_path)}")
-        self._queue_message("log", f"文件大小: {format_file_size(output_size)}")
-        self._queue_message("log", f"总耗时: {format_duration(elapsed)}")
-        # 记录到下载历史（去 query 后），供「重复链接提醒」跨会话去重
-        from m3u8_downloader.history import record_download
-        record_download(downloader._url)
-        self._queue_message("done", "success")
 
     # ===== 消息队列与 UI 更新 =====
 

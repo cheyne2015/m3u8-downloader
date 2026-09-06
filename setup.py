@@ -1,9 +1,11 @@
 """m3u8-downloader 安装配置."""
 from setuptools import setup, find_packages
 
+from m3u8_downloader import __version__
+
 setup(
     name="m3u8-downloader",
-    version="1.4.0",
+    version=__version__,
     description="本地 m3u8 下载工具，支持 TS 片段并发下载与 MP4 转换",
     author="m3u8-downloader",
     python_requires=">=3.8",

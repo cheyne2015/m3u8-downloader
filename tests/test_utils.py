@@ -180,6 +180,15 @@ class TestCreateHttpSession:
         session = create_http_session()
         assert session.trust_env is True
 
+    def test_connection_pool_matches_requested_concurrency(self):
+        session = create_http_session(pool_maxsize=16)
+        try:
+            assert session.adapters["http://"]._pool_maxsize == 16
+            assert session.adapters["https://"]._pool_maxsize == 16
+            assert session.adapters["http://"]._pool_block is True
+        finally:
+            session.close()
+
 
 # ---------------------------------------------------------------------------
 # is_ffmpeg_available
