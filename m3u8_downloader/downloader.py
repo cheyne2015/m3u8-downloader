@@ -678,12 +678,16 @@ class M3U8Downloader:
                 pending.cancel()
             self.cancel()
             self._cache_lock_draining = True
-            threading.Thread(
+            cleanup_thread = threading.Thread(
                 target=self._drain_cancelled_executor,
                 args=(executor,),
                 daemon=True,
                 name="m3u8-download-cleanup",
-            ).start()
+            )
+            try:
+                cleanup_thread.start()
+            except RuntimeError:
+                self._drain_cancelled_executor(executor)
             raise
         except Exception:
             executor.shutdown(wait=True, cancel_futures=True)

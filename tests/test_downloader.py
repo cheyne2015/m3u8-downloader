@@ -296,6 +296,35 @@ def test_same_cache_job_waits_until_previous_downloader_releases_lock(tmp_path):
     second._release_cache_job_lock()
 
 
+def test_cleanup_thread_start_failure_releases_cache_lock(monkeypatch, tmp_path):
+    playlist = _playlist("https://x/a.ts")
+    kwargs = {
+        "url": "https://x/a.m3u8",
+        "output": str(tmp_path / "video.mp4"),
+        "tmp_dir": str(tmp_path / "cache"),
+    }
+    first = M3U8Downloader(**kwargs)
+
+    def cancelled(*_args, **_kwargs):
+        raise DownloadCancelled("用户停止")
+
+    monkeypatch.setattr(first, "_download_one_segment", cancelled)
+    original_start = threading.Thread.start
+
+    def fail_cleanup_start(thread):
+        if thread.name == "m3u8-download-cleanup":
+            raise RuntimeError("thread resources exhausted")
+        return original_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", fail_cleanup_start)
+    with pytest.raises(DownloadCancelled):
+        first._download_segments(playlist)
+
+    second = M3U8Downloader(**kwargs)
+    second._prepare_segment_cache(playlist)
+    second._release_cache_job_lock()
+
+
 def test_worker_threads_use_independent_sessions(monkeypatch, tmp_path):
     sessions = set()
     barrier = threading.Barrier(2)
