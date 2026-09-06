@@ -167,6 +167,30 @@ def test_cancellable_request_preserves_configured_read_timeout(tmp_path):
     assert session.calls[0][1]["timeout"] == 30
 
 
+def test_stop_after_response_arrives_cannot_mutate_resumable_part(tmp_path):
+    output = tmp_path / "seg.ts"
+    part = Path(str(output) + ".part")
+    part.write_bytes(b"new-run-data")
+    stopped = threading.Event()
+
+    class StopOnGetSession(FakeSession):
+        def get(self, url, **kwargs):
+            response = super().get(url, **kwargs)
+            stopped.set()
+            return response
+
+    session = StopOnGetSession([
+        FakeResponse([], status=416, headers={"Content-Range": "bytes */4"}),
+    ])
+
+    with pytest.raises(DownloadCancelled):
+        _download_with_retry(
+            session, "https://x/seg.ts", str(output), max_retries=0,
+            stop_event=stopped,
+        )
+    assert part.read_bytes() == b"new-run-data"
+
+
 def test_cancellation_interrupts_retry_backoff(tmp_path):
     stopped = threading.Event()
 

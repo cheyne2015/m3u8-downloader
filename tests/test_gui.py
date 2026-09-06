@@ -284,6 +284,8 @@ class TestDownloadStartStop:
 
     def test_start_download_valid_url_starts_thread(self, gui_instance):
         """Starting download with valid URL starts a download thread."""
+        previous_stop_event = gui_instance._stop_flag
+        previous_stop_event.set()
         gui_instance._url_var.get = MagicMock(return_value="https://example.com/index.m3u8")
         gui_instance._filename_var.get = MagicMock(return_value="video.mp4")
         gui_instance._dir_var.get = MagicMock(return_value="C:\\tmp")
@@ -298,6 +300,9 @@ class TestDownloadStartStop:
             gui_instance._start_download()
             assert gui_instance._downloading is True
             assert gui_instance._download_thread is not None
+            assert gui_instance._stop_flag is not previous_stop_event
+            assert not gui_instance._stop_flag.is_set()
+            assert previous_stop_event.is_set()
 
     def test_stop_download_sets_stop_flag(self, gui_instance):
         """Stopping download sets the stop flag and logs."""

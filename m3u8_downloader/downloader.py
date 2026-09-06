@@ -118,6 +118,8 @@ def _download_with_retry(
             offset = os.path.getsize(part_path) if os.path.exists(part_path) else 0
             headers = {"Range": f"bytes={offset}-"} if offset else {}
             response = session.get(url, timeout=timeout, stream=True, headers=headers)
+            if stop_event is not None and stop_event.is_set():
+                raise DownloadCancelled("用户停止")
 
             if response.status_code == 416 and offset:
                 unsatisfied = re.fullmatch(

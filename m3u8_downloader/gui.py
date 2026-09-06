@@ -615,7 +615,8 @@ class M3U8DownloaderGUI:
 
         # 切换按钮状态
         self._downloading = True
-        self._stop_flag.clear()
+        self._stop_flag = threading.Event()
+        download_stop_event = self._stop_flag
         self._start_btn.configure(state=tk.DISABLED)
         self._stop_btn.configure(state=tk.NORMAL)
 
@@ -631,7 +632,8 @@ class M3U8DownloaderGUI:
         # 启动下载线程
         self._download_thread = threading.Thread(
             target=self._download_worker,
-            args=(url, output_path, workers, retries, timeout, use_ffmpeg, tmp_dir),
+            args=(url, output_path, workers, retries, timeout, use_ffmpeg, tmp_dir,
+                  download_stop_event),
             daemon=True,
         )
         self._download_thread.start()
@@ -698,6 +700,7 @@ class M3U8DownloaderGUI:
         timeout: int,
         use_ffmpeg: bool,
         tmp_dir: str,
+        stop_event: Optional[threading.Event] = None,
         proxy: str = "",
     ) -> None:
         """下载工作线程函数.
@@ -712,8 +715,10 @@ class M3U8DownloaderGUI:
             timeout: 超时时间.
             use_ffmpeg: 是否使用 ffmpeg.
             tmp_dir: 临时目录.
+            stop_event: 本次下载独占的停止信号.
             proxy: 手动代理地址（如 ``127.0.0.1:7897``）；为空则不使用.
         """
+        download_stop_event = stop_event or self._stop_flag
         downloader = None
         try:
             # 检查 ffmpeg
@@ -733,7 +738,7 @@ class M3U8DownloaderGUI:
                 timeout=timeout,
                 no_proxy=no_proxy,
                 proxy=proxy,
-                stop_event=self._stop_flag,
+                stop_event=download_stop_event,
                 progress_callback=lambda data: self._queue_message("progress", data),
                 log_callback=lambda message: self._queue_message("log", message),
             )
@@ -745,14 +750,14 @@ class M3U8DownloaderGUI:
             self._queue_message("done", "success")
 
         except RuntimeError as e:
-            if self._stop_flag.is_set():
+            if download_stop_event.is_set():
                 self._queue_message("log", "下载已停止")
                 self._queue_message("done", "stopped")
             else:
                 self._queue_message("log", f"错误：{e}")
                 self._queue_message("done", "error")
         except Exception as e:
-            if self._stop_flag.is_set():
+            if download_stop_event.is_set():
                 self._queue_message("log", "下载已停止")
                 self._queue_message("done", "stopped")
             else:
@@ -1323,7 +1328,8 @@ class M3U8DownloaderGUI:
             tmp_dir = self._tmpdir_var.get().strip()
 
             self._downloading = True
-            self._stop_flag.clear()
+            self._stop_flag = threading.Event()
+            download_stop_event = self._stop_flag
             self._progress_var.set(0)
             self._status_var.set("正在下载...")
             self._current_source_page_url = job.source_page_url
@@ -1332,7 +1338,8 @@ class M3U8DownloaderGUI:
 
             self._download_thread = threading.Thread(
                 target=self._download_worker,
-                args=(job.url, output_path, workers, retries, timeout, use_ffmpeg, tmp_dir),
+                args=(job.url, output_path, workers, retries, timeout, use_ffmpeg,
+                      tmp_dir, download_stop_event),
                 daemon=True,
             )
             self._download_thread.start()
