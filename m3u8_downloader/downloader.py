@@ -1,7 +1,10 @@
 """核心下载逻辑模块：多线程并发下载、断点续传、HTTP 重试、加密密钥下载."""
 
+import copy
+import hashlib
 import json
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,11 +27,20 @@ DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_DELAY = 1.0  # 秒
 DEFAULT_BACKOFF_FACTOR = 2.0
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
+CANCEL_READ_TIMEOUT = 1.0
 CACHE_MANIFEST_NAME = ".m3u8-download.json"
 
 
 class DownloadCancelled(RuntimeError):
     """下载被调用方主动停止。"""
+
+
+def _request_timeout(timeout: int, stop_event: Optional[threading.Event]):
+    """使用短读超时轮询取消状态，同时保留用户配置的连接超时。"""
+    if stop_event is None:
+        return timeout
+    configured = max(0.1, float(timeout))
+    return configured, min(configured, CANCEL_READ_TIMEOUT)
 
 
 def _wait_before_retry(
@@ -57,11 +69,13 @@ def _fetch_small_with_retry(
             raise DownloadCancelled("用户停止")
         response = None
         try:
-            response = session.get(url, timeout=timeout)
+            response = session.get(url, timeout=_request_timeout(timeout, stop_event))
             response.raise_for_status()
             return response.content
         except requests.RequestException as exc:
             last_error = exc
+            if stop_event is not None and stop_event.is_set():
+                raise DownloadCancelled("用户停止") from exc
             if attempt < attempts - 1:
                 _wait_before_retry(DEFAULT_RETRY_DELAY * (DEFAULT_BACKOFF_FACTOR ** attempt),
                                    stop_event)
@@ -111,15 +125,36 @@ def _download_with_retry(
         try:
             offset = os.path.getsize(part_path) if os.path.exists(part_path) else 0
             headers = {"Range": f"bytes={offset}-"} if offset else {}
-            response = session.get(url, timeout=timeout, stream=True, headers=headers)
+            response = session.get(
+                url, timeout=_request_timeout(timeout, stop_event),
+                stream=True, headers=headers,
+            )
+
+            if response.status_code == 416 and offset:
+                unsatisfied = re.fullmatch(
+                    r"bytes \*/(\d+)", response.headers.get("Content-Range", "").strip(),
+                    re.IGNORECASE,
+                )
+                if unsatisfied and int(unsatisfied.group(1)) == offset:
+                    os.replace(part_path, output_path)
+                    return True, offset
             response.raise_for_status()
 
             content_range = response.headers.get("Content-Range", "")
-            append = bool(
-                offset
-                and response.status_code == 206
-                and content_range.lower().startswith(f"bytes {offset}-")
-            )
+            range_match = re.fullmatch(
+                r"bytes (\d+)-(\d+)/(\d+|\*)", content_range.strip(), re.IGNORECASE,
+            ) if response.status_code == 206 else None
+            if response.status_code == 206:
+                valid_start = int(range_match.group(1)) if range_match else -1
+                if valid_start != offset:
+                    try:
+                        os.remove(part_path)
+                    except FileNotFoundError:
+                        pass
+                    raise requests.ConnectionError(
+                        f"续传范围不匹配：请求从 {offset} 开始，响应为 {content_range or '空'}"
+                    )
+            append = bool(offset and response.status_code == 206)
             mode = "ab" if append else "wb"
             response_bytes = 0
             with open(part_path, mode) as f:
@@ -144,12 +179,21 @@ def _download_with_retry(
                 raise requests.ConnectionError(
                     f"响应体不完整：期望 {expected_bytes} 字节，实际 {response_bytes} 字节"
                 )
+            if range_match and range_match.group(3) != "*":
+                total_size = int(range_match.group(3))
+                actual_size = os.path.getsize(part_path)
+                if actual_size != total_size:
+                    raise requests.ConnectionError(
+                        f"续传后文件不完整：期望 {total_size} 字节，实际 {actual_size} 字节"
+                    )
             os.replace(part_path, output_path)
             file_size = os.path.getsize(output_path)
             return True, file_size
         except DownloadCancelled:
             raise
         except (requests.RequestException, OSError) as e:
+            if stop_event is not None and stop_event.is_set():
+                raise DownloadCancelled("用户停止") from e
             if attempt < attempts - 1:
                 delay = retry_delay * (backoff_factor ** attempt)
                 _wait_before_retry(delay, stop_event)
@@ -276,19 +320,23 @@ class M3U8Downloader:
         self._max_retries = max_retries
         self._timeout = timeout
         self._use_ffmpeg = use_ffmpeg
-        self._stop_event = stop_event
+        self._stop_event = stop_event or threading.Event()
         self._progress_callback = progress_callback
         self._log_callback = log_callback
+        self._worker_local = threading.local()
+        self._worker_sessions: set = set()
+        self._worker_sessions_lock = threading.Lock()
         self._session = create_http_session(
             timeout=timeout, no_proxy=no_proxy, proxy=proxy, pool_maxsize=max(1, workers)
         )
 
         # 设置临时目录
         if tmp_dir:
-            self._tmp_dir = tmp_dir
+            self._tmp_root = os.path.abspath(tmp_dir)
         else:
             output_dir = os.path.dirname(os.path.abspath(output))
-            self._tmp_dir = os.path.join(output_dir, ".tmp")
+            self._tmp_root = os.path.join(output_dir, ".tmp")
+        self._tmp_dir = self._tmp_root
 
     def _log(self, message: str) -> None:
         if self._log_callback is not None:
@@ -297,17 +345,79 @@ class M3U8Downloader:
             print(message)
 
     def _check_stopped(self) -> None:
-        if self._stop_event is not None and self._stop_event.is_set():
+        if self._stop_event.is_set():
             raise DownloadCancelled("用户停止")
+
+    def _new_worker_session(self) -> requests.Session:
+        """为线程池中的每个线程创建独立 Session，并复制认证请求状态。"""
+        session = requests.Session()
+        session.headers.update(self._session.headers)
+        session.cookies.update(self._session.cookies)
+        session.auth = self._session.auth
+        session.proxies.update(self._session.proxies)
+        session.verify = self._session.verify
+        session.cert = self._session.cert
+        session.trust_env = self._session.trust_env
+        session.max_redirects = self._session.max_redirects
+        session.params.update(self._session.params)
+        session.hooks = copy.deepcopy(self._session.hooks)
+        for prefix in ("http://", "https://"):
+            session.mount(prefix, requests.adapters.HTTPAdapter(
+                pool_connections=1, pool_maxsize=1, pool_block=True, max_retries=0,
+            ))
+        with self._worker_sessions_lock:
+            self._worker_sessions.add(session)
+        return session
+
+    def _get_worker_session(self) -> requests.Session:
+        session = getattr(self._worker_local, "session", None)
+        if session is None:
+            session = self._new_worker_session()
+            self._worker_local.session = session
+        return session
+
+    def _close_worker_sessions(self) -> None:
+        with self._worker_sessions_lock:
+            sessions = list(self._worker_sessions)
+            self._worker_sessions.clear()
+        for session in sessions:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+    def cancel(self) -> None:
+        """请求停止；在途读取会在短读超时后观察到该状态。"""
+        self._stop_event.set()
+
+    @staticmethod
+    def _playlist_identity(playlist: M3U8Playlist) -> dict:
+        segments = []
+        for segment in playlist.segments:
+            key = segment.key
+            segments.append({
+                "url": segment.url,
+                "sequence": segment.sequence,
+                "key_method": key.method if key else "NONE",
+                "key_uri": key.uri if key else None,
+                "key_iv": key.iv.hex() if key and key.iv is not None else None,
+            })
+        return {"version": 2, "segments": segments}
 
     def _prepare_segment_cache(self, playlist: M3U8Playlist) -> None:
         """只复用与当前播放列表完全匹配的已完成片段。"""
+        identity = self._playlist_identity(playlist)
+        encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        fingerprint = hashlib.sha256(encoded).hexdigest()
+        output_fingerprint = hashlib.sha256(
+            os.path.abspath(self._output).lower().encode("utf-8")
+        ).hexdigest()[:8]
+        self._tmp_dir = os.path.join(
+            self._tmp_root, f"job-{fingerprint[:16]}-{output_fingerprint}",
+        )
         os.makedirs(self._tmp_dir, exist_ok=True)
         manifest_path = os.path.join(self._tmp_dir, CACHE_MANIFEST_NAME)
-        expected = {
-            "version": 1,
-            "segments": [segment.url for segment in playlist.segments],
-        }
+        expected = {"version": 2, "fingerprint": fingerprint}
         current = None
         try:
             with open(manifest_path, "r", encoding="utf-8") as stream:
@@ -407,6 +517,14 @@ class M3U8Downloader:
                     )
                     seen_keys[key_uri] = segment.key.key
 
+    def _download_one_segment(
+        self, segment: M3U8Segment, seg_path: str,
+    ) -> Tuple[int, bool, int]:
+        return _download_segment_task(
+            self._get_worker_session(), segment, seg_path,
+            self._max_retries, self._timeout, self._stop_event,
+        )
+
     def _download_segments(self, playlist: M3U8Playlist) -> List[str]:
         """并发下载所有 TS 片段.
 
@@ -443,61 +561,62 @@ class M3U8Downloader:
             disable=self._progress_callback is not None,
         )
 
+        executor = ThreadPoolExecutor(max_workers=self._workers)
+        futures = {}
         try:
-            # 使用线程池并发下载
-            with ThreadPoolExecutor(max_workers=self._workers) as executor:
-                futures = {}
-                for segment, seg_path in tasks:
-                    future = executor.submit(
-                        _download_segment_task,
-                        self._session,
-                        segment,
-                        seg_path,
-                        self._max_retries,
-                        self._timeout,
-                        self._stop_event,
-                    )
-                    futures[future] = (segment, seg_path)
+            for segment, seg_path in tasks:
+                future = executor.submit(self._download_one_segment, segment, seg_path)
+                futures[future] = (segment, seg_path)
 
-                for future in as_completed(futures):
-                    self._check_stopped()
-                    segment, seg_path = futures[future]
-                    try:
-                        seq, success, size = future.result()
-                        if success:
-                            success_count += 1
-                            total_bytes += size
-                        else:
-                            fail_count += 1
-                            self._log(f"片段 {seg_path} 下载失败")
-                    except DownloadCancelled:
-                        for pending in futures:
-                            pending.cancel()
-                        raise
-                    except Exception as e:
+            for future in as_completed(futures):
+                self._check_stopped()
+                segment, seg_path = futures[future]
+                try:
+                    _seq, success, size = future.result()
+                    if success:
+                        success_count += 1
+                        total_bytes += size
+                    else:
                         fail_count += 1
-                        self._log(f"片段 {seg_path} 下载异常: {e}")
+                        self._log(f"片段 {seg_path} 下载失败")
+                except DownloadCancelled:
+                    raise
+                except Exception as e:
+                    fail_count += 1
+                    self._log(f"片段 {seg_path} 下载异常: {e}")
 
-                    progress.update(1)
-                    completed = success_count + fail_count
-                    elapsed_now = time.time() - start_time
-                    speed_now = total_bytes / elapsed_now if elapsed_now > 0 else 0
-                    eta = (
-                        elapsed_now / completed * (total - completed)
-                        if completed > 0 else 0
-                    )
-                    if self._progress_callback is not None:
-                        self._progress_callback({
-                            "percent": completed / total * 100 if total else 100,
-                            "completed": completed,
-                            "total": total,
-                            "speed": speed_now,
-                            "eta": eta,
-                            "total_bytes": total_bytes,
-                        })
-
+                progress.update(1)
+                completed = success_count + fail_count
+                elapsed_now = time.time() - start_time
+                speed_now = total_bytes / elapsed_now if elapsed_now > 0 else 0
+                eta = (
+                    elapsed_now / completed * (total - completed)
+                    if completed > 0 else 0
+                )
+                if self._progress_callback is not None:
+                    self._progress_callback({
+                        "percent": completed / total * 100 if total else 100,
+                        "completed": completed,
+                        "total": total,
+                        "speed": speed_now,
+                        "eta": eta,
+                        "total_bytes": total_bytes,
+                    })
+        except DownloadCancelled:
+            for pending in futures:
+                pending.cancel()
+            self.cancel()
+            executor.shutdown(wait=True, cancel_futures=True)
+            raise
+        except Exception:
+            executor.shutdown(wait=True, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
         finally:
             progress.close()
+            if not self._stop_event.is_set():
+                self._close_worker_sessions()
 
         elapsed = time.time() - start_time
         avg_speed = total_bytes / elapsed if elapsed > 0 else 0
@@ -520,6 +639,10 @@ class M3U8Downloader:
             try:
                 import shutil
                 shutil.rmtree(self._tmp_dir)
+                try:
+                    os.rmdir(self._tmp_root)
+                except OSError:
+                    pass
                 self._log("临时文件已清理")
             except OSError as e:
                 self._log(f"清理临时文件失败: {e}")
@@ -574,4 +697,5 @@ class M3U8Downloader:
             self._log(f"总耗时: {format_duration(elapsed)}")
             return output_path
         finally:
+            self._close_worker_sessions()
             self._session.close()

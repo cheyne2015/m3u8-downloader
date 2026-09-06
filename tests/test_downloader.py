@@ -2,6 +2,7 @@
 
 import json
 import threading
+import time
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -103,6 +104,39 @@ def test_interrupted_segment_resumes_from_part_file(tmp_path):
     assert first.closed and second.closed
 
 
+def test_wrong_content_range_is_rejected_and_restarted(tmp_path):
+    output = tmp_path / "seg.ts"
+    part = Path(str(output) + ".part")
+    part.write_bytes(b"prefix")
+    wrong_range = FakeResponse(
+        [b"wrong-tail"], status=206,
+        headers={"Content-Length": "10", "Content-Range": "bytes 3-12/13"},
+    )
+    full = FakeResponse([b"complete"], headers={"Content-Length": "8"})
+    session = FakeSession([wrong_range, full])
+
+    assert _download_with_retry(
+        session, "https://x/seg.ts", str(output), max_retries=1, retry_delay=0,
+    ) == (True, 8)
+    assert output.read_bytes() == b"complete"
+    assert session.calls[0][1]["headers"] == {"Range": "bytes=6-"}
+    assert session.calls[1][1]["headers"] == {}
+
+
+def test_complete_part_is_promoted_on_range_416(tmp_path):
+    output = tmp_path / "seg.ts"
+    part = Path(str(output) + ".part")
+    part.write_bytes(b"already-complete")
+    response = FakeResponse(
+        [], status=416, headers={"Content-Range": "bytes */16"},
+    )
+
+    assert _download_with_retry(
+        FakeSession([response]), "https://x/seg.ts", str(output), max_retries=0,
+    ) == (True, 16)
+    assert output.read_bytes() == b"already-complete"
+
+
 def test_cancellation_interrupts_retry_backoff(tmp_path):
     stopped = threading.Event()
 
@@ -150,21 +184,55 @@ def _playlist(*urls):
 
 
 def test_cache_manifest_reuses_only_matching_playlist(tmp_path):
-    downloader = M3U8Downloader("https://x/a.m3u8", tmp_dir=str(tmp_path))
+    downloader = M3U8Downloader(
+        "https://x/a.m3u8", output=str(tmp_path / "video.mp4"), tmp_dir=str(tmp_path)
+    )
     stale = tmp_path / "seg_00000.ts"
     stale.write_bytes(b"old-video")
 
     downloader._prepare_segment_cache(_playlist("https://x/a.ts"))
-    assert not stale.exists(), "legacy cache without a manifest must not be trusted"
+    job_dir = Path(downloader._tmp_dir)
+    assert job_dir.parent == tmp_path
+    assert job_dir != tmp_path
+    assert stale.exists(), "isolated jobs must not delete unrelated legacy files"
 
-    stale.write_bytes(b"same-video")
+    cached = job_dir / "seg_00000.ts"
+    cached.write_bytes(b"same-video")
     downloader._prepare_segment_cache(_playlist("https://x/a.ts"))
-    assert stale.read_bytes() == b"same-video"
+    assert cached.read_bytes() == b"same-video"
 
-    downloader._prepare_segment_cache(_playlist("https://x/other.ts"))
-    assert not stale.exists(), "a different playlist must invalidate old segments"
-    manifest = json.loads((tmp_path / ".m3u8-download.json").read_text(encoding="utf-8"))
-    assert manifest["segments"] == ["https://x/other.ts"]
+    changed = _playlist("https://x/a.ts")
+    changed.segments[0].sequence = 99
+    changed.segments[0].key = M3U8Key(
+        method="AES-128", uri="https://x/key?secret=token", iv=b"\x01" * 16,
+    )
+    downloader._prepare_segment_cache(changed)
+    changed_dir = Path(downloader._tmp_dir)
+    assert changed_dir != job_dir
+    assert not (changed_dir / "seg_00000.ts").exists()
+    manifest_text = (changed_dir / ".m3u8-download.json").read_text(encoding="utf-8")
+    manifest = json.loads(manifest_text)
+    assert "fingerprint" in manifest
+    assert "secret=token" not in manifest_text
+
+
+def test_worker_threads_use_independent_sessions(monkeypatch, tmp_path):
+    sessions = set()
+    barrier = threading.Barrier(2)
+    downloader = M3U8Downloader(
+        "https://x/a.m3u8", output=str(tmp_path / "video.mp4"),
+        tmp_dir=str(tmp_path / "cache"), workers=2,
+    )
+
+    def complete(session, segment, output_path, *_args, **_kwargs):
+        sessions.add(id(session))
+        barrier.wait(timeout=2)
+        Path(output_path).write_bytes(b"x")
+        return segment.sequence, True, 1
+
+    monkeypatch.setattr("m3u8_downloader.downloader._download_segment_task", complete)
+    downloader._download_segments(_playlist("https://x/0.ts", "https://x/1.ts"))
+    assert len(sessions) == 2
 
 
 def test_download_segments_reports_progress_callback(monkeypatch, tmp_path):
@@ -274,6 +342,7 @@ def test_real_http_download_recovers_mid_segment_disconnect(tmp_path):
 def test_real_http_stop_keeps_only_resumable_part(tmp_path):
     """停止真实流式响应后不生成伪完成片段，并保留可续传的 .part。"""
     stopped = threading.Event()
+    release_server = threading.Event()
     first_chunk_sent = threading.Event()
     payload = b"z" * (256 * 1024)
 
@@ -301,7 +370,7 @@ def test_real_http_stop_keeps_only_resumable_part(tmp_path):
             self.wfile.write(payload[:64 * 1024])
             self.wfile.flush()
             first_chunk_sent.set()
-            stopped.wait(5)
+            release_server.wait(5)
             self.wfile.write(payload[64 * 1024:128 * 1024])
             self.wfile.flush()
 
@@ -326,15 +395,23 @@ def test_real_http_stop_keeps_only_resumable_part(tmp_path):
         download_thread = threading.Thread(target=run)
         download_thread.start()
         assert first_chunk_sent.wait(5)
+        part_path = Path(downloader._tmp_dir) / "seg_00000.ts.part"
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if part_path.exists() and part_path.stat().st_size >= 64 * 1024:
+                break
+            time.sleep(0.01)
+        assert part_path.stat().st_size >= 64 * 1024
         stopped.set()
         download_thread.join(timeout=2)
         assert not download_thread.is_alive()
         assert len(failure) == 1 and isinstance(failure[0], DownloadCancelled)
-        assert not (tmp_path / "cache" / "seg_00000.ts").exists()
-        assert (tmp_path / "cache" / "seg_00000.ts.part").exists()
+        assert not (Path(downloader._tmp_dir) / "seg_00000.ts").exists()
+        assert part_path.exists()
         assert not (tmp_path / "video.mp4").exists()
     finally:
         stopped.set()
+        release_server.set()
         server.shutdown()
         server.server_close()
         server_thread.join(timeout=5)

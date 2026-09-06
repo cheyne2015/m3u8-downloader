@@ -80,6 +80,7 @@ class M3U8DownloaderGUI:
         self._downloading: bool = False
         self._stop_flag: threading.Event = threading.Event()
         self._download_thread: Optional[threading.Thread] = None
+        self._active_downloader: Optional[M3U8Downloader] = None
         self._message_queue: queue.Queue = queue.Queue()
 
         # 网页抽取 / 多选下载状态
@@ -639,6 +640,8 @@ class M3U8DownloaderGUI:
         """停止下载，不影响独立进行的网页扫描。"""
         if self._downloading:
             self._stop_flag.set()
+            if self._active_downloader is not None:
+                self._active_downloader.cancel()
             self._pending_jobs.clear()
             self._log("正在停止下载...")
             self._status_var.set("正在停止下载...")
@@ -711,6 +714,7 @@ class M3U8DownloaderGUI:
             tmp_dir: 临时目录.
             proxy: 手动代理地址（如 ``127.0.0.1:7897``）；为空则不使用.
         """
+        downloader = None
         try:
             # 检查 ffmpeg
             if use_ffmpeg and not is_ffmpeg_available():
@@ -733,6 +737,7 @@ class M3U8DownloaderGUI:
                 progress_callback=lambda data: self._queue_message("progress", data),
                 log_callback=lambda message: self._queue_message("log", message),
             )
+            self._active_downloader = downloader
 
             downloader.download()
             from m3u8_downloader.history import record_download
@@ -753,6 +758,9 @@ class M3U8DownloaderGUI:
             else:
                 self._queue_message("log", f"未知错误：{e}")
                 self._queue_message("done", "error")
+        finally:
+            if self._active_downloader is downloader:
+                self._active_downloader = None
 
     # ===== 消息队列与 UI 更新 =====
 

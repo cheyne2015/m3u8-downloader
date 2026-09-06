@@ -302,9 +302,11 @@ class TestDownloadStartStop:
     def test_stop_download_sets_stop_flag(self, gui_instance):
         """Stopping download sets the stop flag and logs."""
         gui_instance._downloading = True
+        gui_instance._active_downloader = MagicMock()
         with patch.object(gui_instance, "_log") as mock_log:
             gui_instance._stop_download()
             assert gui_instance._stop_flag.is_set()
+            gui_instance._active_downloader.cancel.assert_called_once_with()
             mock_log.assert_called_once_with("正在停止下载...")
 
     def test_stop_download_does_nothing_when_not_downloading(self, gui_instance):
