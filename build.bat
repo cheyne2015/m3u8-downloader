@@ -17,7 +17,7 @@ if errorlevel 1 (
 python -c "import PyInstaller" >nul 2>&1
 if errorlevel 1 (
     echo [信息] PyInstaller 未安装，正在自动安装...
-    pip install pyinstaller>=6.0.0
+    python -m pip install "pyinstaller>=6.0.0"
     if errorlevel 1 (
         echo [错误] PyInstaller 安装失败
         pause
@@ -27,12 +27,12 @@ if errorlevel 1 (
 
 :: 检查项目依赖
 echo [信息] 检查项目依赖...
-pip install -r requirements.txt --quiet
+python -m pip install -r requirements.txt --quiet
 
 :: 执行打包
 echo.
 echo [信息] 开始打包...
-pyinstaller build.spec --clean --noconfirm
+python -m PyInstaller build.spec --clean --noconfirm
 
 if errorlevel 1 (
     echo.
