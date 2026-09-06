@@ -268,6 +268,32 @@ def test_cache_manifest_reuses_only_matching_playlist(tmp_path):
     manifest = json.loads(manifest_text)
     assert "fingerprint" in manifest
     assert "secret=token" not in manifest_text
+    downloader._release_cache_job_lock()
+
+
+def test_same_cache_job_waits_until_previous_downloader_releases_lock(tmp_path):
+    playlist = _playlist("https://x/a.ts")
+    kwargs = {
+        "url": "https://x/a.m3u8",
+        "output": str(tmp_path / "video.mp4"),
+        "tmp_dir": str(tmp_path / "cache"),
+    }
+    first = M3U8Downloader(**kwargs)
+    second = M3U8Downloader(**kwargs)
+    first._prepare_segment_cache(playlist)
+    acquired = threading.Event()
+
+    def prepare_second():
+        second._prepare_segment_cache(playlist)
+        acquired.set()
+
+    waiter = threading.Thread(target=prepare_second)
+    waiter.start()
+    assert not acquired.wait(0.2), "same cache job must stay locked while old workers drain"
+    first._release_cache_job_lock()
+    assert acquired.wait(2)
+    waiter.join(timeout=2)
+    second._release_cache_job_lock()
 
 
 def test_worker_threads_use_independent_sessions(monkeypatch, tmp_path):
@@ -463,6 +489,25 @@ def test_real_http_stop_keeps_only_resumable_part(tmp_path):
         assert not (Path(downloader._tmp_dir) / "seg_00000.ts").exists()
         assert part_path.exists()
         assert not (tmp_path / "video.mp4").exists()
+
+        retry = M3U8Downloader(
+            f"http://127.0.0.1:{server.server_port}/playlist.m3u8",
+            output=str(tmp_path / "video.mp4"),
+            tmp_dir=str(tmp_path / "cache"),
+        )
+        retry_ready = threading.Event()
+
+        def prepare_retry():
+            retry._prepare_segment_cache(_playlist(f"{base}/slow.ts"))
+            retry_ready.set()
+
+        retry_thread = threading.Thread(target=prepare_retry)
+        retry_thread.start()
+        assert not retry_ready.wait(0.2), "retry must wait until cancelled workers drain"
+        release_server.set()
+        assert retry_ready.wait(2)
+        retry_thread.join(timeout=2)
+        retry._release_cache_job_lock()
     finally:
         stopped.set()
         release_server.set()

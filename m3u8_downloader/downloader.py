@@ -31,6 +31,16 @@ CANCEL_POLL_INTERVAL = 0.1
 CACHE_MANIFEST_NAME = ".m3u8-download.json"
 
 
+class _CacheJobLock:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.users = 0
+
+
+_CACHE_JOB_LOCKS: dict[str, _CacheJobLock] = {}
+_CACHE_JOB_LOCKS_GUARD = threading.Lock()
+
+
 class DownloadCancelled(RuntimeError):
     """下载被调用方主动停止。"""
 
@@ -185,6 +195,8 @@ def _download_with_retry(
                     raise requests.ConnectionError(
                         f"续传后文件不完整：期望 {total_size} 字节，实际 {actual_size} 字节"
                     )
+            if stop_event is not None and stop_event.is_set():
+                raise DownloadCancelled("用户停止")
             os.replace(part_path, output_path)
             file_size = os.path.getsize(output_path)
             return True, file_size
@@ -325,6 +337,9 @@ class M3U8Downloader:
         self._worker_local = threading.local()
         self._worker_sessions: set = set()
         self._worker_sessions_lock = threading.Lock()
+        self._cache_job_key: Optional[str] = None
+        self._cache_job_lock: Optional[_CacheJobLock] = None
+        self._cache_lock_draining = False
         self._session = create_http_session(
             timeout=timeout, no_proxy=no_proxy, proxy=proxy, pool_maxsize=max(1, workers)
         )
@@ -386,13 +401,56 @@ class M3U8Downloader:
                 pass
 
     def _drain_cancelled_executor(self, executor: ThreadPoolExecutor) -> None:
-        """在后台等待已开始的网络读取结束，再释放线程 Session。"""
-        executor.shutdown(wait=True, cancel_futures=True)
-        self._close_worker_sessions()
+        """在后台等待已开始的网络读取结束，再释放 Session 和缓存锁。"""
+        try:
+            executor.shutdown(wait=True, cancel_futures=True)
+            self._close_worker_sessions()
+        finally:
+            self._release_cache_job_lock()
+            self._cache_lock_draining = False
 
     def cancel(self) -> None:
-        """请求停止；在途读取会在短读超时后观察到该状态。"""
+        """请求停止；协调线程会轮询该状态。"""
         self._stop_event.set()
+
+    def _acquire_cache_job_lock(self, job_key: str) -> None:
+        if self._cache_job_key == job_key and self._cache_job_lock is not None:
+            return
+        self._release_cache_job_lock()
+        with _CACHE_JOB_LOCKS_GUARD:
+            entry = _CACHE_JOB_LOCKS.get(job_key)
+            if entry is None:
+                entry = _CacheJobLock()
+                _CACHE_JOB_LOCKS[job_key] = entry
+            entry.users += 1
+        waiting_logged = False
+        try:
+            while not entry.lock.acquire(timeout=CANCEL_POLL_INTERVAL):
+                self._check_stopped()
+                if not waiting_logged:
+                    self._log("正在等待上一次相同下载任务清理缓存...")
+                    waiting_logged = True
+        except Exception:
+            with _CACHE_JOB_LOCKS_GUARD:
+                entry.users -= 1
+                if entry.users == 0 and _CACHE_JOB_LOCKS.get(job_key) is entry:
+                    del _CACHE_JOB_LOCKS[job_key]
+            raise
+        self._cache_job_key = job_key
+        self._cache_job_lock = entry
+
+    def _release_cache_job_lock(self) -> None:
+        entry = self._cache_job_lock
+        job_key = self._cache_job_key
+        if entry is None or job_key is None:
+            return
+        self._cache_job_lock = None
+        self._cache_job_key = None
+        entry.lock.release()
+        with _CACHE_JOB_LOCKS_GUARD:
+            entry.users -= 1
+            if entry.users == 0 and _CACHE_JOB_LOCKS.get(job_key) is entry:
+                del _CACHE_JOB_LOCKS[job_key]
 
     @staticmethod
     def _playlist_identity(playlist: M3U8Playlist) -> dict:
@@ -416,9 +474,11 @@ class M3U8Downloader:
         output_fingerprint = hashlib.sha256(
             os.path.abspath(self._output).lower().encode("utf-8")
         ).hexdigest()[:8]
-        self._tmp_dir = os.path.join(
+        job_dir = os.path.join(
             self._tmp_root, f"job-{fingerprint[:16]}-{output_fingerprint}",
         )
+        self._acquire_cache_job_lock(os.path.normcase(os.path.abspath(job_dir)))
+        self._tmp_dir = job_dir
         os.makedirs(self._tmp_dir, exist_ok=True)
         manifest_path = os.path.join(self._tmp_dir, CACHE_MANIFEST_NAME)
         expected = {"version": 2, "fingerprint": fingerprint}
@@ -617,6 +677,7 @@ class M3U8Downloader:
             for pending in futures:
                 pending.cancel()
             self.cancel()
+            self._cache_lock_draining = True
             threading.Thread(
                 target=self._drain_cancelled_executor,
                 args=(executor,),
@@ -716,3 +777,5 @@ class M3U8Downloader:
             if not self._stop_event.is_set():
                 self._close_worker_sessions()
             self._session.close()
+            if not self._cache_lock_draining:
+                self._release_cache_job_lock()
