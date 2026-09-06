@@ -137,6 +137,36 @@ def test_complete_part_is_promoted_on_range_416(tmp_path):
     assert output.read_bytes() == b"already-complete"
 
 
+def test_stale_oversized_part_restarts_after_range_416(tmp_path):
+    output = tmp_path / "seg.ts"
+    part = Path(str(output) + ".part")
+    part.write_bytes(b"stale-file-that-is-too-long")
+    unsatisfied = FakeResponse(
+        [], status=416, headers={"Content-Range": "bytes */8"},
+    )
+    full = FakeResponse([b"complete"], headers={"Content-Length": "8"})
+    session = FakeSession([unsatisfied, full])
+
+    assert _download_with_retry(
+        session, "https://x/seg.ts", str(output), max_retries=1, retry_delay=0,
+    ) == (True, 8)
+    assert output.read_bytes() == b"complete"
+    assert session.calls[1][1]["headers"] == {}
+
+
+def test_cancellable_request_preserves_configured_read_timeout(tmp_path):
+    output = tmp_path / "seg.ts"
+    session = FakeSession([
+        FakeResponse([b"complete"], headers={"Content-Length": "8"}),
+    ])
+
+    assert _download_with_retry(
+        session, "https://x/seg.ts", str(output), max_retries=0,
+        timeout=30, stop_event=threading.Event(),
+    ) == (True, 8)
+    assert session.calls[0][1]["timeout"] == 30
+
+
 def test_cancellation_interrupts_retry_backoff(tmp_path):
     stopped = threading.Event()
 

@@ -7,7 +7,7 @@ import os
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Callable, List, Optional, Tuple
 
 import requests
@@ -27,20 +27,12 @@ DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_DELAY = 1.0  # 秒
 DEFAULT_BACKOFF_FACTOR = 2.0
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
-CANCEL_READ_TIMEOUT = 1.0
+CANCEL_POLL_INTERVAL = 0.1
 CACHE_MANIFEST_NAME = ".m3u8-download.json"
 
 
 class DownloadCancelled(RuntimeError):
     """下载被调用方主动停止。"""
-
-
-def _request_timeout(timeout: int, stop_event: Optional[threading.Event]):
-    """使用短读超时轮询取消状态，同时保留用户配置的连接超时。"""
-    if stop_event is None:
-        return timeout
-    configured = max(0.1, float(timeout))
-    return configured, min(configured, CANCEL_READ_TIMEOUT)
 
 
 def _wait_before_retry(
@@ -69,7 +61,7 @@ def _fetch_small_with_retry(
             raise DownloadCancelled("用户停止")
         response = None
         try:
-            response = session.get(url, timeout=_request_timeout(timeout, stop_event))
+            response = session.get(url, timeout=timeout)
             response.raise_for_status()
             return response.content
         except requests.RequestException as exc:
@@ -125,10 +117,7 @@ def _download_with_retry(
         try:
             offset = os.path.getsize(part_path) if os.path.exists(part_path) else 0
             headers = {"Range": f"bytes={offset}-"} if offset else {}
-            response = session.get(
-                url, timeout=_request_timeout(timeout, stop_event),
-                stream=True, headers=headers,
-            )
+            response = session.get(url, timeout=timeout, stream=True, headers=headers)
 
             if response.status_code == 416 and offset:
                 unsatisfied = re.fullmatch(
@@ -138,6 +127,14 @@ def _download_with_retry(
                 if unsatisfied and int(unsatisfied.group(1)) == offset:
                     os.replace(part_path, output_path)
                     return True, offset
+                if unsatisfied:
+                    try:
+                        os.remove(part_path)
+                    except FileNotFoundError:
+                        pass
+                    raise requests.ConnectionError(
+                        f"本地续传大小 {offset} 与服务器总长度 {unsatisfied.group(1)} 不符"
+                    )
             response.raise_for_status()
 
             content_range = response.headers.get("Content-Range", "")
@@ -386,6 +383,11 @@ class M3U8Downloader:
             except Exception:
                 pass
 
+    def _drain_cancelled_executor(self, executor: ThreadPoolExecutor) -> None:
+        """在后台等待已开始的网络读取结束，再释放线程 Session。"""
+        executor.shutdown(wait=True, cancel_futures=True)
+        self._close_worker_sessions()
+
     def cancel(self) -> None:
         """请求停止；在途读取会在短读超时后观察到该状态。"""
         self._stop_event.set()
@@ -568,45 +570,57 @@ class M3U8Downloader:
                 future = executor.submit(self._download_one_segment, segment, seg_path)
                 futures[future] = (segment, seg_path)
 
-            for future in as_completed(futures):
+            pending_futures = set(futures)
+            while pending_futures:
                 self._check_stopped()
-                segment, seg_path = futures[future]
-                try:
-                    _seq, success, size = future.result()
-                    if success:
-                        success_count += 1
-                        total_bytes += size
-                    else:
-                        fail_count += 1
-                        self._log(f"片段 {seg_path} 下载失败")
-                except DownloadCancelled:
-                    raise
-                except Exception as e:
-                    fail_count += 1
-                    self._log(f"片段 {seg_path} 下载异常: {e}")
-
-                progress.update(1)
-                completed = success_count + fail_count
-                elapsed_now = time.time() - start_time
-                speed_now = total_bytes / elapsed_now if elapsed_now > 0 else 0
-                eta = (
-                    elapsed_now / completed * (total - completed)
-                    if completed > 0 else 0
+                completed_futures, pending_futures = wait(
+                    pending_futures,
+                    timeout=CANCEL_POLL_INTERVAL,
+                    return_when=FIRST_COMPLETED,
                 )
-                if self._progress_callback is not None:
-                    self._progress_callback({
-                        "percent": completed / total * 100 if total else 100,
-                        "completed": completed,
-                        "total": total,
-                        "speed": speed_now,
-                        "eta": eta,
-                        "total_bytes": total_bytes,
-                    })
+                for future in completed_futures:
+                    _segment, seg_path = futures[future]
+                    try:
+                        _seq, success, size = future.result()
+                        if success:
+                            success_count += 1
+                            total_bytes += size
+                        else:
+                            fail_count += 1
+                            self._log(f"片段 {seg_path} 下载失败")
+                    except DownloadCancelled:
+                        raise
+                    except Exception as e:
+                        fail_count += 1
+                        self._log(f"片段 {seg_path} 下载异常: {e}")
+
+                    progress.update(1)
+                    completed = success_count + fail_count
+                    elapsed_now = time.time() - start_time
+                    speed_now = total_bytes / elapsed_now if elapsed_now > 0 else 0
+                    eta = (
+                        elapsed_now / completed * (total - completed)
+                        if completed > 0 else 0
+                    )
+                    if self._progress_callback is not None:
+                        self._progress_callback({
+                            "percent": completed / total * 100 if total else 100,
+                            "completed": completed,
+                            "total": total,
+                            "speed": speed_now,
+                            "eta": eta,
+                            "total_bytes": total_bytes,
+                        })
         except DownloadCancelled:
             for pending in futures:
                 pending.cancel()
             self.cancel()
-            executor.shutdown(wait=True, cancel_futures=True)
+            threading.Thread(
+                target=self._drain_cancelled_executor,
+                args=(executor,),
+                daemon=True,
+                name="m3u8-download-cleanup",
+            ).start()
             raise
         except Exception:
             executor.shutdown(wait=True, cancel_futures=True)
@@ -697,5 +711,6 @@ class M3U8Downloader:
             self._log(f"总耗时: {format_duration(elapsed)}")
             return output_path
         finally:
-            self._close_worker_sessions()
+            if not self._stop_event.is_set():
+                self._close_worker_sessions()
             self._session.close()
