@@ -920,14 +920,14 @@ class TestWebExtractAndMultiDownload:
         assert any(kind == "candidate_update" for kind, _ in messages)
         assert not any(kind == "preloaded_extract" for kind, _ in messages)
 
-    def test_deep_preload_does_not_pass_noop_candidate_callback(self, gui_instance):
-        """预载只靠显式 preload 状态，不用空回调暗示执行模式。"""
+    def test_preload_passes_candidate_callback_for_streaming(self, gui_instance):
+        """预载也传 on_candidate 回调，用于候选流式收集（下载结束后流式显示）."""
         with patch(
             "m3u8_downloader.extractor.extract_m3u8_from_page_with_title",
             return_value=([], "下一集"),
         ) as extract:
             gui_instance._extract_worker("https://x/page", True, preload=True)
-        assert "on_candidate" not in extract.call_args.kwargs
+        assert "on_candidate" in extract.call_args.kwargs
 
     def test_late_page_title_updates_active_and_queued_downloads(self, gui_instance):
         """深度候选先出现并开始下载后，稍后取得的完整网页标题仍应回填。"""
@@ -1081,7 +1081,7 @@ class TestWebExtractAndMultiDownload:
         result = gui_instance._flush_pending_extract()
         assert result is True, "有预填标题时应返回 True"
         assert gui_instance._pending_extract == []
-        assert gui_instance._tree.insert.called, "应填充候选列表"
+        # 候选已通过 candidate_update 流式显示，_flush_pending_extract 只回填标题
         gui_instance._filename_var.set.assert_called_with("预加载标题")
 
     def test_flush_pending_extract_empty_returns_false(self, gui_instance):

@@ -96,6 +96,10 @@ class M3U8DownloaderGUI:
         self._current_source_page_url: str = ""
         # 只保留最近一次完成的预载，链接与标题作为一个对象交接。
         self._pending_extract: list = []
+        # 预载期间流式暂存的候选（下载中暂存，下载结束后逐条流式显示）。
+        self._pending_preload_candidates: list = []
+        # 候选列表是否已为当前提取清空（预载 B 在下载结束后需先清空 A 再显示 B）。
+        self._preload_list_cleared: bool = True
 
         # 构建 UI
         self._build_ui()
@@ -831,7 +835,15 @@ class M3U8DownloaderGUI:
         elif msg_type == "candidates":
             self._fill_tree(data if isinstance(data, list) else [])
         elif msg_type == "candidate_update":
-            self._upsert_candidate(data)
+            if self._downloading and self._extracting:
+                # A 下载中预载 B：候选暂存，不显示
+                self._pending_preload_candidates.append(data)
+            else:
+                # A 下载结束后：先清空 A 候选（切换），再逐条流式显示 B 候选
+                if not self._preload_list_cleared:
+                    self._clear_tree()
+                    self._preload_list_cleared = True
+                self._upsert_candidate(data)
         elif msg_type == "preloaded_extract":
             preload_result = data
             # 结果和标题在主线程一起交接，避免下载完成与工作线程暂存结果竞态。
@@ -848,9 +860,9 @@ class M3U8DownloaderGUI:
                     "pending" if preload_result.state == PreloadState.SUCCESS else preload_result.state
                 )
             else:
-                # 下载先结束、预载后完成时，直接显示这组配套结果。
+                # 下载先结束、预载后完成时：候选已通过 candidate_update 流式显示，
+                # 这里只回填标题与状态，不再一次性 _fill_tree。
                 self._pending_extract.clear()
-                self._fill_tree(preload_result.candidates)
                 self._candidate_page_url = preload_result.page_url
                 self._apply_page_title(preload_result.page_url, preload_result.page_title)
                 if preload_result.filename_title:
@@ -935,8 +947,17 @@ class M3U8DownloaderGUI:
         elif result == "error":
             self._status_var.set("下载失败")
 
-        # 下载（含串行队列）全部结束后，显示挂起的预加载提取结果
+        # 下载全部结束后：先回填预载标题（文件名），点确认后立即填充。
         has_prefill = self._flush_pending_extract()
+
+        # 再逐条流式显示下载期间暂存的预载候选：先清空 A（切换），再逐条显示 B。
+        if self._pending_preload_candidates:
+            if not self._preload_list_cleared:
+                self._clear_tree()
+                self._preload_list_cleared = True
+            for candidate in self._pending_preload_candidates:
+                self._upsert_candidate(candidate)
+            self._pending_preload_candidates.clear()
 
         # 下载完成后的文件名栏收尾：无预填标题且无进行中的预载提取时才清空。
         # 预载仍在提取中（_extracting=True）时不清空，等预载完成后填充，避免空白中间态。
@@ -970,10 +991,14 @@ class M3U8DownloaderGUI:
         preload = self._downloading
         if preload:
             self._preload_status_var.set("预载：正在提取下一网页…")
+            # 预载：保留 A 候选，下载结束后再清空并切换到 B 候选。
+            self._preload_list_cleared = False
         if not preload:
             self._page_title = ""
             self._candidate_page_url = page_url
             self._clear_tree()
+            # 正常提取：已清空候选列表，候选到达即直接显示。
+            self._preload_list_cleared = True
         self._log("正在抽取网页中的 m3u8 ...")
         proxy, no_proxy = self._resolve_proxy()
         threading.Thread(
@@ -1025,9 +1050,7 @@ class M3U8DownloaderGUI:
                 no_proxy=no_proxy,
                 proxy=proxy,
                 stop_event=self._extract_stop_flag,
-                **({"on_candidate":
-                   (lambda c: self._queue_message("candidate_update", replace(c)))}
-                   if not preload else {}),
+                on_candidate=(lambda c: self._queue_message("candidate_update", replace(c))),
                 **({"on_title": on_title_cb}
                    if not preload else {}),
             )
@@ -1179,7 +1202,7 @@ class M3U8DownloaderGUI:
             return False
         preload_result = self._pending_extract[-1]
         self._pending_extract.clear()
-        self._fill_tree(preload_result.candidates)
+        # 候选已通过 candidate_update 流式显示，这里只回填标题（文件名）与状态。
         self._candidate_page_url = preload_result.page_url
         self._apply_page_title(preload_result.page_url, preload_result.page_title)
         self._preload_status_var.set(
