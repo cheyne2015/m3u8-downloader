@@ -1193,13 +1193,21 @@ def _deep_extract_inprocess(
                     f"深度模式导航未完成，仍返回已收集的候选：{goto_exc}",
                     file=sys.stderr, flush=True,
                 )
-            # 标题尽快拿到并回传：导航 commit 后立即读取 <title>，早于候选链接到达
-            try:
-                title = page.title() or ""
-            except Exception:
-                title = ""
-            if on_title and title:
-                on_title(title)
+            # 标题尽早回传：导航 commit 后立即取一次；若为空，在静默收集循环里
+            # 持续重试，一旦拿到非空标题就立即回传，保证标题不晚于候选链接到达。
+            def _try_emit_title() -> None:
+                nonlocal title
+                if title or not on_title:
+                    return
+                try:
+                    t = page.title() or ""
+                except Exception:
+                    t = ""
+                if t:
+                    title = t
+                    on_title(t)
+
+            _try_emit_title()
             # 静默窗口收集：收集到 m3u8 后继续静默 _SETTLE_MS 毫秒确认无新请求，
             # 且至少收集 _MIN_COLLECT_MS 毫秒；wait_ms 为总预算上限。
             deadline = time.time() + int(wait_ms) / 1000.0
@@ -1207,6 +1215,7 @@ def _deep_extract_inprocess(
             while time.time() < deadline:
                 if stop_event is not None and stop_event.is_set():
                     break  # 被停止：提前结束静默等待
+                _try_emit_title()
                 quiet_ms = (time.time() - _last_new[0]) * 1000
                 if (
                     collected
@@ -1222,6 +1231,7 @@ def _deep_extract_inprocess(
                 content = page.content() or ""
             except Exception:
                 content = ""
+            _try_emit_title()
             try:
                 title = page.title() or title
             except Exception:

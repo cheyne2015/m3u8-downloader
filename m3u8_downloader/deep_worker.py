@@ -266,20 +266,29 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "",
                 page.goto(url, wait_until="commit", timeout=int(timeout) * 1000)
             except Exception as goto_exc:
                 _log(f"[deep_worker] 导航未完成，仍返回已收集的候选：{goto_exc}")
-            # 标题尽快拿到并回传：导航 commit 后立即读取一次 <title>，
-            # 保证标题不晚于（通常早于）第一个候选链接到达父进程。
-            try:
-                title = page.title() or ""
-            except Exception:
-                title = ""
-            if on_title and title:
-                on_title(title)
+            # 标题尽早回传：导航 commit 后立即取一次；若为空，在静默收集循环里
+            # 持续重试，一旦拿到非空标题就立即回传，保证标题不晚于候选链接到达。
+            # （commit 时 <title> 可能尚未解析完成，page.title() 会短暂返回空。）
+            def _try_emit_title() -> None:
+                nonlocal title
+                if title or not on_title:
+                    return
+                try:
+                    t = page.title() or ""
+                except Exception:
+                    t = ""
+                if t:
+                    title = t
+                    on_title(t)
+
+            _try_emit_title()
             # 静默窗口收集：首次收集到 m3u8 后，再静默 _SETTLE_MS 毫秒确认没有
             # 新的 m3u8 才收工；同时保证至少收集 _MIN_COLLECT_MS 毫秒，避免页面刚
             # 打开时瞬间的早期请求造成过早停等。wait_ms 作为总预算上限。
             deadline = time.time() + int(wait_ms) / 1000.0
             start = time.time()
             while time.time() < deadline:
+                _try_emit_title()
                 quiet_ms = (time.time() - _last_new[0]) * 1000
                 if (
                     found
@@ -295,6 +304,7 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "",
                 content = page.content() or ""
             except Exception:
                 content = ""
+            _try_emit_title()
             try:
                 title = page.title() or title
             except Exception:
