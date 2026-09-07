@@ -100,6 +100,8 @@ class M3U8DownloaderGUI:
         self._pending_preload_candidates: list = []
         # 候选列表是否已为当前提取清空（预载 B 在下载结束后需先清空 A 再显示 B）。
         self._preload_list_cleared: bool = True
+        # 预载期间暂存的标题段（下载中暂存，下载结束后立即填充文件名）。
+        self._pending_preload_title: str = ""
 
         # 构建 UI
         self._build_ui()
@@ -876,8 +878,10 @@ class M3U8DownloaderGUI:
         elif msg_type == "page_title" and isinstance(data, PageTitleUpdate):
             self._apply_page_title(data.page_url, data.title)
         elif msg_type == "suggest_filename":
-            # 抽取成功后用网页标题段落自动填充输出文件名（仅当用户未改过默认名）
-            if not self._downloading:
+            # 标题流式回传：下载中预载则暂存，下载结束后立即填充文件名。
+            if self._downloading:
+                self._pending_preload_title = str(data)
+            else:
                 self._suggest_filename(str(data))
         elif msg_type == "extract_done":
             self._on_extract_done(str(data))
@@ -947,7 +951,13 @@ class M3U8DownloaderGUI:
         elif result == "error":
             self._status_var.set("下载失败")
 
-        # 下载全部结束后：先回填预载标题（文件名），点确认后立即填充。
+        # 下载全部结束后：立即填充下载期间流式暂存的预载标题（文件名）。
+        # 点确认后，标题（on_title 流式回传暂存的）立即填入文件名栏。
+        if self._pending_preload_title:
+            self._suggest_filename(self._pending_preload_title)
+            self._pending_preload_title = ""
+
+        # 兜底回填预载标题（若 on_title 未流式回传，例如标题晚到）。
         has_prefill = self._flush_pending_extract()
 
         # 再逐条流式显示下载期间暂存的预载候选：先清空 A（切换），再逐条显示 B。
@@ -1029,9 +1039,8 @@ class M3U8DownloaderGUI:
 
         try:
             # 一次拿到候选 + 标题；标题零额外请求（深度走 page.title，
-            # 普通复用已抓 HTML），避免二次抓取慢/拿不到。
-            # 通过 on_title 流式回传标题（普通 + 深度皆可），使标题不晚于
-            # 第一个候选链接到达；预载时不回传（标题须等当前下载结束后一起显示）。
+            # 普通复用已抓 HTML）。on_title 流式回传标题：预载时下载中暂存，
+            # 下载结束后立即填充文件名；正常提取直接填充。
             streamed_title = {"value": ""}
 
             def on_title_cb(t: str) -> None:
@@ -1051,8 +1060,7 @@ class M3U8DownloaderGUI:
                 proxy=proxy,
                 stop_event=self._extract_stop_flag,
                 on_candidate=(lambda c: self._queue_message("candidate_update", replace(c))),
-                **({"on_title": on_title_cb}
-                   if not preload else {}),
+                on_title=on_title_cb,
             )
             seg = extract_title_segment(title) if title else ""
 
