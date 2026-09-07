@@ -309,8 +309,6 @@ def test_stop_scan_keeps_result_and_active_download(video_page, desktop_gui, tmp
     entries[1].insert(0, str(tmp_path))
     entries[2].delete(0, "end")
     entries[2].insert(0, "stream-test.mp4")
-    # 模拟用户手动输入文件名：置 _filename_touched，使提前到达的标题不覆盖用户命名
-    app._filename_touched = True
     ffmpeg = next(w for w in widgets(root) if isinstance(w, ttk.Checkbutton) and "ffmpeg" in w.cget("text"))
     root.setvar(ffmpeg.cget("variable"), False)
     tree = next(w for w in widgets(root) if isinstance(w, ttk.Treeview))
@@ -323,9 +321,9 @@ def test_stop_scan_keeps_result_and_active_download(video_page, desktop_gui, tmp
         button(root, "下载选中").invoke()
         pump_until(root, video_page.download_started.is_set)
         labels = visible_text(root)
-        # 标题已在扫描期间提前到达，下载启动时应显示真实网页标题（而非文件名兜底）
+        # 标题在扫描期间提前到达并覆盖用户初始文件名，下载启动时应显示真实网页标题
         assert "当前标题：Streaming test" in labels
-        assert "保存文件：stream-test.mp4" in labels
+        assert "保存文件：Streaming test.mp4" in labels
         assert str(button(root, "停止提取").cget("state")) == "normal"
         button(root, "停止提取").invoke()
         pump_until(root, lambda: str(button(root, "提取网页").cget("state")) == "normal", timeout=3)
@@ -335,7 +333,7 @@ def test_stop_scan_keeps_result_and_active_download(video_page, desktop_gui, tmp
     finally:
         video_page.release_download.set()
     pump_until(root, lambda: str(button(root, "停止下载").cget("state")) == "disabled")
-    assert (tmp_path / "stream-test.mp4").read_bytes() == video_page.segment
+    assert (tmp_path / "Streaming test.mp4").read_bytes() == video_page.segment
 
 
 def test_public_extractor_subprocess_retains_candidate_on_stop(video_page, monkeypatch):

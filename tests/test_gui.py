@@ -1025,7 +1025,6 @@ class TestWebExtractAndMultiDownload:
             PreloadResult(cands, "预加载标题", "预加载标题 - 完整", "https://x/next")
         ]
         gui_instance._candidates = []
-        gui_instance._filename_touched = False
         gui_instance._tree.get_children.return_value = []
         result = gui_instance._flush_pending_extract()
         assert result is True, "有预填标题时应返回 True"
@@ -1044,11 +1043,9 @@ class TestWebExtractAndMultiDownload:
         gui_instance._pending_jobs = []
         gui_instance._pending_extract = []
         gui_instance._candidates = []
-        gui_instance._filename_touched = True
         gui_instance._filename_var.get.return_value = "旧文件名.mp4"
         gui_instance._on_download_done("success")
         gui_instance._filename_var.set.assert_called_with("")
-        assert gui_instance._filename_touched is False
 
     def test_on_download_done_keeps_prefill_title(self, gui_instance):
         """有预填标题时，下载完成后应保留标题（不清空）."""
@@ -1060,10 +1057,9 @@ class TestWebExtractAndMultiDownload:
             )
         ]
         gui_instance._candidates = []
-        gui_instance._filename_touched = True
         gui_instance._tree.get_children.return_value = []
         gui_instance._on_download_done("success")
-        # 预填标题应被填入（下载完成后重置手动标志后强制填入）
+        # 预填标题应被填入
         gui_instance._filename_var.set.assert_any_call("预加载标题")
         # 不应被清空为空串
         set_calls = [c.args[0] for c in gui_instance._filename_var.set.call_args_list]

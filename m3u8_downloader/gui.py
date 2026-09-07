@@ -168,10 +168,6 @@ class M3U8DownloaderGUI:
         self._filename_var = tk.StringVar(value="output.mp4")
         self._filename_entry = ttk.Entry(main_frame, textvariable=self._filename_var)
         self._filename_entry.grid(row=row, column=1, columnspan=2, sticky=tk.EW, pady=(0, 5))
-        # 用户手动改过文件名后，不再用网页标题自动覆盖
-        self._filename_touched = False
-        self._filename_entry.bind("<Key>", self._on_filename_typed)
-        self._filename_entry.bind("<<Paste>>", self._on_filename_typed)
 
         row += 1
 
@@ -429,12 +425,6 @@ class M3U8DownloaderGUI:
             self._url_var.set(clipboard_text.strip())
         except tk.TclError:
             pass  # 剪贴板为空或不可访问
-
-    def _on_filename_typed(self, event=None) -> None:
-        """文件名输入框有手动输入/粘贴时标记，停止自动覆盖."""
-        if not self._filename_touched:
-            self._filename_touched = True
-            self._log("已手动指定文件名，后续抽取不再自动覆盖")
 
     def _browse_dir(self) -> None:
         """浏览选择保存目录."""
@@ -912,11 +902,10 @@ class M3U8DownloaderGUI:
         # 下载（含串行队列）全部结束后，显示挂起的预加载提取结果
         has_prefill = self._flush_pending_extract()
 
-        # 下载完成后的文件名栏收尾：无预填标题 → 清空文件名栏；同时重置手动标志，
-        # 让下一轮抽取能正常自动命名。（有预填时标题已由 _flush_pending_extract 填入）
+        # 下载完成后的文件名栏收尾：无预填标题 → 清空文件名栏。
+        # （有预填时标题已由 _flush_pending_extract 填入）
         if not has_prefill:
             self._filename_var.set("")
-        self._filename_touched = False
 
     # ===== 网页抽取与多选下载 =====
 
@@ -1108,14 +1097,12 @@ class M3U8DownloaderGUI:
     def _suggest_filename(self, base_name: str) -> None:
         """抽取成功后用网页标题段落自动填充输出文件名.
 
-        仅在用户未手动修改过文件名时生效，避免覆盖用户已输入的自定义名。
+        始终用网页标题自动填充，不设「手动命名」保护：用户会在填充后再修改文件名。
 
         Args:
             base_name: 网页标题截取后的文件名基底（不含扩展名），如 ``仙界法务部 第55集 (2026)``.
         """
         if not base_name:
-            return
-        if self._filename_touched:
             return
         self._filename_var.set(base_name)
         self._log(f"已按网页标题自动命名：{base_name}")
@@ -1170,8 +1157,6 @@ class M3U8DownloaderGUI:
             f"预载：已载入 {len(preload_result.candidates)} 条结果"
         )
         if preload_result.filename_title:
-            # 下载完成后进入新一轮，重置手动标志，让预填标题稳定填入文件名栏
-            self._filename_touched = False
             self._suggest_filename(preload_result.filename_title)
             self._log("已显示预加载网页的提取结果")
             self._status_var.set("抽取完成")
