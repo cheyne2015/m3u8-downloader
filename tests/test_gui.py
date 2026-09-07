@@ -1090,14 +1090,14 @@ class TestWebExtractAndMultiDownload:
         result = gui_instance._flush_pending_extract()
         assert result is False
 
-    def test_on_download_done_clears_filename_when_no_prefill(self, gui_instance):
-        """无预填时，下载完成后应清空文件名称栏."""
+    def test_on_download_done_keeps_filename_when_no_prefill(self, gui_instance):
+        """无预填时，下载完成后也不清空文件名栏（文件名栏只由标题填充决定）."""
         gui_instance._pending_jobs = []
         gui_instance._pending_extract = []
         gui_instance._candidates = []
         gui_instance._filename_var.get.return_value = "旧文件名.mp4"
         gui_instance._on_download_done("success")
-        gui_instance._filename_var.set.assert_called_with("")
+        gui_instance._filename_var.set.assert_not_called()
 
     def test_on_download_done_keeps_filename_when_preload_in_progress(self, gui_instance):
         """下载完成时若预载仍在提取中，不应清空文件名栏（避免空白中间态）."""
