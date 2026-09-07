@@ -1099,6 +1099,16 @@ class TestWebExtractAndMultiDownload:
         gui_instance._on_download_done("success")
         gui_instance._filename_var.set.assert_called_with("")
 
+    def test_on_download_done_keeps_filename_when_preload_in_progress(self, gui_instance):
+        """下载完成时若预载仍在提取中，不应清空文件名栏（避免空白中间态）."""
+        gui_instance._pending_jobs = []
+        gui_instance._pending_extract = []
+        gui_instance._candidates = []
+        gui_instance._extracting = True  # 预载仍在提取中
+        gui_instance._filename_var.get.return_value = "A_1.mp4"
+        gui_instance._on_download_done("success")
+        gui_instance._filename_var.set.assert_not_called()
+
     def test_on_download_done_keeps_prefill_title(self, gui_instance):
         """有预填标题时，下载完成后应保留标题（不清空）."""
         cands = [Candidate(url="https://x/b.m3u8")]
