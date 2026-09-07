@@ -935,10 +935,14 @@ class M3U8DownloaderGUI:
         elif result == "error":
             self._status_var.set("下载失败")
 
-        # 下载（含串行队列）全部结束后，显示挂起的预加载提取结果。
-        # 文件名栏只由标题填充决定（无条件），下载完成不主动清空，
-        # 避免出现「空白」中间态；预载标题在 _flush_pending_extract 内填充。
-        self._flush_pending_extract()
+        # 下载（含串行队列）全部结束后，显示挂起的预加载提取结果
+        has_prefill = self._flush_pending_extract()
+
+        # 下载完成后的文件名栏收尾：无预填标题且无进行中的预载提取时才清空。
+        # 预载仍在提取中（_extracting=True）时不清空，等预载完成后填充，避免空白中间态。
+        # 注意：清空/用户修改都不影响「提取填充文件名」——后者始终无条件优先。
+        if not has_prefill and not self._extracting:
+            self._filename_var.set("")
 
     # ===== 网页抽取与多选下载 =====
 
