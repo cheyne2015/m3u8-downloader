@@ -19,11 +19,13 @@ from m3u8_downloader.downloader import M3U8Downloader
 from m3u8_downloader.extractor import is_deep_mode_available
 from m3u8_downloader.utils import (
     build_output_path,
+    extract_title_segment,
     format_duration,
     format_file_size,
     format_speed,
     is_ffmpeg_available,
     normalize_mp4_filename,
+    sanitize_filename_component,
 )
 
 # GUI 偏好配置文件路径：存放"记住保存位置"等界面偏好
@@ -250,6 +252,13 @@ class M3U8DownloaderGUI:
             param_frame, text="使用代理", variable=self._use_proxy_var
         )
         use_proxy_check.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+
+        # 多文件时创建文件夹（下载 ≥2 个文件时，以提取名作为文件夹名归拢）
+        self._create_folder_var = tk.BooleanVar(value=False)
+        create_folder_check = ttk.Checkbutton(
+            param_frame, text="多文件时创建文件夹", variable=self._create_folder_var
+        )
+        create_folder_check.grid(row=4, column=2, columnspan=2, sticky=tk.W, pady=(5, 0))
 
         # 手动代理地址（本地 clash 默认 127.0.0.1:7897；勾选「使用代理」后生效）
         ttk.Label(param_frame, text="代理地址：").grid(
@@ -487,6 +496,7 @@ class M3U8DownloaderGUI:
         self._proxy_var.set(str(config.get("proxy", "") or "127.0.0.1:7897"))
         self._use_ffmpeg_var.set(bool(config.get("use_ffmpeg", True)))
         self._tmpdir_var.set(str(config.get("tmpdir", "") or ""))
+        self._create_folder_var.set(bool(config.get("create_folder", False)))
 
         for key, var, default in (
             ("workers", self._workers_var, 8),
@@ -515,6 +525,7 @@ class M3U8DownloaderGUI:
             "timeout": int(self._timeout_var.get()),
             "use_ffmpeg": bool(self._use_ffmpeg_var.get()),
             "tmpdir": self._tmpdir_var.get().strip(),
+            "create_folder": bool(self._create_folder_var.get()),
         }
         try:
             GUI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -1289,6 +1300,23 @@ class M3U8DownloaderGUI:
         save_dir = self._dir_var.get().strip()
         total = len(sel)
 
+        # 多文件（≥2）且勾选「创建文件夹」：以提取名作为文件夹名归拢文件
+        target_dir = save_dir
+        if total >= 2 and bool(self._create_folder_var.get()):
+            folder_base = (
+                extract_title_segment(self._page_title)
+                or os.path.splitext(base_name)[0].strip()
+            )
+            folder_name = sanitize_filename_component(folder_base)
+            if folder_name:
+                candidate_dir = os.path.join(save_dir, folder_name)
+                try:
+                    os.makedirs(candidate_dir, exist_ok=True)
+                    target_dir = candidate_dir
+                    self._log(f"已创建文件夹：{candidate_dir}")
+                except Exception as e:
+                    self._log(f"提示：创建文件夹失败，文件将保存到保存目录：{e}")
+
         jobs = []
         for item in sel:
             values = self._tree.item(item, "values")
@@ -1299,7 +1327,7 @@ class M3U8DownloaderGUI:
             row_title = str(values[6]) if values[6] not in ("", "-") else ""
             output_name = build_output_path(base_name, orig_no, total)
             output_path = normalize_mp4_filename(
-                os.path.join(save_dir, output_name)
+                os.path.join(target_dir, output_name)
             )
             jobs.append(DownloadJob(
                 url, output_path, self._page_title or row_title, self._candidate_page_url,

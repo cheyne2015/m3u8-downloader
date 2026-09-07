@@ -986,6 +986,58 @@ class TestWebExtractAndMultiDownload:
         assert gui_instance._pending_jobs[1].output_path.endswith("v_2.mp4")
         rnr.assert_called_once()
 
+    def test_download_selected_creates_folder_when_enabled(self, gui_instance):
+        """多选 ≥2 且勾选「创建文件夹」时，文件归拢到「提取名」文件夹内."""
+        gui_instance._candidates = [
+            Candidate(url="https://x/a.m3u8"),
+            Candidate(url="https://x/b.m3u8"),
+        ]
+        gui_instance._filename_var.get.return_value = "网页标题.mp4"
+        gui_instance._page_title = "网页标题 - 视频站"
+        gui_instance._dir_var.get.return_value = "/tmp/out"
+        gui_instance._create_folder_var.get.return_value = True
+        gui_instance._tree.get_children.return_value = []
+        gui_instance._tree.selection.return_value = ["i1", "i2"]
+        gui_instance._tree.item.side_effect = lambda item, *a, **k: {
+            "i1": (1, "≈ 1MB", "01:00", "2 Mbps", "media", "普通", "A", "https://x/a.m3u8"),
+            "i2": (2, "≈ 2MB", "02:00", "4 Mbps", "media", "普通", "B", "https://x/b.m3u8"),
+        }[item]
+        with patch("m3u8_downloader.gui.os.makedirs") as mkdir:
+            with patch.object(gui_instance, "_run_next_job") as rnr:
+                gui_instance._download_selected()
+        mkdir.assert_called_once()
+        assert len(gui_instance._pending_jobs) == 2
+        p0 = gui_instance._pending_jobs[0].output_path.replace("\\", "/")
+        p1 = gui_instance._pending_jobs[1].output_path.replace("\\", "/")
+        assert p0.startswith("/tmp/out/网页标题/")
+        assert p0.endswith("网页标题_1.mp4")
+        assert p1.endswith("网页标题_2.mp4")
+        rnr.assert_called_once()
+
+    def test_download_selected_no_folder_when_disabled_or_single(self, gui_instance):
+        """未勾选「创建文件夹」时，文件直接落在保存目录（不建文件夹）."""
+        gui_instance._candidates = [
+            Candidate(url="https://x/a.m3u8"),
+            Candidate(url="https://x/b.m3u8"),
+        ]
+        gui_instance._filename_var.get.return_value = "网页标题.mp4"
+        gui_instance._page_title = "网页标题 - 视频站"
+        gui_instance._dir_var.get.return_value = "/tmp/out"
+        gui_instance._create_folder_var.get.return_value = False
+        gui_instance._tree.get_children.return_value = []
+        gui_instance._tree.selection.return_value = ["i1", "i2"]
+        gui_instance._tree.item.side_effect = lambda item, *a, **k: {
+            "i1": (1, "≈ 1MB", "01:00", "2 Mbps", "media", "普通", "A", "https://x/a.m3u8"),
+            "i2": (2, "≈ 2MB", "02:00", "4 Mbps", "media", "普通", "B", "https://x/b.m3u8"),
+        }[item]
+        with patch("m3u8_downloader.gui.os.makedirs") as mkdir:
+            with patch.object(gui_instance, "_run_next_job") as rnr:
+                gui_instance._download_selected()
+        mkdir.assert_not_called()
+        p0 = gui_instance._pending_jobs[0].output_path.replace("\\", "/")
+        assert p0.startswith("/tmp/out/") and "/网页标题/" not in p0
+        assert p0.endswith("网页标题_1.mp4")
+
     def test_download_selected_ignores_empty_selection(self, gui_instance):
         gui_instance._tree.selection.return_value = []
         with patch.object(gui_instance, "_run_next_job") as rnr:
