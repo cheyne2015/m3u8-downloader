@@ -1482,8 +1482,11 @@ def extract_m3u8_from_page_with_title(
             if on_title and title:
                 on_title(title)
             candidates = _extract_from_html(html, page_url)
+            # 流式：HTML 内扫到的候选立即回传，而不是攒到最后一次性返回
+            for c in candidates:
+                report(c)
 
-            # 并发下载外链 JS 并扫描
+            # 并发下载外链 JS 并扫描；每个 JS 完成后立即流式回传其候选
             js_urls = _collect_js_urls(html, page_url, MAX_JS_FILES)
             if js_urls:
                 js_workers = min(workers, len(js_urls))
@@ -1493,7 +1496,9 @@ def extract_m3u8_from_page_with_title(
                             js_text = _fetch_js(session, js_url, timeout)
                         except Exception:
                             continue
-                        candidates.extend(_extract_from_js(js_text, js_url, page_url))
+                        for c in _extract_from_js(js_text, js_url, page_url):
+                            report(c)
+                            candidates.append(c)
                 else:
                     with ThreadPoolExecutor(max_workers=js_workers) as executor:
                         futures = {
@@ -1506,7 +1511,9 @@ def extract_m3u8_from_page_with_title(
                                 js_text = future.result()
                             except Exception:
                                 continue
-                            candidates.extend(_extract_from_js(js_text, u, page_url))
+                            for c in _extract_from_js(js_text, u, page_url):
+                                report(c)
+                                candidates.append(c)
 
             candidates = _dedupe(candidates)
 

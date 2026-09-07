@@ -177,7 +177,7 @@ class M3U8DownloaderGUI:
             main_frame,
             text="记住保存位置（下次启动自动填充）",
             variable=self._remember_dir_var,
-            command=self._save_dir_preference,
+            command=self._save_config,
         )
         remember_dir_check.grid(row=row, column=1, columnspan=2, sticky=tk.W, pady=(0, 5))
 
@@ -406,8 +406,11 @@ class M3U8DownloaderGUI:
         self._log_text.grid(row=0, column=0, sticky=tk.NSEW)
         log_scrollbar.grid(row=0, column=1, sticky=tk.NS)
 
-        # UI 构建完成、变量均已创建后，恢复"记住保存位置"偏好
-        self._load_dir_preference()
+        # UI 构建完成、变量均已创建后，恢复上次的配置（保存目录 + 参数设置）
+        self._load_config()
+
+        # 窗口关闭前保存配置
+        self._root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # 深度模式依赖缺失时给出安装提示（此时日志区已就绪，可安全 _log）
         if not is_deep_mode_available():
@@ -433,7 +436,7 @@ class M3U8DownloaderGUI:
             self._dir_var.set(selected)
             # 已勾选"记住保存位置"时，同步持久化新选择的目录
             if self._remember_dir_var.get():
-                self._save_dir_preference()
+                self._save_config()
 
     def _open_dir(self) -> None:
         """在系统文件管理器中打开当前保存目录.
@@ -455,53 +458,75 @@ class M3U8DownloaderGUI:
         except Exception as e:
             self._log(f"打开目录失败：{e}")
 
-    def _load_dir_preference(self) -> None:
-        """读取"记住保存位置"偏好，必要时填充保存目录.
+    def _load_config(self) -> None:
+        """启动时读取所有 GUI 配置（保存目录 + 参数设置）.
 
         配置文件为 GUI_CONFIG_PATH（~/.m3u8-downloader/gui_config.json）。
-        仅当 remember_dir 为 True 且 last_dir 是已存在的目录时，才填充保存目录
-        并勾选复选框；文件不存在、JSON 损坏或缺少键时，安全降级为"不记住"，
-        绝不让 GUI 启动失败。
+        文件不存在、JSON 损坏或结构异常时安全降级为默认值，绝不让 GUI 启动失败。
         """
         try:
             with open(GUI_CONFIG_PATH, "r", encoding="utf-8") as f:
                 config = json.load(f)
             if not isinstance(config, dict):
                 raise ValueError("配置内容不是 JSON 对象")
-
-            remember_dir = bool(config.get("remember_dir", False))
-            last_dir = str(config.get("last_dir", "") or "").strip()
-            restored = remember_dir and bool(last_dir) and os.path.isdir(last_dir)
         except Exception:
-            # 配置不存在 / JSON 损坏 / 结构异常：安全降级为"不记住"
-            self._remember_dir_var.set(False)
-            return
+            return  # 配置不存在/损坏：全部用默认值
 
-        if restored:
+        # 保存目录（仅当 remember_dir 为 True 且 last_dir 仍存在时恢复）
+        remember_dir = bool(config.get("remember_dir", False))
+        last_dir = str(config.get("last_dir", "") or "").strip()
+        if remember_dir and last_dir and os.path.isdir(last_dir):
             self._dir_var.set(last_dir)
             self._remember_dir_var.set(True)
         else:
             self._remember_dir_var.set(False)
 
-    def _save_dir_preference(self) -> None:
-        """将"记住保存位置"偏好与当前保存目录写入配置文件.
+        # 参数设置
+        self._deep_var.set(bool(config.get("deep", False)))
+        self._use_proxy_var.set(bool(config.get("use_proxy", False)))
+        self._proxy_var.set(str(config.get("proxy", "") or "127.0.0.1:7897"))
+        self._use_ffmpeg_var.set(bool(config.get("use_ffmpeg", True)))
+        self._tmpdir_var.set(str(config.get("tmpdir", "") or ""))
 
-        勾选时记录 remember_dir=True 及当前目录；取消勾选时 remember_dir=False
-        且清空 last_dir，保证下次启动不会自动填充。写入失败仅在日志区提示。
+        for key, var, default in (
+            ("workers", self._workers_var, 8),
+            ("retries", self._retries_var, 3),
+            ("timeout", self._timeout_var, 30),
+        ):
+            try:
+                var.set(int(config.get(key, default)))
+            except (TypeError, ValueError):
+                pass
+
+    def _save_config(self) -> None:
+        """将当前所有 GUI 配置写入配置文件.
+
+        在「记住位置」勾选变化、浏览选目录、以及窗口关闭时调用，
+        保证下次启动恢复相同的配置。写入失败仅在日志区提示。
         """
-        remember_dir = bool(self._remember_dir_var.get())
-        current_dir = self._dir_var.get().strip()
         config = {
-            "remember_dir": remember_dir,
-            "last_dir": current_dir if remember_dir else "",
+            "remember_dir": bool(self._remember_dir_var.get()),
+            "last_dir": self._dir_var.get().strip() if self._remember_dir_var.get() else "",
+            "deep": bool(self._deep_var.get()),
+            "use_proxy": bool(self._use_proxy_var.get()),
+            "proxy": self._proxy_var.get().strip(),
+            "workers": int(self._workers_var.get()),
+            "retries": int(self._retries_var.get()),
+            "timeout": int(self._timeout_var.get()),
+            "use_ffmpeg": bool(self._use_ffmpeg_var.get()),
+            "tmpdir": self._tmpdir_var.get().strip(),
         }
-
         try:
             GUI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
             with open(GUI_CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            self._log(f"提示：保存位置偏好写入失败：{e}")
+            self._log(f"提示：配置写入失败：{e}")
+
+    def _on_close(self) -> None:
+        """窗口关闭前保存配置，再销毁窗口."""
+        self._save_config()
+        self._root.destroy()
 
     def _browse_tmpdir(self) -> None:
         """浏览选择临时目录."""
@@ -990,7 +1015,7 @@ class M3U8DownloaderGUI:
                 stop_event=self._extract_stop_flag,
                 **({"on_candidate":
                    (lambda c: self._queue_message("candidate_update", replace(c)))}
-                   if deep and not preload else {}),
+                   if not preload else {}),
                 **({"on_title": on_title_cb}
                    if not preload else {}),
             )
@@ -1002,8 +1027,9 @@ class M3U8DownloaderGUI:
                 self._queue_message(
                     "preloaded_extract", PreloadResult(candidates, seg, title, page_url, result)
                 )
-            elif deep:
-                # 按 URL 更新原行，不清空列表、不重新排序，保留选择和滚动位置。
+            else:
+                # 普通与深度模式统一：按 URL 更新原行，不清空列表、不重新排序，
+                # 保留选择和滚动位置。流式阶段已显示部分候选，这里补齐并更新估计值。
                 for candidate in candidates:
                     self._queue_message("candidate_update", replace(candidate))
                 # 标题已在流式阶段回传；若流式未触发（标题为空或极端时序），此处兜底补发。
@@ -1013,15 +1039,6 @@ class M3U8DownloaderGUI:
                     self._queue_message("suggest_filename", seg)
                 result = "stopped" if self._extract_stop_flag.is_set() else "success"
                 self._queue_message("extract_done", result)
-            else:
-                self._queue_message("candidates", candidates)
-                # 标题已在流式阶段回传；若流式未触发，此处兜底补发。
-                if title and not streamed_title["value"]:
-                    self._queue_message("page_title", PageTitleUpdate(page_url, title))
-                # 仅在有标题段落时自动命名；不再单独打印标题提取日志，避免与命名日志重复
-                if seg and not streamed_title["value"]:
-                    self._queue_message("suggest_filename", seg)
-                self._queue_message("extract_done", "success")
         except Exception as e:  # 任何异常都不让 GUI 崩溃
             if self._extract_stop_flag.is_set():
                 if preload:

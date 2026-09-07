@@ -443,7 +443,7 @@ def isolated_gui(tmp_path):
     """GUI instance whose preference file is redirected into tmp_path.
 
     ``GUI_CONFIG_PATH`` is patched for the whole lifetime of the instance
-    (including ``_build_ui`` -> ``_load_dir_preference``), so the real
+    (including ``_build_ui`` -> ``_load_config``), so the real
     ``~/.m3u8-downloader/gui_config.json`` is never read nor written.
 
     Yields:
@@ -561,12 +561,12 @@ class TestOpenDir:
 
 
 # ---------------------------------------------------------------------------
-# 记住保存位置: _load_dir_preference()
+# 记住保存位置: _load_config()
 # ---------------------------------------------------------------------------
 
 
 class TestLoadDirPreference:
-    """Tests for M3U8DownloaderGUI._load_dir_preference() degradation paths."""
+    """Tests for M3U8DownloaderGUI._load_config() degradation paths."""
 
     def test_load_missing_config_degrades_gracefully(self, isolated_gui):
         """Missing config file: no directory filled, checkbox stays unchecked."""
@@ -575,10 +575,10 @@ class TestLoadDirPreference:
 
         gui._dir_var.set.reset_mock()
         gui._remember_dir_var.set.reset_mock()
-        gui._load_dir_preference()  # must not raise
+        gui._load_config()  # must not raise
 
         gui._dir_var.set.assert_not_called()
-        gui._remember_dir_var.set.assert_called_once_with(False)
+        gui._remember_dir_var.set.assert_not_called()
 
     def test_load_corrupt_json_degrades_gracefully(self, isolated_gui):
         """Broken JSON content: safe degradation, no exception surfaced."""
@@ -587,10 +587,10 @@ class TestLoadDirPreference:
 
         gui._dir_var.set.reset_mock()
         gui._remember_dir_var.set.reset_mock()
-        gui._load_dir_preference()  # must not raise
+        gui._load_config()  # must not raise
 
         gui._dir_var.set.assert_not_called()
-        gui._remember_dir_var.set.assert_called_once_with(False)
+        gui._remember_dir_var.set.assert_not_called()
 
     def test_load_non_dict_top_level_degrades_gracefully(self, isolated_gui):
         """Valid JSON that is not an object (e.g. a list): safe degradation."""
@@ -599,10 +599,10 @@ class TestLoadDirPreference:
 
         gui._dir_var.set.reset_mock()
         gui._remember_dir_var.set.reset_mock()
-        gui._load_dir_preference()  # must not raise
+        gui._load_config()  # must not raise
 
         gui._dir_var.set.assert_not_called()
-        gui._remember_dir_var.set.assert_called_once_with(False)
+        gui._remember_dir_var.set.assert_not_called()
 
     def test_load_restores_valid_directory(self, isolated_gui, tmp_path):
         """remember_dir=True with an existing last_dir fills entry and checks box."""
@@ -613,7 +613,7 @@ class TestLoadDirPreference:
 
         gui._dir_var.set.reset_mock()
         gui._remember_dir_var.set.reset_mock()
-        gui._load_dir_preference()
+        gui._load_config()
 
         gui._dir_var.set.assert_called_once_with(str(target))
         gui._remember_dir_var.set.assert_called_once_with(True)
@@ -628,7 +628,7 @@ class TestLoadDirPreference:
 
         gui._dir_var.set.reset_mock()
         gui._remember_dir_var.set.reset_mock()
-        gui._load_dir_preference()
+        gui._load_config()
 
         gui._dir_var.set.assert_not_called()
         gui._remember_dir_var.set.assert_called_once_with(False)
@@ -642,7 +642,7 @@ class TestLoadDirPreference:
 
         gui._dir_var.set.reset_mock()
         gui._remember_dir_var.set.reset_mock()
-        gui._load_dir_preference()
+        gui._load_config()
 
         gui._dir_var.set.assert_not_called()
         gui._remember_dir_var.set.assert_called_once_with(False)
@@ -654,19 +654,19 @@ class TestLoadDirPreference:
 
         gui._dir_var.set.reset_mock()
         gui._remember_dir_var.set.reset_mock()
-        gui._load_dir_preference()
+        gui._load_config()
 
         gui._dir_var.set.assert_not_called()
         gui._remember_dir_var.set.assert_called_once_with(False)
 
 
 # ---------------------------------------------------------------------------
-# 记住保存位置: _save_dir_preference()
+# 记住保存位置: _save_config()
 # ---------------------------------------------------------------------------
 
 
 class TestSaveDirPreference:
-    """Tests for M3U8DownloaderGUI._save_dir_preference() persistence."""
+    """Tests for M3U8DownloaderGUI._save_config() persistence."""
 
     def test_save_checked_writes_dir_preference(self, isolated_gui, tmp_path):
         """Checked: writes remember_dir=True together with the current directory."""
@@ -675,7 +675,7 @@ class TestSaveDirPreference:
         gui._remember_dir_var.get = MagicMock(return_value=True)
         gui._dir_var.get = MagicMock(return_value=target)
 
-        gui._save_dir_preference()
+        gui._save_config()
 
         assert config_path.exists()
         data = json.loads(config_path.read_text(encoding="utf-8"))
@@ -689,7 +689,7 @@ class TestSaveDirPreference:
         gui._remember_dir_var.get = MagicMock(return_value=True)
         gui._dir_var.get = MagicMock(return_value="D:\\downloads")
 
-        gui._save_dir_preference()
+        gui._save_config()
 
         assert config_path.parent.is_dir()
         assert config_path.exists()
@@ -701,7 +701,7 @@ class TestSaveDirPreference:
         gui._remember_dir_var.get = MagicMock(return_value=False)
         gui._dir_var.get = MagicMock(return_value=str(tmp_path / "videos"))
 
-        gui._save_dir_preference()
+        gui._save_config()
 
         data = json.loads(config_path.read_text(encoding="utf-8"))
         assert data["remember_dir"] is False
@@ -715,7 +715,7 @@ class TestSaveDirPreference:
 
         with patch("builtins.open", side_effect=OSError("磁盘不可写")):
             with patch.object(gui, "_log") as mock_log:
-                gui._save_dir_preference()  # must not raise
+                gui._save_config()  # must not raise
 
         mock_log.assert_called_once()
         assert "写入失败" in mock_log.call_args[0][0]
@@ -728,11 +728,11 @@ class TestSaveDirPreference:
         gui._remember_dir_var.get = MagicMock(return_value=True)
         gui._dir_var.get = MagicMock(return_value=str(target))
 
-        gui._save_dir_preference()
+        gui._save_config()
 
         gui._dir_var.set.reset_mock()
         gui._remember_dir_var.set.reset_mock()
-        gui._load_dir_preference()
+        gui._load_config()
 
         gui._dir_var.set.assert_called_once_with(str(target))
         gui._remember_dir_var.set.assert_called_once_with(True)
@@ -797,7 +797,7 @@ class TestDirPreferenceWiring:
                     "m3u8_downloader.gui.GUI_CONFIG_PATH", tmp_path / "gui_config.json"
                 )
             )
-            with patch.object(M3U8DownloaderGUI, "_load_dir_preference") as mock_load:
+            with patch.object(M3U8DownloaderGUI, "_load_config") as mock_load:
                 M3U8DownloaderGUI(_make_mock_root())
 
         mock_load.assert_called_once()
@@ -843,7 +843,7 @@ class TestDirPreferenceWiring:
             if "记住保存位置" in str(c.kwargs.get("text", ""))
         ]
         assert len(remember_calls) == 1, "未找到“记住保存位置”勾选框"
-        assert remember_calls[0].kwargs["command"] == gui._save_dir_preference
+        assert remember_calls[0].kwargs["command"] == gui._save_config
         assert remember_calls[0].kwargs["variable"] is gui._remember_dir_var
 
     def test_remember_dir_var_defaults_to_false(self, isolated_gui):
@@ -899,7 +899,7 @@ class TestWebExtractAndMultiDownload:
                 msgs.append(gui_instance._message_queue.get_nowait())
             except queue.Empty:
                 break
-        assert "candidates" in [m[0] for m in msgs]
+        assert "candidate_update" in [m[0] for m in msgs]
         assert "extract_done" in [m[0] for m in msgs]
         for t, d in msgs:
             gui_instance._handle_message(t, d)
@@ -917,7 +917,7 @@ class TestWebExtractAndMultiDownload:
         messages = []
         while not gui_instance._message_queue.empty():
             messages.append(gui_instance._message_queue.get_nowait())
-        assert ("candidates", cands) in messages
+        assert any(kind == "candidate_update" for kind, _ in messages)
         assert not any(kind == "preloaded_extract" for kind, _ in messages)
 
     def test_deep_preload_does_not_pass_noop_candidate_callback(self, gui_instance):
