@@ -297,6 +297,73 @@ class TestQueueAutoChain:
         assert gui._candidate_page_url == "https://x/c"
         assert gui._preload_queue == []
 
+    def test_preload_extract_error_is_skipped_and_queue_clears(self, headless):
+        """P1-A：预载页提取抛异常 → 条目被 finalize 为 error → 跳过后队列清空。
+
+        回归背景：worker 异常路径此前只发 extract_done(error)，不发
+        preloaded_extract，导致队头条目永久停在 extracting、整链卡死。
+        """
+        gui = headless
+        _configure_tree(gui)
+        # 下载中 B 入队后提取异常 → worker 现发 preloaded_extract(ERROR)
+        gui._downloading = True
+        gui._preload_queue.append(
+            PreloadQueueEntry(page_url="https://x/bad", state="extracting")
+        )
+        with patch.object(gui, "_log"):
+            gui._handle_message(
+                "preloaded_extract",
+                PreloadResult([], "", "", "https://x/bad", PreloadState.ERROR),
+            )
+        assert gui._preload_queue[0].state == "error"
+        gui._downloading = False
+        with patch("m3u8_downloader.gui.messagebox.showinfo"):
+            gui._on_download_done("success")
+        assert gui._preload_queue == [], "失败页应被跳过，队列清空而非卡死"
+
+    def test_preload_extract_error_continues_to_next_head(self, headless):
+        """P1-A：队头预载失败(finalize 为 error)后，再预载的成功页能继续处理。
+
+        模拟真实时序：B 是当时唯一在提取的尾部，失败后固化为 error；
+        之后用户才预载 C 成功 → 下载结束自动跳过 B 并处理 C。
+        """
+        gui = headless
+        _configure_tree(gui)
+        _arm_auto(gui)
+        gui._downloading = True
+        # 1) 下载中预载 B 提取失败 → finalize 为 error
+        gui._preload_queue.append(
+            PreloadQueueEntry(page_url="https://x/bad", state="extracting")
+        )
+        with patch.object(gui, "_log"):
+            gui._handle_message(
+                "preloaded_extract",
+                PreloadResult([], "", "", "https://x/bad", PreloadState.ERROR),
+            )
+        assert gui._preload_queue[0].state == "error"
+        # 2) 随后用户预载 C 成功（追加在队尾）
+        gui._preload_queue.append(
+            PreloadQueueEntry(page_url="https://x/ok", state="extracting")
+        )
+        with patch.object(gui, "_log"):
+            gui._handle_message(
+                "preloaded_extract",
+                PreloadResult(
+                    [Candidate(url="https://cdn/ok.m3u8", title="OK")],
+                    "OK", "OK - full", "https://x/ok", PreloadState.SUCCESS,
+                ),
+            )
+        assert [e.state for e in gui._preload_queue] == ["error", "success"]
+        # 3) 当前下载完成 → 跳过 error 头，自动展示并下载成功页 C
+        gui._downloading = False
+        fake_start = _fake_download_start(gui)
+        with patch("m3u8_downloader.gui.messagebox.showinfo"):
+            with patch.object(gui, "_download_selected", side_effect=fake_start):
+                gui._on_download_done("success")
+        assert gui._downloading is True
+        assert gui._candidate_page_url == "https://x/ok"
+        assert gui._preload_queue == []
+
     def test_manual_download_error_does_not_auto_start_queue(self, headless):
         """手动（非队列）页面下载失败 → 不自动开始队列头（等用户续跑）。"""
         gui = headless
@@ -369,7 +436,26 @@ class TestQueuePersistence:
             assert head.state == "success"
             assert head.filename_title == "B"
             assert [c.url for c in head.candidates] == ["https://cdn/b.m3u8"]
-            assert gui_b._preload_queue[1].state == "extracting"
+            # 重启恢复：提取线程无法跨进程存活，extracting 归一化为可跳过的 error
+            assert gui_b._preload_queue[1].state == "error"
+
+    def test_reload_normalizes_extracting_and_does_not_stall(self, tmp_path, monkeypatch):
+        """P1-B：重启恢复的 extracting 条目归一化为 error，续跑不卡链。"""
+        with _headless_env(tmp_path, monkeypatch) as build:
+            gui_a = build()
+            gui_a._preload_queue.append(
+                PreloadQueueEntry(page_url="https://x/b", state="extracting")
+            )
+            gui_a._save_preload_queue()
+
+            # 重启：工作线程已死，extracting 应被归一化为可跳过的终态
+            gui_b = build()
+            assert [e.state for e in gui_b._preload_queue] == ["error"]
+            _configure_tree(gui_b)
+            # 手动下载成功后续跑：error 头被跳过、队列清空，不永久等待
+            with patch("m3u8_downloader.gui.messagebox.showinfo"):
+                gui_b._on_download_done("success")
+            assert gui_b._preload_queue == []
 
     def test_corrupt_queue_file_degrades_to_empty(self, tmp_path, monkeypatch):
         with _headless_env(tmp_path, monkeypatch) as build:

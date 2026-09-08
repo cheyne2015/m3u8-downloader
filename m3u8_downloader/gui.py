@@ -53,6 +53,7 @@ class PageTitleUpdate:
 class PreloadState(str, Enum):
     SUCCESS = "success"
     STOPPED = "stopped"
+    ERROR = "error"
 
 
 @dataclass(frozen=True)
@@ -1036,7 +1037,12 @@ class M3U8DownloaderGUI:
                         f"预载：成功，找到 {len(preload_result.candidates)} 条，等待当前下载结束"
                     )
                 else:
-                    self._preload_status_var.set("预载：已停止，保留已找到结果")
+                    state_text = (
+                        "预载：已停止，保留已找到结果"
+                        if preload_result.state == PreloadState.STOPPED
+                        else "预载：失败，保留已找到结果"
+                    )
+                    self._preload_status_var.set(state_text)
                 self._log("网页预载完成，链接和标题等待当前下载结束后一起回填")
                 self._on_extract_done(
                     "pending" if preload_result.state == PreloadState.SUCCESS else preload_result.state
@@ -1315,14 +1321,25 @@ class M3U8DownloaderGUI:
                 result = "stopped" if self._extract_stop_flag.is_set() else "success"
                 self._queue_message("extract_done", result)
         except Exception as e:  # 任何异常都不让 GUI 崩溃
-            if self._extract_stop_flag.is_set():
-                if preload:
+            if preload:
+                # 预载异常也必须把对应队列条目 finalize 为终态（stopped / error），
+                # 否则条目会永远停在 "extracting"，自动连播链在队头永久卡死。
+                if self._extract_stop_flag.is_set():
                     self._queue_message("preload_status", "预载：已停止")
+                    self._queue_message("log", "提取已停止")
+                    state = PreloadState.STOPPED
+                else:
+                    self._queue_message("preload_status", "预载：失败，请查看日志")
+                    self._queue_message("log", f"抽取失败：{e}")
+                    state = PreloadState.ERROR
+                self._queue_message(
+                    "preloaded_extract",
+                    PreloadResult([], "", "", page_url, state),
+                )
+            elif self._extract_stop_flag.is_set():
                 self._queue_message("log", "提取已停止")
                 self._queue_message("extract_done", "stopped")
             else:
-                if preload:
-                    self._queue_message("preload_status", "预载：失败，请查看日志")
                 self._queue_message("log", f"抽取失败：{e}")
                 self._queue_message("extract_done", "error")
 
@@ -1562,6 +1579,10 @@ class M3U8DownloaderGUI:
     def _load_preload_queue(self) -> list:
         """启动时从 PRELOAD_QUEUE_FILE 恢复待处理队列.
 
+        恢复的 ``"extracting"`` 条目会被归一化为可跳过的 ``"error"`` 终态：
+        提取线程无法跨进程存活，重启后不存在任何能把它 finalize 的 worker，
+        若不归一化，续跑会在队头永久等待一个永不完结的条目。
+
         Returns:
             恢复出的 ``PreloadQueueEntry`` 列表；文件缺失/损坏/结构异常时为空.
         """
@@ -1574,8 +1595,12 @@ class M3U8DownloaderGUI:
                 if not isinstance(e, dict):
                     continue
                 entry = PreloadQueueEntry.from_dict(e)
-                if entry.page_url:
-                    queue.append(entry)
+                if not entry.page_url:
+                    continue
+                if entry.state == "extracting":
+                    # 重启恢复：不存在存活的工作线程，置为终态避免卡链。
+                    entry.state = "error"
+                queue.append(entry)
             return queue
         except (OSError, ValueError):
             return []
