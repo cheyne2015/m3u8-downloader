@@ -551,7 +551,7 @@ def test_preload_swaps_list_and_title_only_after_download(
         pump_until(root, video_page.preload_started.is_set)
         assert "预载：正在提取下一网页…" in visible_text(root)
         if finish_order == "preload_first":
-            pump_until(root, lambda: str(button(root, "提取网页").cget("state")) == "normal")
+            pump_until(root, lambda: "预载：成功，找到 1 条，等待当前下载结束" in visible_text(root))
             assert "预载：成功，找到 1 条，等待当前下载结束" in visible_text(root)
         preserved = (
             [tree.item(item, "values") for item in tree.get_children()] == original_rows
@@ -562,7 +562,7 @@ def test_preload_swaps_list_and_title_only_after_download(
         video_page.release_download.set()
     pump_until(root, lambda: str(button(root, "停止下载").cget("state")) == "disabled")
     video_page.release_preload.set()
-    pump_until(root, lambda: str(button(root, "提取网页").cget("state")) == "normal")
+    pump_until(root, lambda: "预载：已载入 1 条结果" in visible_text(root))
     assert entries[2].get() == "Next episode", "Preloaded title was lost"
     assert "预载：已载入 1 条结果" in visible_text(root)
     assert [tree.item(item, "values")[-1] for item in tree.get_children()] == [video_page + "next.m3u8"]

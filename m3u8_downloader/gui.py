@@ -868,8 +868,12 @@ class M3U8DownloaderGUI:
             self._status_var.set("正在停止下载...")
 
     def _stop_extract(self) -> None:
-        """停止扫描，保留已有候选，不设置下载停止信号。"""
-        if self._extracting:
+        """停止扫描，保留已有候选，不设置下载停止信号。
+
+        下载中预载（无限队列）同样可停止：此时 ``_extracting`` 为 False，
+        真正的在飞标志是 ``_preload_extracting``，二者任一为真即允许停止。
+        """
+        if self._extracting or self._preload_extracting:
             self._extract_stop_flag.set()
             self._stop_extract_btn.configure(state=tk.DISABLED)
             if self._downloading:
@@ -1311,6 +1315,7 @@ class M3U8DownloaderGUI:
             return
         target.state = "extracting"
         self._preload_extracting = True
+        self._stop_extract_btn.configure(state=tk.NORMAL)
         self._extract_stop_flag.clear()
         self._current_extract_page_url = target.page_url
         self._extract_recorded = False

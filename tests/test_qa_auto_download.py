@@ -16,7 +16,9 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from contextlib import ExitStack, contextmanager
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -78,6 +80,10 @@ def headless_gui(config_path=None):
             stack.enter_context(p)
         if config_path is not None:
             stack.enter_context(patch("m3u8_downloader.gui.GUI_CONFIG_PATH", config_path))
+        # 隔离预载队列持久化文件：避免读取本机真实 ~/.m3u8-downloader/preload_queue.json
+        # 造成 _preload_queue 非空，使 _on_download_done 走自动连播分支而跳过单页交接逻辑。
+        qfile = Path(tempfile.mkdtemp()) / "preload_queue.json"
+        stack.enter_context(patch("m3u8_downloader.gui.PRELOAD_QUEUE_FILE", qfile))
         root = MagicMock()
         root.tk = MagicMock()
         root.after = MagicMock()
@@ -577,7 +583,7 @@ def test_qa_stop_extract_during_preload_blocks_chain(
         _gui_button(root, "停止提取").invoke()
         pump_until(
             root,
-            lambda: str(_gui_button(root, "提取网页").cget("state")) == "normal",
+            lambda: app._pending_extract_result == "stopped",
             timeout=15,
         )
         # 下载中「停止提取」→ 暂存为 stopped，A 完成后不应接力
