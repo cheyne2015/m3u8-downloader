@@ -321,7 +321,7 @@ class M3U8DownloaderGUI:
 
         # ===== 参数设置区 =====
         param_frame = ttk.LabelFrame(main_frame, text="参数设置", padding=8)
-        param_frame.grid(row=row, column=0, columnspan=3, sticky=tk.EW, pady=(0, 10))
+        param_frame.grid(row=row, column=0, columnspan=3, sticky=tk.EW, pady=(0, 5))
         param_frame.columnconfigure(1, weight=1)
         param_frame.columnconfigure(3, weight=1)
 
@@ -371,52 +371,60 @@ class M3U8DownloaderGUI:
         )
         tmp_browse_btn.grid(row=0, column=1)
 
-        # 深度模式（无头浏览器）复选框
+        row += 1
+
+        # ===== 行为设置区（所有勾选框集中、规整两列排列） =====
+        behavior_frame = ttk.LabelFrame(main_frame, text="行为设置", padding=8)
+        behavior_frame.grid(row=row, column=0, columnspan=3, sticky=tk.EW, pady=(0, 10))
+        behavior_frame.columnconfigure(1, weight=1)
+        behavior_frame.columnconfigure(3, weight=1)
+
+        # 深度模式（无头浏览器）
         self._deep_var = tk.BooleanVar(value=False)
         deep_check = ttk.Checkbutton(
-            param_frame, text="深度模式（需 playwright）", variable=self._deep_var
+            behavior_frame, text="深度模式（需 playwright）", variable=self._deep_var
         )
-        deep_check.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+        deep_check.grid(row=0, column=0, sticky=tk.W, padx=(0, 20))
         if not is_deep_mode_available():
             deep_check.configure(state=tk.DISABLED)
 
-        # 使用代理复选框（默认不勾选 = 直连，不通过任何代理）
+        # 自动下载：提取正常完成后按规则自动选中并直接开始下载
+        self._auto_download_var = tk.BooleanVar(value=True)
+        auto_download_check = ttk.Checkbutton(
+            behavior_frame, text="自动下载", variable=self._auto_download_var,
+            command=self._save_config,
+        )
+        auto_download_check.grid(row=0, column=2, sticky=tk.W)
+
+        # 使用代理（勾选后使用下方代理地址）
         self._use_proxy_var = tk.BooleanVar(value=False)
         use_proxy_check = ttk.Checkbutton(
-            param_frame, text="使用代理", variable=self._use_proxy_var
+            behavior_frame, text="使用代理", variable=self._use_proxy_var
         )
-        use_proxy_check.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+        use_proxy_check.grid(row=1, column=0, sticky=tk.W, padx=(0, 20), pady=(5, 0))
+
+        # 连续下载：下载完成时自动确认「下载完成！」弹窗
+        self._continuous_download_var = tk.BooleanVar(value=False)
+        continuous_download_check = ttk.Checkbutton(
+            behavior_frame, text="连续下载", variable=self._continuous_download_var,
+            command=self._save_config,
+        )
+        continuous_download_check.grid(row=1, column=2, sticky=tk.W, pady=(5, 0))
 
         # 多文件时创建文件夹（下载 ≥2 个文件时，以提取名作为文件夹名归拢）
         self._create_folder_var = tk.BooleanVar(value=False)
         create_folder_check = ttk.Checkbutton(
-            param_frame, text="多文件时创建文件夹", variable=self._create_folder_var
+            behavior_frame, text="多文件时创建文件夹", variable=self._create_folder_var
         )
-        create_folder_check.grid(row=4, column=2, columnspan=2, sticky=tk.W, pady=(5, 0))
+        create_folder_check.grid(row=2, column=0, sticky=tk.W, padx=(0, 20), pady=(5, 0))
 
-        # 手动代理地址（本地 clash 默认 127.0.0.1:7897；勾选「使用代理」后生效）
-        ttk.Label(param_frame, text="代理地址：").grid(
-            row=5, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0)
+        # 代理地址（本地 clash 默认 127.0.0.1:7897；勾选「使用代理」后生效）
+        ttk.Label(behavior_frame, text="代理地址：").grid(
+            row=2, column=2, sticky=tk.W, pady=(5, 0)
         )
         self._proxy_var = tk.StringVar(value="127.0.0.1:7897")
-        proxy_entry = ttk.Entry(param_frame, textvariable=self._proxy_var, width=24)
-        proxy_entry.grid(row=5, column=1, columnspan=3, sticky=tk.W, pady=(5, 0))
-
-        # 自动下载（默认勾选）：提取正常完成后按规则自动选中并直接开始下载
-        self._auto_download_var = tk.BooleanVar(value=True)
-        auto_download_check = ttk.Checkbutton(
-            param_frame, text="自动下载", variable=self._auto_download_var,
-            command=self._save_config,
-        )
-        auto_download_check.grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
-
-        # 连续下载（默认不勾选）：下载完成时自动确认「下载完成！」弹窗
-        self._continuous_download_var = tk.BooleanVar(value=False)
-        continuous_download_check = ttk.Checkbutton(
-            param_frame, text="连续下载", variable=self._continuous_download_var,
-            command=self._save_config,
-        )
-        continuous_download_check.grid(row=6, column=2, columnspan=2, sticky=tk.W, pady=(5, 0))
+        proxy_entry = ttk.Entry(behavior_frame, textvariable=self._proxy_var, width=24)
+        proxy_entry.grid(row=2, column=3, sticky=tk.W, padx=(8, 0), pady=(5, 0))
 
         row += 1
 
