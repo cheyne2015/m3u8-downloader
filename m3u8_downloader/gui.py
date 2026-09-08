@@ -321,111 +321,106 @@ class M3U8DownloaderGUI:
 
         row += 1
 
-        # ===== 设置区（参数 + 行为合并，共享同一 grid 使行 baseline 严格对齐） =====
+        # ===== 设置区（参数 + 行为合并） =====
+        # 每行「label + 控件」用独立水平 Frame 紧贴排布，再放入 3 列 grid（col0=左栏 / col1=间隔 / col2=右栏）。
+        # 关键：各行不再共享同一套 grid 列宽，避免短 label 的控件被同列的超长勾选框/输入框挤到右侧
+        #（旧版把「深度模式（需 playwright）」与「代理地址」和短 label 挤在同一列，导致 Spinbox 漂到右端）。
         param_frame = ttk.LabelFrame(main_frame, text="设置", padding=8)
         param_frame.grid(row=row, column=0, columnspan=3, sticky=tk.EW, pady=(0, 10))
-        # col1/col3 用于数值 Spinbox 与临时目录输入，不设 weight=1 避免 Entry 撑满右半。
-        param_frame.columnconfigure(1, pad=4)
-        param_frame.columnconfigure(2, pad=4)
-        param_frame.columnconfigure(3, pad=4)
+        param_frame.columnconfigure(0, weight=1)
+        param_frame.columnconfigure(1, minsize=30)
+        param_frame.columnconfigure(2, weight=1)
 
-        # 并发线程数
-        ttk.Label(param_frame, text="并发线程数：").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        # 并发线程数（左栏 row0）
         self._workers_var = tk.IntVar(value=8)
-        workers_spin = ttk.Spinbox(
-            param_frame, from_=1, to=64, textvariable=self._workers_var, width=8
-        )
-        workers_spin.grid(row=0, column=1, sticky=tk.W, padx=(0, 20))
+        _row0l = ttk.Frame(param_frame)
+        workers_spin = ttk.Spinbox(_row0l, from_=1, to=64, textvariable=self._workers_var, width=8)
+        ttk.Label(_row0l, text="并发线程数：").pack(side=tk.LEFT)
+        workers_spin.pack(side=tk.LEFT, padx=(6, 0))
+        _row0l.grid(row=0, column=0, sticky=tk.W)
 
-        # 重试次数
-        ttk.Label(param_frame, text="重试次数：").grid(row=0, column=2, sticky=tk.W, padx=(0, 5))
+        # 重试次数（右栏 row0）
         self._retries_var = tk.IntVar(value=3)
-        retries_spin = ttk.Spinbox(
-            param_frame, from_=0, to=100, textvariable=self._retries_var, width=8
-        )
-        retries_spin.grid(row=0, column=3, sticky=tk.W)
+        _row0r = ttk.Frame(param_frame)
+        retries_spin = ttk.Spinbox(_row0r, from_=0, to=100, textvariable=self._retries_var, width=8)
+        ttk.Label(_row0r, text="重试次数：").pack(side=tk.LEFT)
+        retries_spin.pack(side=tk.LEFT, padx=(6, 0))
+        _row0r.grid(row=0, column=2, sticky=tk.W)
 
-        # 超时时间
-        ttk.Label(param_frame, text="超时时间(秒)：").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        # 超时时间(秒)（左栏 row1）
         self._timeout_var = tk.IntVar(value=30)
-        timeout_spin = ttk.Spinbox(
-            param_frame, from_=5, to=300, textvariable=self._timeout_var, width=8
-        )
-        timeout_spin.grid(row=1, column=1, sticky=tk.W, padx=(0, 20), pady=(5, 0))
+        _row1l = ttk.Frame(param_frame)
+        timeout_spin = ttk.Spinbox(_row1l, from_=5, to=300, textvariable=self._timeout_var, width=8)
+        ttk.Label(_row1l, text="超时时间(秒)：").pack(side=tk.LEFT)
+        timeout_spin.pack(side=tk.LEFT, padx=(6, 0))
+        _row1l.grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
 
-        # 使用 ffmpeg 合并
+        # 使用 ffmpeg 合并转码（右栏 row1）
         self._use_ffmpeg_var = tk.BooleanVar(value=True)
-        ffmpeg_check = ttk.Checkbutton(
-            param_frame, text="使用 ffmpeg 合并转码", variable=self._use_ffmpeg_var
-        )
-        ffmpeg_check.grid(row=1, column=2, columnspan=2, sticky=tk.W, pady=(5, 0))
+        _row1r = ttk.Frame(param_frame)
+        ffmpeg_check = ttk.Checkbutton(_row1r, text="使用 ffmpeg 合并转码", variable=self._use_ffmpeg_var)
+        ffmpeg_check.pack(side=tk.LEFT)
+        _row1r.grid(row=1, column=2, sticky=tk.W, pady=(5, 0))
 
-        # 临时目录
-        ttk.Label(param_frame, text="临时目录：").grid(row=2, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
-        tmp_frame = ttk.Frame(param_frame)
-        tmp_frame.grid(row=2, column=1, columnspan=3, sticky=tk.EW, pady=(5, 0))
-        tmp_frame.columnconfigure(0, weight=1)
-
+        # 临时目录（整行 row2，跨三列，entry 撑宽）
         self._tmpdir_var = tk.StringVar(value="")
-        self._tmpdir_entry = ttk.Entry(tmp_frame, textvariable=self._tmpdir_var)
-        self._tmpdir_entry.grid(row=0, column=0, sticky=tk.EW, padx=(0, 5))
+        _tmp_row = ttk.Frame(param_frame)
+        ttk.Label(_tmp_row, text="临时目录：").pack(side=tk.LEFT)
+        _tmp_inner = ttk.Frame(_tmp_row)
+        self._tmpdir_entry = ttk.Entry(_tmp_inner, textvariable=self._tmpdir_var)
+        self._tmpdir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        tmp_browse_btn = ttk.Button(_tmp_inner, text="浏览", command=self._browse_tmpdir, width=6)
+        tmp_browse_btn.pack(side=tk.LEFT)
+        _tmp_inner.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
+        _tmp_row.grid(row=2, column=0, columnspan=3, sticky=tk.EW, pady=(5, 0))
 
-        tmp_browse_btn = ttk.Button(
-            tmp_frame, text="浏览", command=self._browse_tmpdir, width=6
-        )
-        tmp_browse_btn.grid(row=0, column=1)
-
-        # ===== 行为相关勾选框（继续同 grid，row3 起，保证与上方行 baseline 对齐） =====
-
-        # 深度模式（无头浏览器）
+        # 深度模式（需 playwright）（左栏 row3）
         self._deep_var = tk.BooleanVar(value=False)
-        deep_check = ttk.Checkbutton(
-            param_frame, text="深度模式（需 playwright）", variable=self._deep_var
-        )
-        deep_check.grid(row=3, column=0, sticky=tk.W, padx=(0, 20), pady=(5, 0))
+        _row3l = ttk.Frame(param_frame)
+        deep_check = ttk.Checkbutton(_row3l, text="深度模式（需 playwright）", variable=self._deep_var)
+        deep_check.pack(side=tk.LEFT)
+        _row3l.grid(row=3, column=0, sticky=tk.W, pady=(5, 0))
         if not is_deep_mode_available():
             deep_check.configure(state=tk.DISABLED)
 
-        # 自动下载：提取正常完成后按规则自动选中并直接开始下载
+        # 自动下载（右栏 row3）
         self._auto_download_var = tk.BooleanVar(value=True)
-        auto_download_check = ttk.Checkbutton(
-            param_frame, text="自动下载", variable=self._auto_download_var,
-            command=self._save_config,
-        )
-        auto_download_check.grid(row=3, column=2, columnspan=2, sticky=tk.W, pady=(5, 0))
+        _row3r = ttk.Frame(param_frame)
+        auto_download_check = ttk.Checkbutton(_row3r, text="自动下载", variable=self._auto_download_var, command=self._save_config)
+        auto_download_check.pack(side=tk.LEFT)
+        _row3r.grid(row=3, column=2, sticky=tk.W, pady=(5, 0))
 
-        # 使用代理（勾选后使用下方代理地址）
+        # 使用代理（左栏 row4）
         self._use_proxy_var = tk.BooleanVar(value=False)
-        use_proxy_check = ttk.Checkbutton(
-            param_frame, text="使用代理", variable=self._use_proxy_var
-        )
-        use_proxy_check.grid(row=4, column=0, sticky=tk.W, padx=(0, 20), pady=(5, 0))
+        _row4l = ttk.Frame(param_frame)
+        use_proxy_check = ttk.Checkbutton(_row4l, text="使用代理", variable=self._use_proxy_var)
+        use_proxy_check.pack(side=tk.LEFT)
+        _row4l.grid(row=4, column=0, sticky=tk.W, pady=(5, 0))
 
-        # 连续下载：下载完成时自动确认「下载完成！」弹窗
+        # 连续下载（右栏 row4）
         self._continuous_download_var = tk.BooleanVar(value=False)
-        continuous_download_check = ttk.Checkbutton(
-            param_frame, text="连续下载", variable=self._continuous_download_var,
-            command=self._save_config,
-        )
-        continuous_download_check.grid(row=4, column=2, columnspan=2, sticky=tk.W, pady=(5, 0))
+        _row4r = ttk.Frame(param_frame)
+        continuous_download_check = ttk.Checkbutton(_row4r, text="连续下载", variable=self._continuous_download_var, command=self._save_config)
+        continuous_download_check.pack(side=tk.LEFT)
+        _row4r.grid(row=4, column=2, sticky=tk.W, pady=(5, 0))
 
-        # 代理地址（本地 clash 默认 127.0.0.1:7897；勾选「使用代理」后生效）
-        # 用独立子 Frame 使「标签 + 输入框」紧贴，不受列宽影响
-        proxy_cell = ttk.Frame(param_frame)
-        proxy_cell.grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
-        ttk.Label(proxy_cell, text="代理地址：").pack(side=tk.LEFT)
+        # 代理地址（左栏 row5）
         self._proxy_var = tk.StringVar(value="127.0.0.1:7897")
-        proxy_entry = ttk.Entry(proxy_cell, textvariable=self._proxy_var, width=26)
+        _row5l = ttk.Frame(param_frame)
+        ttk.Label(_row5l, text="代理地址：").pack(side=tk.LEFT)
+        proxy_entry = ttk.Entry(_row5l, textvariable=self._proxy_var, width=24)
         proxy_entry.pack(side=tk.LEFT, padx=(6, 0))
+        _row5l.grid(row=5, column=0, sticky=tk.W, pady=(5, 0))
 
-        # 多文件时创建文件夹（下载 ≥2 个文件时，以提取名作为文件夹名归拢）
+        # 多文件时创建文件夹（右栏 row5）
         self._create_folder_var = tk.BooleanVar(value=False)
-        create_folder_check = ttk.Checkbutton(
-            param_frame, text="多文件时创建文件夹", variable=self._create_folder_var
-        )
-        create_folder_check.grid(row=5, column=2, columnspan=2, sticky=tk.W, pady=(5, 0))
+        _row5r = ttk.Frame(param_frame)
+        create_folder_check = ttk.Checkbutton(_row5r, text="多文件时创建文件夹", variable=self._create_folder_var)
+        create_folder_check.pack(side=tk.LEFT)
+        _row5r.grid(row=5, column=2, sticky=tk.W, pady=(5, 0))
 
         row += 1
+
 
         # ===== 网页提取结果区 =====
         extract_frame = ttk.LabelFrame(main_frame, text="网页提取结果", padding=8)
