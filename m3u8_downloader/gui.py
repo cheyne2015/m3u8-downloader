@@ -414,20 +414,21 @@ class M3U8DownloaderGUI:
         )
         continuous_download_check.grid(row=1, column=2, sticky=tk.W, pady=(5, 0))
 
-        # 代理地址（本地 clash 默认 127.0.0.1:7897；勾选「使用代理」后生效）
-        ttk.Label(behavior_frame, text="代理地址：").grid(
-            row=2, column=0, sticky=tk.W, pady=(5, 0)
-        )
-        self._proxy_var = tk.StringVar(value="127.0.0.1:7897")
-        proxy_entry = ttk.Entry(behavior_frame, textvariable=self._proxy_var, width=24)
-        proxy_entry.grid(row=2, column=1, sticky=tk.W, pady=(5, 0))
-
         # 多文件时创建文件夹（下载 ≥2 个文件时，以提取名作为文件夹名归拢）
         self._create_folder_var = tk.BooleanVar(value=False)
         create_folder_check = ttk.Checkbutton(
             behavior_frame, text="多文件时创建文件夹", variable=self._create_folder_var
         )
         create_folder_check.grid(row=2, column=2, sticky=tk.W, pady=(5, 0))
+
+        # 代理地址（本地 clash 默认 127.0.0.1:7897；勾选「使用代理」后生效）
+        # 用独立子 Frame 使「标签 + 输入框」紧贴，不受 col0 列宽（被深度模式撑大）影响
+        proxy_cell = ttk.Frame(behavior_frame)
+        proxy_cell.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+        ttk.Label(proxy_cell, text="代理地址：").pack(side=tk.LEFT)
+        self._proxy_var = tk.StringVar(value="127.0.0.1:7897")
+        proxy_entry = ttk.Entry(proxy_cell, textvariable=self._proxy_var, width=26)
+        proxy_entry.pack(side=tk.LEFT, padx=(6, 0))
 
         row += 1
 
