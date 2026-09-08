@@ -80,6 +80,9 @@ class PreloadQueueEntry:
         filename_title: 预载期间流式暂存的标题段（文件名用）.
         page_title: 网页完整标题.
         m3u8_url: 该页实际下载的 m3u8 直链（下载后回填，供记录/回看）.
+        manual: True = 用户手动点「下载选中」加入队列尾（手动优先：轮到时不设
+            自动下载门控，直接下载）；False = 下载中预载自动入队（走自动规则）.
+        manual_urls: 手动入队时用户实际选中的 m3u8 链接（轮到该页时精确保留选择）.
     """
 
     page_url: str
@@ -88,6 +91,8 @@ class PreloadQueueEntry:
     filename_title: str = ""
     page_title: str = ""
     m3u8_url: str = ""
+    manual: bool = False
+    manual_urls: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """转成可 JSON 持久化的字典（候选字段均为标量）."""
@@ -97,6 +102,8 @@ class PreloadQueueEntry:
             "filename_title": self.filename_title,
             "page_title": self.page_title,
             "m3u8_url": self.m3u8_url,
+            "manual": bool(self.manual),
+            "manual_urls": [str(u) for u in self.manual_urls],
             "candidates": [
                 {
                     "url": c.url,
@@ -145,6 +152,10 @@ class PreloadQueueEntry:
             filename_title=str(data.get("filename_title", "") or ""),
             page_title=str(data.get("page_title", "") or ""),
             m3u8_url=str(data.get("m3u8_url", "") or ""),
+            manual=bool(data.get("manual", False)),
+            manual_urls=[
+                str(u) for u in (data.get("manual_urls") or [])
+            ],
         )
 
 
@@ -216,6 +227,9 @@ class M3U8DownloaderGUI:
         self._inflight_download_url: str = ""
         # 本次下载是否来自待处理队列头（用于「队列页下载失败→跳过继续」语义）。
         self._active_download_is_queue_page: bool = False
+        # P2：用户点「停止下载」后置位，抑制自动连播链（含 in-flight 预载完成后
+        # 的自动下载）；用户再次手动点「下载选中 / 开始下载」时清除（会话级，不持久化）。
+        self._auto_chain_stopped: bool = False
 
         # 构建 UI
         self._build_ui()
@@ -752,6 +766,8 @@ class M3U8DownloaderGUI:
 
     def _start_download(self) -> None:
         """点击开始下载按钮的回调."""
+        # P2：手动触发下载 → 解除「停止后抑制自动连播」（无论是否真正开始）。
+        self._auto_chain_stopped = False
         # 参数校验
         url = self._url_var.get().strip()
         if not url:
@@ -1058,7 +1074,12 @@ class M3U8DownloaderGUI:
                 self._preload_status_var.set(
                     f"预载：已载入 {len(preload_result.candidates)} 条结果"
                 )
-                self._on_extract_done(preload_result.state)
+                # P2：若用户刚点过「停止下载」，本次「下载结束后才完成」的预载页
+                # 不得再自动选中/自动下载（链保持冻结，等用户手动续跑）。
+                self._on_extract_done(
+                    preload_result.state,
+                    allow_auto_download=not self._auto_chain_stopped,
+                )
                 # 下载已结束、预载补完：尝试接着自动处理队列（含本条后续页）。
                 self._continue_queue_after_idle_completion(preload_result)
         elif msg_type == "preload_status":
@@ -1148,6 +1169,13 @@ class M3U8DownloaderGUI:
                 messagebox.showinfo("提示", "下载完成！")
         elif result == "stopped":
             self._status_var.set("下载已停止")
+            # P2：点「停止下载」后冻结自动连播链（队列保留，等用户手动续跑）。
+            if self._preload_queue:
+                self._auto_chain_stopped = True
+                self._log(
+                    "已停止自动连播；待处理队列已保留，"
+                    "手动点「下载选中 / 开始下载」续跑"
+                )
         elif result == "error":
             self._status_var.set("下载失败")
 
@@ -1416,11 +1444,13 @@ class M3U8DownloaderGUI:
         self._filename_var.set(base_name)
         self._log(f"已按网页标题自动命名：{base_name}")
 
-    def _on_extract_done(self, result: str) -> None:
+    def _on_extract_done(self, result: str, *, allow_auto_download: bool = True) -> None:
         """抽取完成的 UI 收尾.
 
         Args:
             result: 抽取结果（"success" / "pending" / "empty" / "error" / "stopped"）.
+            allow_auto_download: 是否允许 success 后自动选中并自动下载。P2 停止后
+                下载已结束才完成的预载页会传 False（链冻结，等用户手动续跑）.
         """
         # 功能二：把本次「提取网页」事件记入网页下载记录（含下载中预载的页面）。
         # 用 _extract_recorded 防止一次提取被多次收尾重复入账。
@@ -1452,7 +1482,8 @@ class M3U8DownloaderGUI:
             mode = getattr(self, "_extract_mode", "普通")
             self._log(f"本次提取模式：{mode}；以上大小均为估计值")
             # 提取正常完成：按规则自动选中，满足条件时自动下载
-            self._auto_select_and_download()
+            if allow_auto_download:
+                self._auto_select_and_download()
         elif result == "pending":
             # 下载中预加载：不覆盖「正在下载」状态，等下载完成后由 _flush_pending_extract 显示
             pass
@@ -1718,6 +1749,21 @@ class M3U8DownloaderGUI:
         self._auto_select_and_download()
         return bool(self._downloading)
 
+    def _select_candidate_rows(self, urls) -> None:
+        """按 m3u8 URL 选中候选列表中的对应行（手动入队条目轮到时的精确续下）.
+
+        Args:
+            urls: 需要选中的 m3u8 链接列表（缺失的行自动忽略）.
+        """
+        items = []
+        for url in urls or []:
+            info = self._candidate_items.get(url)
+            if info is not None:
+                items.append(info[0])
+        if items:
+            self._tree.selection_set(items)
+            self._update_result_actions()
+
     def _advance_preload_queue_when_idle(self) -> None:
         """空闲时依次处理待处理队列：逐个展示并（满足规则时）自动下载.
 
@@ -1727,7 +1773,13 @@ class M3U8DownloaderGUI:
         - 规则满足 → 下载开始（该页已在下载启动时移出队列，链继续）；
         - 规则不满足（未勾选自动下载 / 会话尚未手动下载过 / 无自动候选）
           → 保留在队列，等用户手动点「下载选中 / 开始下载」续跑。
+
+        P2：用户点「停止下载」后 ``_auto_chain_stopped`` 为 True，此处直接返回，
+        整条链冻结直到用户再次手动触发下载清除该标志。
+        手动入队条目（``manual=True``）优先：轮到它时不设自动下载门控，直接下载。
         """
+        if self._auto_chain_stopped:
+            return
         if self._downloading or self._extracting:
             return
         while self._preload_queue:
@@ -1741,6 +1793,18 @@ class M3U8DownloaderGUI:
                 self._log(f"已跳过待处理页：{head.page_url}（{head.state}）")
                 continue
             self._present_queue_entry(head)
+            if head.manual:
+                # 手动加入的条目：手动优先，不受「自动下载」勾选/会话手动标志限制。
+                self._session_manual_downloaded = True
+                for url in head.manual_urls:
+                    self._manual_downloaded_urls.add(url)
+                self._select_candidate_rows(head.manual_urls)
+                if not self._tree.selection():
+                    # 防御：手动选择的链接已不在候选里时退化为自动选中。
+                    self._auto_select_candidate()
+                self._log(f"开始下载手动加入队列的页：{head.page_url}")
+                self._download_selected()
+                return  # head 已在下载启动时从队列移除
             if self._auto_trigger_download():
                 return  # 已开始下载该页；head 在下载启动时已从队列移除
             return  # 规则不满足/无自动候选：head 保留队列，等用户手动续跑
@@ -1762,6 +1826,9 @@ class M3U8DownloaderGUI:
             preload_result: 下载结束后才完成的预载结果.
         """
         if self._downloading:
+            return
+        # P2：停止后整个链冻结；失败/停止页也等手动续跑时再跳过，不自动推进。
+        if self._auto_chain_stopped:
             return
         if preload_result.state == PreloadState.SUCCESS:
             return
@@ -1868,13 +1935,16 @@ class M3U8DownloaderGUI:
             status = status_names.get(
                 str(record.get("status", "")), str(record.get("status", ""))
             )
+            # 同一页多次下载过的 m3u8 以换行累积在 m3u8_url 字段；树状单元格换行
+            # 显示不佳，展示时用「 | 」连接便于阅读（记录本身仍完整保留）。
+            m3u8_display = str(record.get("m3u8_url", "") or "").replace("\n", " | ")
             tree.insert(
                 "", tk.END,
                 values=(
                     record.get("timestamp", ""),
                     status,
                     record.get("page_url", ""),
-                    record.get("m3u8_url", ""),
+                    m3u8_display,
                 ),
             )
         if not records:
@@ -1978,7 +2048,14 @@ class M3U8DownloaderGUI:
             self._log(f"已填入链接：{url}")
 
     def _download_selected(self) -> None:
-        """点击「下载选中」：把多选行组装为串行下载任务队列."""
+        """点击「下载选中」：把多选行组装为串行下载任务队列.
+
+        新澄清（统一队列语义）：队列非空且队头是另一「已就绪」页时，本次手动下载
+        不直接开始，而是把当前页作为 ``manual`` 条目追加到队尾（先处理队列头）；
+        队列为空或队头正是当前页时才直接（续跑队头）开始下载。
+        """
+        # P2：手动触发下载 → 解除「停止后抑制自动连播」（无论是否真正开始）。
+        self._auto_chain_stopped = False
         if self._downloading:
             return
         sel = self._tree.selection()
@@ -2026,6 +2103,37 @@ class M3U8DownloaderGUI:
         if not jobs:
             return
 
+        # 会话级标记：本次会话已手动下载过（「自动下载」的前置条件，不持久化）。
+        # 同时记录链接，「手动优先」——自动下载不再重复处理用户已手动触发的链接。
+        self._session_manual_downloaded = True
+        for job in jobs:
+            self._manual_downloaded_urls.add(job.url)
+
+        # ===== 新澄清：队列非空且队头是另一「已就绪」页 → 手动下载加入队尾 =====
+        page_url = (self._candidate_page_url or "").strip()
+        head = self._preload_queue[0] if self._preload_queue else None
+        head_is_ready = head is not None and head.state != "extracting"
+        if page_url and head_is_ready and head.page_url != page_url:
+            # 当前页不直接下载：作为「手动优先」条目追加队尾，再按序处理队头。
+            manual_entry = PreloadQueueEntry(
+                page_url=page_url,
+                state="success",
+                candidates=list(self._candidates),
+                filename_title=os.path.splitext(base_name)[0].strip() or "output",
+                page_title=self._page_title,
+                manual=True,
+                manual_urls=[job.url for job in jobs],
+            )
+            self._preload_queue.append(manual_entry)
+            self._save_preload_queue()
+            self._update_queue_indicator()
+            self._log(
+                f"已将当前页加入待处理队列尾（共 {len(self._preload_queue)} 个），"
+                "先处理队列头"
+            )
+            self._advance_preload_queue_when_idle()
+            return
+
         self._pending_jobs = jobs
         self._log(f"已加入 {len(jobs)} 个下载任务，开始串行下载")
         self._log("下载进行中可预载下一网页，链接和标题将在当前下载结束后一起回填")
@@ -2033,11 +2141,6 @@ class M3U8DownloaderGUI:
         self._stop_btn.configure(state=tk.NORMAL)
         # 下载进行中保留「提取网页」可用，实现网页预加载（结果挂起，下载完成后显示）
         self._download_selected_btn.configure(state=tk.DISABLED)
-        # 会话级标记：本次会话已手动下载过（「自动下载」的前置条件，不持久化）。
-        # 同时记录链接，「手动优先」——自动下载不再重复处理用户已手动触发的链接。
-        self._session_manual_downloaded = True
-        for job in jobs:
-            self._manual_downloaded_urls.add(job.url)
         self._run_next_job()
 
     def _run_next_job(self) -> None:

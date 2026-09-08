@@ -465,6 +465,235 @@ class TestQueuePersistence:
             assert gui._preload_queue == []
 
 
+def _manual_entry(page_url, m3u8_url, title):
+    """构造一个「用户手动加入队列尾」的条目（手动优先，轮到即无条件下载）。"""
+    candidate = Candidate(url=m3u8_url, title=title, duration=60.0, estimated_size=1024)
+    return PreloadQueueEntry(
+        page_url=page_url,
+        state="success",
+        candidates=[candidate],
+        filename_title=title,
+        page_title=title,
+        manual=True,
+        manual_urls=[m3u8_url],
+    )
+
+
+def _configure_current_page(gui, page_url, m3u8_url, title="A", filename="A.mp4"):
+    """把 GUI 置于「当前正在展示某网页候选」状态（可被真实 _download_selected 处理）。"""
+    _configure_tree(gui)
+    gui._candidates = [
+        Candidate(url=m3u8_url, title=title, duration=60.0, estimated_size=1024)
+    ]
+    gui._candidate_items = {m3u8_url: ("row-a", 0)}
+    gui._candidate_page_url = page_url
+    gui._page_title = title
+    gui._filename_var = FakeVar(filename)
+    gui._dir_var = FakeVar("C:/tmp/out")
+    gui._tree.selection.return_value = ["row-a"]
+    gui._tree.item.return_value = (
+        1, "≈ 1MB", "01:00", "2 Mbps", "media", "普通", title, m3u8_url,
+    )
+
+
+class TestP2StopFreezesAutoChain:
+    """P2：点「停止下载」后冻结自动连播链，直到用户再次手动点下载才解除。"""
+
+    def test_stop_sets_freeze_flag(self, headless):
+        gui = headless
+        _configure_tree(gui)
+        gui._preload_queue.append(
+            _success_entry("https://x/b", "https://cdn/b.m3u8", "B")
+        )
+        with patch("m3u8_downloader.gui.messagebox.showinfo"):
+            gui._on_download_done("stopped")
+        assert gui._auto_chain_stopped is True
+        assert len(gui._preload_queue) == 1, "停止后队列保留"
+
+    def test_stop_with_empty_queue_does_not_freeze(self, headless):
+        gui = headless
+        with patch("m3u8_downloader.gui.messagebox.showinfo"):
+            gui._on_download_done("stopped")
+        assert gui._auto_chain_stopped is False
+
+    def test_inflight_preload_completion_after_stop_does_not_auto_download(self, headless):
+        """P2 核心：停止后「下载结束才完成」的预载页不得自动选中/自动下载。
+
+        回归背景：preloaded_extract 的 not-downloading 分支此前会调
+        _on_extract_done(success)→_auto_select_and_download，让停止后的链复活。
+        """
+        gui = headless
+        _configure_tree(gui)
+        _arm_auto(gui)
+        gui._preload_queue.append(
+            PreloadQueueEntry(page_url="https://x/b", state="extracting")
+        )
+        # 下载 A 期间预载 B；用户点停止 → A 结束
+        with patch("m3u8_downloader.gui.messagebox.showinfo"):
+            gui._on_download_done("stopped")
+        assert gui._auto_chain_stopped is True
+
+        # B 在下载结束后才提取完成（此时不在下载）
+        gui._extracting = True
+        with patch.object(gui, "_log"):
+            gui._handle_message(
+                "preloaded_extract",
+                PreloadResult(
+                    [Candidate(url="https://cdn/b.m3u8", title="B")],
+                    "B", "B - full", "https://x/b", PreloadState.SUCCESS,
+                ),
+            )
+        # 条目已固化 success，但绝不能自动开始下载 B
+        assert gui._preload_queue[0].state == "success"
+        assert gui._downloading is False
+        assert gui._auto_chain_stopped is True
+        # 即使再尝试推进队列也保持冻结
+        with patch.object(gui, "_download_selected") as dl:
+            gui._advance_preload_queue_when_idle()
+        dl.assert_not_called()
+        assert len(gui._preload_queue) == 1
+
+    def test_manual_download_clears_freeze_and_resumes(self, headless):
+        """用户手动点「下载选中」清除冻结标志，之后队列可正常续跑。"""
+        gui = headless
+        _configure_tree(gui)
+        _arm_auto(gui)
+        gui._auto_chain_stopped = True
+        # 无选中行 → _download_selected 清标志后早退
+        gui._tree.selection.return_value = []
+        gui._download_selected()
+        assert gui._auto_chain_stopped is False
+
+        # 清除后推进队列可恢复（队头成功页被展示并下载）
+        gui._preload_queue.append(
+            _success_entry("https://x/b", "https://cdn/b.m3u8", "B")
+        )
+        fake_start = _fake_download_start(gui)
+        with patch.object(gui, "_download_selected", side_effect=fake_start):
+            gui._advance_preload_queue_when_idle()
+        assert gui._downloading is True
+        assert gui._preload_queue == []
+        assert gui._candidate_page_url == "https://x/b"
+
+
+class TestManualUnifiedQueueTail:
+    """新澄清：手动触发的下载加入统一队列尾（先处理队头），队列空时直接下载。"""
+
+    def test_manual_download_joins_tail_when_queue_nonempty(self, headless):
+        """遗留队列 [B] + 手动下载当前页 A → A 追加为 manual 队尾 [B, A]。"""
+        gui = headless
+        gui._preload_queue.append(
+            _success_entry("https://x/b", "https://cdn/b.m3u8", "B")
+        )
+        _configure_current_page(gui, "https://x/A", "https://cdn/a.m3u8", "A")
+        _arm_auto(gui)
+        with patch.object(gui, "_advance_preload_queue_when_idle") as advance:
+            with patch.object(gui, "_run_next_job") as rnj:
+                with patch.object(gui, "_log"):
+                    gui._download_selected()
+        # A 不直接下载：加入队尾，由 advance 先处理队头 B
+        assert [e.page_url for e in gui._preload_queue] == [
+            "https://x/b", "https://x/A",
+        ]
+        tail = gui._preload_queue[-1]
+        assert tail.manual is True
+        assert tail.manual_urls == ["https://cdn/a.m3u8"]
+        assert advance.call_count == 1
+        rnj.assert_not_called()
+        assert gui._pending_jobs == []
+        assert gui._session_manual_downloaded is True
+        assert "https://cdn/a.m3u8" in gui._manual_downloaded_urls
+
+    def test_manual_download_direct_when_queue_empty(self, headless):
+        """队列为空 → 手动下载当前页直接开始（不建队列）。"""
+        gui = headless
+        _configure_current_page(gui, "https://x/A", "https://cdn/a.m3u8", "A")
+        _arm_auto(gui)
+        with patch.object(gui, "_run_next_job") as rnj:
+            with patch.object(gui, "_log"):
+                gui._download_selected()
+        rnj.assert_called_once()
+        assert gui._preload_queue == []
+        assert len(gui._pending_jobs) == 1
+        assert gui._pending_jobs[0].url == "https://cdn/a.m3u8"
+
+    def test_manual_download_direct_when_head_is_current_page(self, headless):
+        """队头正是当前展示页 → 直接续跑队头（不重复入队）。"""
+        gui = headless
+        gui._preload_queue.append(
+            _success_entry("https://x/A", "https://cdn/a.m3u8", "A")
+        )
+        _configure_current_page(gui, "https://x/A", "https://cdn/a.m3u8", "A")
+        _arm_auto(gui)
+        with patch.object(gui, "_run_next_job") as rnj:
+            with patch.object(gui, "_log"):
+                gui._download_selected()
+        rnj.assert_called_once()
+        assert [e.page_url for e in gui._preload_queue] == ["https://x/A"]
+        assert gui._preload_queue[-1].manual is False
+
+    def test_chain_processes_ready_head_before_manual_tail(self, headless):
+        """顺序：手动 A 入队后 → 先处理已就绪队头 B，B 完成后再下载 A。"""
+        gui = headless
+        _configure_tree(gui)
+        _arm_auto(gui)
+        gui._preload_queue.append(
+            _success_entry("https://x/b", "https://cdn/b.m3u8", "B")
+        )
+        gui._preload_queue.append(
+            _manual_entry("https://x/A", "https://cdn/a.m3u8", "A")
+        )
+        fake_start = _fake_download_start(gui)
+        # B 完成 → 自动推进：先展示并下载队头 B
+        with patch("m3u8_downloader.gui.messagebox.showinfo"):
+            with patch.object(gui, "_download_selected", side_effect=fake_start):
+                gui._on_download_done("success")
+        assert gui._downloading is True
+        assert gui._candidate_page_url == "https://x/b"
+        assert [e.page_url for e in gui._preload_queue] == ["https://x/A"]
+        # B 下载完成 → 推进到 manual 队尾 A
+        with patch("m3u8_downloader.gui.messagebox.showinfo"):
+            with patch.object(gui, "_download_selected", side_effect=fake_start):
+                gui._on_download_done("success")
+        assert gui._downloading is True
+        assert gui._candidate_page_url == "https://x/A"
+        assert gui._preload_queue == []
+
+    def test_manual_tail_downloads_even_when_auto_gates_closed(self, headless):
+        """手动入队条目轮到时不设自动下载门控：即使未勾选也直接下载。"""
+        gui = headless
+        _configure_tree(gui)
+        gui._auto_download_var = FakeVar(False)   # 自动下载门关闭
+        gui._session_manual_downloaded = False     # 会话尚未手动下载过
+        gui._preload_queue.append(
+            _manual_entry("https://x/A", "https://cdn/a.m3u8", "A")
+        )
+        fake_start = _fake_download_start(gui)
+        with patch("m3u8_downloader.gui.messagebox.showinfo"):
+            with patch.object(gui, "_download_selected", side_effect=fake_start) as dl:
+                gui._on_download_done("success")
+        dl.assert_called_once()
+        assert gui._downloading is True
+        assert gui._preload_queue == []
+
+    def test_auto_head_with_gates_closed_is_not_auto_downloaded(self, headless):
+        """对照：普通自动条目门关闭时不下载（保留队头），只有 manual 条目绕过门控。"""
+        gui = headless
+        _configure_tree(gui)
+        gui._auto_download_var = FakeVar(False)
+        gui._session_manual_downloaded = False
+        gui._preload_queue.append(
+            _success_entry("https://x/b", "https://cdn/b.m3u8", "B")
+        )
+        fake_start = _fake_download_start(gui)
+        with patch("m3u8_downloader.gui.messagebox.showinfo"):
+            with patch.object(gui, "_download_selected", side_effect=fake_start) as dl:
+                gui._on_download_done("success")
+        dl.assert_not_called()
+        assert gui._downloading is False
+        assert len(gui._preload_queue) == 1
+
+
 class TestPageHistoryIntegration:
     """功能二 GUI 触发链：提取/下载成功/下载失败 → 写入独立只读记录."""
 
