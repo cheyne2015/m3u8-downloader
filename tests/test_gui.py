@@ -4,8 +4,10 @@ import inspect
 import json
 import os
 import queue
+import tempfile
 import threading
 from contextlib import ExitStack
+from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -53,11 +55,15 @@ def _tk_patches():
 
 
 @pytest.fixture
-def gui_instance():
+def gui_instance(monkeypatch):
     """Fixture that provides a M3U8DownloaderGUI instance with mocked Tkinter."""
     with ExitStack() as stack:
         for p in _tk_patches():
             stack.enter_context(p)
+        # 隔离预载队列持久化文件：避免读取本机真实 ~/.m3u8-downloader/preload_queue.json
+        # 造成 fixture 污染（队列非空会走自动连播分支，破坏单页/队列行为的断言）。
+        qfile = Path(tempfile.mkdtemp()) / "preload_queue.json"
+        monkeypatch.setattr("m3u8_downloader.gui.PRELOAD_QUEUE_FILE", qfile)
         root = _make_mock_root()
         gui = M3U8DownloaderGUI(root)
         yield gui
