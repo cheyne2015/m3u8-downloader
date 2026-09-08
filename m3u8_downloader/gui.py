@@ -175,7 +175,9 @@ class M3U8DownloaderGUI:
         self._root = root
         self._root.title("m3u8 下载工具")
         self._root.geometry("980x900")
-        self._root.minsize(760, 760)
+        # 最小尺寸与默认几何保持一致：保证所有内容（尤其是「设置」区 4 列 grid ≈ 960px 宽）
+        # 完整显示，避免窗口缩小时 Spinbox 看似飘到右端（其实是 reqwidth>minsize 被压缩）。
+        self._root.minsize(980, 700)
 
         # 下载状态变量
         self._downloading: bool = False
@@ -2226,5 +2228,5 @@ def run_gui() -> None:
         pass
     _app = M3U8DownloaderGUI(root)
     root.geometry("980x900")
-    root.minsize(760, 760)
+    root.minsize(980, 700)
     root.mainloop()
