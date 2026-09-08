@@ -319,11 +319,13 @@ class M3U8DownloaderGUI:
 
         row += 1
 
-        # ===== 参数设置区 =====
-        param_frame = ttk.LabelFrame(main_frame, text="参数设置", padding=8)
-        param_frame.grid(row=row, column=0, columnspan=3, sticky=tk.EW, pady=(0, 5))
-        param_frame.columnconfigure(1, weight=1)
-        param_frame.columnconfigure(3, weight=1)
+        # ===== 设置区（参数 + 行为合并，共享同一 grid 使行 baseline 严格对齐） =====
+        param_frame = ttk.LabelFrame(main_frame, text="设置", padding=8)
+        param_frame.grid(row=row, column=0, columnspan=3, sticky=tk.EW, pady=(0, 10))
+        # col1/col3 用于数值 Spinbox 与临时目录输入，不设 weight=1 避免 Entry 撑满右半。
+        param_frame.columnconfigure(1, pad=4)
+        param_frame.columnconfigure(2, pad=4)
+        param_frame.columnconfigure(3, pad=4)
 
         # 并发线程数
         ttk.Label(param_frame, text="并发线程数：").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
@@ -371,55 +373,44 @@ class M3U8DownloaderGUI:
         )
         tmp_browse_btn.grid(row=0, column=1)
 
-        row += 1
-
-        # ===== 行为设置区（所有勾选框集中、规整两列排列） =====
-        # 撑满整个可用宽度（与上方「参数设置」等宽），避免右半区留大空导致视觉割裂。
-        # 列布局：col0=左列内容（label/checkbox）| col1=左列 Entry | col2=右列内容
-        # col1 不设 weight=1，避免 Entry 拉满整行右半区导致视觉错位；
-        # 而整体 sticky=tk.EW 让「参数设置」与「行为设置」两区视觉等宽。
-        behavior_frame = ttk.LabelFrame(main_frame, text="行为设置", padding=8)
-        behavior_frame.grid(row=row, column=0, columnspan=3, sticky=tk.EW, pady=(0, 10))
-        behavior_frame.columnconfigure(0, pad=4)
-        behavior_frame.columnconfigure(1, pad=4)
-        behavior_frame.columnconfigure(2, pad=4)
+        # ===== 行为相关勾选框（继续同 grid，row3 起，保证与上方行 baseline 对齐） =====
 
         # 深度模式（无头浏览器）
         self._deep_var = tk.BooleanVar(value=False)
         deep_check = ttk.Checkbutton(
-            behavior_frame, text="深度模式（需 playwright）", variable=self._deep_var
+            param_frame, text="深度模式（需 playwright）", variable=self._deep_var
         )
-        deep_check.grid(row=0, column=0, sticky=tk.W, padx=(0, 20))
+        deep_check.grid(row=3, column=0, sticky=tk.W, padx=(0, 20), pady=(5, 0))
         if not is_deep_mode_available():
             deep_check.configure(state=tk.DISABLED)
 
         # 自动下载：提取正常完成后按规则自动选中并直接开始下载
         self._auto_download_var = tk.BooleanVar(value=True)
         auto_download_check = ttk.Checkbutton(
-            behavior_frame, text="自动下载", variable=self._auto_download_var,
+            param_frame, text="自动下载", variable=self._auto_download_var,
             command=self._save_config,
         )
-        auto_download_check.grid(row=0, column=2, sticky=tk.W)
+        auto_download_check.grid(row=3, column=2, columnspan=2, sticky=tk.W, pady=(5, 0))
 
         # 使用代理（勾选后使用下方代理地址）
         self._use_proxy_var = tk.BooleanVar(value=False)
         use_proxy_check = ttk.Checkbutton(
-            behavior_frame, text="使用代理", variable=self._use_proxy_var
+            param_frame, text="使用代理", variable=self._use_proxy_var
         )
-        use_proxy_check.grid(row=1, column=0, sticky=tk.W, padx=(0, 20), pady=(5, 0))
+        use_proxy_check.grid(row=4, column=0, sticky=tk.W, padx=(0, 20), pady=(5, 0))
 
         # 连续下载：下载完成时自动确认「下载完成！」弹窗
         self._continuous_download_var = tk.BooleanVar(value=False)
         continuous_download_check = ttk.Checkbutton(
-            behavior_frame, text="连续下载", variable=self._continuous_download_var,
+            param_frame, text="连续下载", variable=self._continuous_download_var,
             command=self._save_config,
         )
-        continuous_download_check.grid(row=1, column=2, sticky=tk.W, pady=(5, 0))
+        continuous_download_check.grid(row=4, column=2, columnspan=2, sticky=tk.W, pady=(5, 0))
 
-        # row2：左列「代理地址」子 Frame（label+Entry 紧贴，跨 col0+col1），右列「多文件时创建文件夹」
-        # 用独立子 Frame 使「标签 + 输入框」紧贴，不受 col0 列宽（被深度模式撑大）影响
-        proxy_cell = ttk.Frame(behavior_frame)
-        proxy_cell.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+        # 代理地址（本地 clash 默认 127.0.0.1:7897；勾选「使用代理」后生效）
+        # 用独立子 Frame 使「标签 + 输入框」紧贴，不受列宽影响
+        proxy_cell = ttk.Frame(param_frame)
+        proxy_cell.grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
         ttk.Label(proxy_cell, text="代理地址：").pack(side=tk.LEFT)
         self._proxy_var = tk.StringVar(value="127.0.0.1:7897")
         proxy_entry = ttk.Entry(proxy_cell, textvariable=self._proxy_var, width=26)
@@ -428,9 +419,9 @@ class M3U8DownloaderGUI:
         # 多文件时创建文件夹（下载 ≥2 个文件时，以提取名作为文件夹名归拢）
         self._create_folder_var = tk.BooleanVar(value=False)
         create_folder_check = ttk.Checkbutton(
-            behavior_frame, text="多文件时创建文件夹", variable=self._create_folder_var
+            param_frame, text="多文件时创建文件夹", variable=self._create_folder_var
         )
-        create_folder_check.grid(row=2, column=2, sticky=tk.W, pady=(5, 0))
+        create_folder_check.grid(row=5, column=2, columnspan=2, sticky=tk.W, pady=(5, 0))
 
         row += 1
 
