@@ -375,9 +375,12 @@ class M3U8DownloaderGUI:
 
         # ===== 行为设置区（所有勾选框集中、规整两列排列） =====
         behavior_frame = ttk.LabelFrame(main_frame, text="行为设置", padding=8)
-        behavior_frame.grid(row=row, column=0, columnspan=3, sticky=tk.EW, pady=(0, 10))
-        behavior_frame.columnconfigure(1, weight=1)
-        behavior_frame.columnconfigure(3, weight=1)
+        behavior_frame.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
+        # 列布局：col0=左列内容（label/checkbox）| col1=左列 Entry | col2=右列内容
+        # 不设 weight=1，避免 Entry 拉满整行右半区导致视觉错位。
+        behavior_frame.columnconfigure(0, pad=4)
+        behavior_frame.columnconfigure(1, pad=4)
+        behavior_frame.columnconfigure(2, pad=4)
 
         # 深度模式（无头浏览器）
         self._deep_var = tk.BooleanVar(value=False)
@@ -413,11 +416,11 @@ class M3U8DownloaderGUI:
 
         # 代理地址（本地 clash 默认 127.0.0.1:7897；勾选「使用代理」后生效）
         ttk.Label(behavior_frame, text="代理地址：").grid(
-            row=2, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0)
+            row=2, column=0, sticky=tk.W, pady=(5, 0)
         )
         self._proxy_var = tk.StringVar(value="127.0.0.1:7897")
         proxy_entry = ttk.Entry(behavior_frame, textvariable=self._proxy_var, width=24)
-        proxy_entry.grid(row=2, column=1, sticky=tk.W, padx=(0, 20), pady=(5, 0))
+        proxy_entry.grid(row=2, column=1, sticky=tk.W, pady=(5, 0))
 
         # 多文件时创建文件夹（下载 ≥2 个文件时，以提取名作为文件夹名归拢）
         self._create_folder_var = tk.BooleanVar(value=False)
