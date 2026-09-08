@@ -217,6 +217,8 @@ class M3U8DownloaderGUI:
         # 条目 = 已入队的预载页（含 extracting/success/stopped/error 状态与结果暂存）。
         # 队列持久化到 PRELOAD_QUEUE_FILE，关工具保留，下次打开可续连播。
         self._preload_queue: list = self._load_preload_queue()
+        # 当前是否有一个预载提取线程在飞（串行泵：同一时刻最多一个）。
+        self._preload_extracting: bool = False
         # 正在执行的提取对应的网页 URL（用于把结果记入网页下载记录）。
         self._current_extract_page_url: str = ""
         # 本次提取是否已记入网页下载记录（避免一次提取重复入账）。
@@ -1084,6 +1086,9 @@ class M3U8DownloaderGUI:
                 )
                 # 下载已结束、预载补完：尝试接着自动处理队列（含本条后续页）。
                 self._continue_queue_after_idle_completion(preload_result)
+            # 预载提取线程已飞完：复位在飞标志并泵起队列中下一个 queued 条目。
+            self._preload_extracting = False
+            self._pump_preload_extractions()
         elif msg_type == "preload_status":
             self._preload_status_var.set(str(data))
         elif msg_type == "page_title" and isinstance(data, PageTitleUpdate):
@@ -1239,9 +1244,10 @@ class M3U8DownloaderGUI:
     def _start_extract(self) -> None:
         """点击「提取网页」按钮的回调：起 daemon 线程抽取页内 m3u8.
 
-        下载中预载的链接和标题在当前下载结束后一起回填；空闲时深度结果实时显示。
+        下载中预载（无限队列）：按钮不再变灰，每次点击都把当前 URL 加入待处理队列，
+        后台串行泵式提取（同一时刻最多一个在飞），可连续点多个；空闲时单次提取行为不变。
         """
-        if self._extracting:
+        if self._extracting and not self._downloading:
             return
         page_url = self._url_var.get().strip()
         if not page_url:
@@ -1251,6 +1257,12 @@ class M3U8DownloaderGUI:
             page_url = "https://" + page_url
             self._url_var.set(page_url)
 
+        if self._downloading:
+            # 预载模式：仅入队，按钮保持可用，可连续点击加入多个。
+            self._enqueue_preload_extract(page_url)
+            return
+
+        # 空闲模式：单次提取（保持原行为，含按钮禁用与单飞控制）。
         self._extracting = True
         self._extract_stop_flag.clear()
         self._extract_btn.configure(state=tk.DISABLED)
@@ -1258,32 +1270,58 @@ class M3U8DownloaderGUI:
         self._download_selected_btn.configure(state=tk.DISABLED)
         self._current_extract_page_url = page_url
         self._extract_recorded = False
-        deep = bool(self._deep_var.get())
-        preload = self._downloading
-        if preload:
-            self._preload_status_var.set("预载：正在提取下一网页…")
-            # 预载：保留 A 候选，下载结束后再清空并切换到 B 候选。
-            self._preload_list_cleared = False
-            # 多页连续预载：每次下载中点击「提取网页」都追加为一个待处理队列条目，
-            # 而不是顶掉上一个；同时清空上一轮暂存缓冲，避免候选/标题串页。
-            self._preload_queue.append(PreloadQueueEntry(page_url=page_url))
-            self._pending_preload_candidates.clear()
-            self._pending_preload_title = ""
-            self._save_preload_queue()
-            self._update_queue_indicator()
-        if not preload:
-            self._page_title = ""
-            self._candidate_page_url = page_url
-            self._clear_tree()
-            # 正常提取：已清空候选列表，候选到达即直接显示。
-            self._preload_list_cleared = True
+        self._page_title = ""
+        self._candidate_page_url = page_url
+        self._clear_tree()
+        # 正常提取：已清空候选列表，候选到达即直接显示。
+        self._preload_list_cleared = True
         self._log("正在抽取网页中的 m3u8 ...")
+        deep = bool(self._deep_var.get())
         proxy, no_proxy = self._resolve_proxy()
+        self._start_extraction_thread(page_url, deep, no_proxy, proxy, preload=False)
+
+    def _start_extraction_thread(
+        self, page_url: str, deep: bool, no_proxy: bool, proxy: str, preload: bool = False
+    ) -> None:
+        """起一个 daemon 提取线程（预载/空闲共用同一 worker，靠 preload 参数区分）。"""
         threading.Thread(
             target=self._extract_worker,
             args=(page_url, deep, no_proxy, proxy, preload),
             daemon=True,
         ).start()
+
+    def _enqueue_preload_extract(self, page_url: str) -> None:
+        """下载中点击「提取网页」：仅把当前 URL 加入待处理队列（按钮保持可用）。
+
+        真正的提取由 ``_pump_preload_extractions`` 串行泵起，避免多个并发提取
+        写同一组共享缓冲（候选/标题）造成串页。
+        """
+        self._preload_queue.append(PreloadQueueEntry(page_url=page_url, state="queued"))
+        self._save_preload_queue()
+        self._update_queue_indicator()
+        self._log(f"已加入待处理队列：{page_url}（下载结束后将自动续播）")
+        self._pump_preload_extractions()
+
+    def _pump_preload_extractions(self) -> None:
+        """串行泵：若当前没有预载提取在飞，则启动队列里第一个 queued 条目的提取。"""
+        if self._preload_extracting:
+            return
+        target = next((e for e in self._preload_queue if e.state == "queued"), None)
+        if target is None:
+            return
+        target.state = "extracting"
+        self._preload_extracting = True
+        self._extract_stop_flag.clear()
+        self._current_extract_page_url = target.page_url
+        self._extract_recorded = False
+        deep = bool(self._deep_var.get())
+        self._preload_status_var.set("预载：正在提取下一网页…")
+        # 预载：保留 A 候选，下载结束后再清空并切换到 B 候选。
+        self._preload_list_cleared = False
+        self._pending_preload_candidates.clear()
+        self._pending_preload_title = ""
+        proxy, no_proxy = self._resolve_proxy()
+        self._start_extraction_thread(target.page_url, deep, no_proxy, proxy, preload=True)
 
     def _extract_worker(
         self, page_url: str, deep: bool, no_proxy: bool = False, proxy: str = "",
@@ -1663,22 +1701,25 @@ class M3U8DownloaderGUI:
             self._queue_indicator_state = want_state
 
     def _current_preload_entry(self) -> "Optional[PreloadQueueEntry]":
-        """返回当前正在提取（尚未完成）的队列条目（队列尾）；没有则返回 None."""
-        if not self._preload_queue:
-            return None
-        tail = self._preload_queue[-1]
-        return tail if tail.state == "extracting" else None
+        """返回当前正在提取（尚未完成）的队列条目（串行泵下至多一个）；没有则返回 None."""
+        for e in self._preload_queue:
+            if e.state == "extracting":
+                return e
+        return None
 
     def _finalize_preload_entry(self, result: PreloadResult) -> None:
-        """预载提取完成：把结果固化到对应的队列条目（缺失时防御性补建）.
+        """预载提取完成：把结果固化到对应的队列条目.
 
-        Args:
-            result: 提取工作线程回传的预载结果.
+        仅当队列里存在「正在提取且 URL 匹配」的条目才更新；若条目已被用户取消
+        （从队列移除），则不再复活。
         """
-        entry = self._current_preload_entry()
-        if entry is None or entry.page_url != result.page_url:
-            entry = PreloadQueueEntry(page_url=result.page_url)
-            self._preload_queue.append(entry)
+        entry = next(
+            (e for e in self._preload_queue
+             if e.state == "extracting" and e.page_url == result.page_url),
+            None,
+        )
+        if entry is None:
+            return
         if result.state == PreloadState.SUCCESS:
             entry.state = "success"
         elif result.state == PreloadState.STOPPED:
@@ -1862,38 +1903,112 @@ class M3U8DownloaderGUI:
             pass
 
     def _show_preload_queue_popup(self) -> None:
-        """点击「待处理 N 个」：弹出窗口列出各待处理页 URL."""
+        """点击「待处理 N 个」：弹窗逐行列出各待处理页，每行可「优先」/「取消」。
+
+        显示名优先用文件名（filename_title），未提取到文件名时回退网页地址（page_url）；
+        队列条目提取结果回填后会每 0.8s 自动刷新（文件名第一时间替换）。
+        """
         if not self._preload_queue:
             return
         win = tk.Toplevel(self._root)
-        win.title(f"待处理预载队列（{len(self._preload_queue)} 个）")
-        win.geometry("640x360")
+        win.title("待处理预载队列")
+        win.geometry("720x440")
         frame = ttk.Frame(win, padding=8)
         frame.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(frame, text="以下页面将按顺序在当前下载结束后自动续播：").pack(
-            anchor=tk.W, pady=(0, 5)
-        )
+
+        top = ttk.Frame(frame)
+        top.pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(
+            top, text="待处理预载队列（按文件名；无文件名时显示网页地址，下载结束后自动续播）"
+        ).pack(side=tk.LEFT, anchor=tk.W)
+        ttk.Button(
+            top, text="全部取消", command=lambda: self._cancel_all_preload(win)
+        ).pack(side=tk.RIGHT)
+
         body = ttk.Frame(frame)
         body.pack(fill=tk.BOTH, expand=True)
-        body.columnconfigure(0, weight=1)
-        body.rowconfigure(0, weight=1)
-        text = tk.Text(body, wrap=tk.WORD, state=tk.DISABLED)
-        text.grid(row=0, column=0, sticky=tk.NSEW)
-        scroll = ttk.Scrollbar(body, orient=tk.VERTICAL, command=text.yview)
-        text.configure(yscrollcommand=scroll.set)
-        scroll.grid(row=0, column=1, sticky=tk.NS)
+
         state_names = {
+            "queued": "排队中",
             "extracting": "提取中",
             "success": "已就绪",
             "stopped": "已停止",
             "error": "失败",
         }
-        text.configure(state=tk.NORMAL)
-        for i, entry in enumerate(self._preload_queue, 1):
-            label = state_names.get(entry.state, entry.state)
-            text.insert(tk.END, f"{i}. [{label}] {entry.page_url}\n")
-        text.configure(state=tk.DISABLED)
+
+        def display_name(entry: "PreloadQueueEntry") -> str:
+            return entry.filename_title or entry.page_url
+
+        text = tk.Text(body, wrap=tk.WORD, state=tk.NORMAL)
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll = ttk.Scrollbar(body, orient=tk.VERTICAL, command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def refresh() -> None:
+            if not win.winfo_exists():
+                return
+            text.configure(state=tk.NORMAL)
+            text.delete("1.0", tk.END)
+            for i, entry in enumerate(self._preload_queue, 1):
+                name = display_name(entry)
+                label = state_names.get(entry.state, entry.state)
+                text.insert(tk.END, f"{i}. [{label}] {name}  ")
+                text.window_create(
+                    tk.END,
+                    window=ttk.Button(
+                        text, text="优先", width=6,
+                        command=lambda e=entry: self._prioritize_preload(e, win),
+                    ),
+                )
+                text.window_create(
+                    tk.END,
+                    window=ttk.Button(
+                        text, text="取消", width=6,
+                        command=lambda e=entry: self._cancel_preload_entry(e, win),
+                    ),
+                )
+                text.insert(tk.END, "\n")
+            text.configure(state=tk.DISABLED)
+            win.after(800, refresh)
+
+        refresh()
         ttk.Button(frame, text="关闭", command=win.destroy).pack(anchor=tk.E, pady=(6, 0))
+
+    def _cancel_preload_entry(self, entry: "PreloadQueueEntry", win: tk.Toplevel) -> None:
+        """取消单个待处理页（从队列移除；若正在提取则顺带停止该提取线程）。"""
+        if entry not in self._preload_queue:
+            return
+        was_extracting = entry.state == "extracting"
+        self._preload_queue.remove(entry)
+        if was_extracting:
+            # 仅置停止标志，待在飞线程自然收尾（重置 _preload_extracting 并泵下一个），
+            # 避免提前清零标志导致下一轮提取与仍在跑的旧线程并发写共享缓冲。
+            self._extract_stop_flag.set()
+        self._save_preload_queue()
+        self._update_queue_indicator()
+        self._log(f"已取消待处理页：{entry.page_url}")
+
+    def _cancel_all_preload(self, win: tk.Toplevel) -> None:
+        """清空整个待处理队列（弹窗「全部取消」按钮）。"""
+        if self._preload_queue:
+            self._preload_queue.clear()
+            self._extract_stop_flag.set()
+            self._save_preload_queue()
+            self._update_queue_indicator()
+            self._log("已清空待处理队列")
+
+    def _prioritize_preload(self, entry: "PreloadQueueEntry", win: tk.Toplevel) -> None:
+        """将某待处理页置顶优先：移到队首；若当前空闲则立即开始处理。"""
+        if entry not in self._preload_queue:
+            return
+        self._preload_queue.remove(entry)
+        self._preload_queue.insert(0, entry)
+        self._save_preload_queue()
+        self._update_queue_indicator()
+        self._log(f"已置顶优先：{entry.page_url}")
+        if not self._downloading and not self._extracting:
+            self._advance_preload_queue_when_idle()
 
     def _show_page_history(self) -> None:
         """打开独立只读的「网页下载记录」面板（新→旧，最多 500 条）."""
