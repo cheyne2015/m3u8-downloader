@@ -8,7 +8,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -16,7 +16,7 @@ from typing import Optional
 
 from m3u8_downloader import __version__
 from m3u8_downloader.downloader import M3U8Downloader
-from m3u8_downloader.extractor import is_deep_mode_available
+from m3u8_downloader.extractor import Candidate, is_deep_mode_available
 from m3u8_downloader.utils import (
     build_output_path,
     extract_title_segment,
@@ -30,6 +30,10 @@ from m3u8_downloader.utils import (
 
 # GUI 偏好配置文件路径：存放"记住保存位置"等界面偏好
 GUI_CONFIG_PATH: Path = Path(os.path.expanduser("~/.m3u8-downloader/gui_config.json"))
+# 待处理预载队列持久化文件：与下载历史分开存储（无上限，关工具保留可续连播）
+PRELOAD_QUEUE_FILE: Path = Path(
+    os.path.expanduser("~/.m3u8-downloader/preload_queue.json")
+)
 
 
 @dataclass(frozen=True)
@@ -58,6 +62,89 @@ class PreloadResult:
     page_title: str
     page_url: str
     state: PreloadState = PreloadState.SUCCESS
+
+
+@dataclass
+class PreloadQueueEntry:
+    """待处理预载队列中的一个页面条目.
+
+    下载中每点击一次「提取网页」即入队（state="extracting"）；提取完成后
+    更新为 success / stopped / error 并固化候选、标题等结果，供自动连播时
+    逐个展示与下载。条目被处理（轮到下载）时从队列移除。
+
+    Attributes:
+        page_url: 网页 URL（入队键）.
+        state: "extracting" | "success" | "stopped" | "error".
+        candidates: 该页提取出的候选列表（流式累积，完成时用最终结果覆盖）.
+        filename_title: 预载期间流式暂存的标题段（文件名用）.
+        page_title: 网页完整标题.
+        m3u8_url: 该页实际下载的 m3u8 直链（下载后回填，供记录/回看）.
+    """
+
+    page_url: str
+    state: str = "extracting"
+    candidates: list = field(default_factory=list)
+    filename_title: str = ""
+    page_title: str = ""
+    m3u8_url: str = ""
+
+    def to_dict(self) -> dict:
+        """转成可 JSON 持久化的字典（候选字段均为标量）."""
+        return {
+            "page_url": self.page_url,
+            "state": self.state,
+            "filename_title": self.filename_title,
+            "page_title": self.page_title,
+            "m3u8_url": self.m3u8_url,
+            "candidates": [
+                {
+                    "url": c.url,
+                    "title": c.title,
+                    "source": c.source,
+                    "is_master": bool(c.is_master),
+                    "estimated_size": int(getattr(c, "estimated_size", 0) or 0),
+                    "duration": float(getattr(c, "duration", 0.0) or 0.0),
+                    "bandwidth": int(getattr(c, "bandwidth", 0) or 0),
+                    "segment_count": int(getattr(c, "segment_count", 0) or 0),
+                    "estimate_method": str(getattr(c, "estimate_method", "unknown")),
+                    "estimate_error": str(getattr(c, "estimate_error", "")),
+                    "reachable": bool(getattr(c, "reachable", True)),
+                }
+                for c in self.candidates
+            ],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "PreloadQueueEntry":
+        """从持久化字典恢复条目（损坏字段安全降级）."""
+        candidates: list = []
+        try:
+            for c in data.get("candidates", []) or []:
+                if not isinstance(c, dict) or not str(c.get("url", "")).strip():
+                    continue
+                candidates.append(Candidate(**{
+                    "url": str(c.get("url", "")),
+                    "title": str(c.get("title", "") or ""),
+                    "source": str(c.get("source", "html")),
+                    "is_master": bool(c.get("is_master", False)),
+                    "estimated_size": int(c.get("estimated_size", 0) or 0),
+                    "duration": float(c.get("duration", 0.0) or 0.0),
+                    "bandwidth": int(c.get("bandwidth", 0) or 0),
+                    "segment_count": int(c.get("segment_count", 0) or 0),
+                    "estimate_method": str(c.get("estimate_method", "unknown")),
+                    "estimate_error": str(c.get("estimate_error", "") or ""),
+                    "reachable": bool(c.get("reachable", True)),
+                }))
+        except (TypeError, ValueError):
+            candidates = []
+        return cls(
+            page_url=str(data.get("page_url", "")),
+            state=str(data.get("state", "extracting")),
+            candidates=candidates,
+            filename_title=str(data.get("filename_title", "") or ""),
+            page_title=str(data.get("page_title", "") or ""),
+            m3u8_url=str(data.get("m3u8_url", "") or ""),
+        )
 
 
 class M3U8DownloaderGUI:
@@ -111,6 +198,23 @@ class M3U8DownloaderGUI:
         # 预载场景：下载中完成的提取结果（"success" / "stopped" / "error"；空串表示无）。
         # 结果暂存于此，等当前下载结束后再判定是否自动选中 / 自动下载。
         self._pending_extract_result: str = ""
+
+        # ===== 多页连续预载队列（下载中反复预载的待处理页） =====
+        # 条目 = 已入队的预载页（含 extracting/success/stopped/error 状态与结果暂存）。
+        # 队列持久化到 PRELOAD_QUEUE_FILE，关工具保留，下次打开可续连播。
+        self._preload_queue: list = self._load_preload_queue()
+        # 正在执行的提取对应的网页 URL（用于把结果记入网页下载记录）。
+        self._current_extract_page_url: str = ""
+        # 本次提取是否已记入网页下载记录（避免一次提取重复入账）。
+        self._extract_recorded: bool = False
+        # 「待处理 N 个」按钮的已同步状态缓存（避免重复 configure 空转）。
+        self._queue_indicator_count: int = 0
+        self._queue_indicator_state: str = tk.DISABLED
+        # 记录当前下载任务关联的网页（page_url -> 下载 m3u8 url）；用于功能二记录。
+        self._inflight_download_page_url: str = ""
+        self._inflight_download_url: str = ""
+        # 本次下载是否来自待处理队列头（用于「队列页下载失败→跳过继续」语义）。
+        self._active_download_is_queue_page: bool = False
 
         # 构建 UI
         self._build_ui()
@@ -377,6 +481,23 @@ class M3U8DownloaderGUI:
             row=0, column=4, sticky=tk.W,
         )
 
+        # 待处理预载队列计数按钮：点击弹出各待处理页 URL 列表
+        self._queue_count_var = tk.StringVar(value="待处理 0 个")
+        self._queue_count_btn = ttk.Button(
+            result_bar,
+            textvariable=self._queue_count_var,
+            command=self._show_preload_queue_popup,
+            width=12,
+            state=tk.DISABLED,
+        )
+        self._queue_count_btn.grid(row=0, column=5, padx=(10, 5))
+
+        # 下载记录按钮：弹出独立只读的网页下载记录面板
+        self._page_history_btn = ttk.Button(
+            result_bar, text="下载记录", command=self._show_page_history, width=9
+        )
+        self._page_history_btn.grid(row=0, column=6)
+
         self._preload_status_var = tk.StringVar(value="预载：未开始")
         ttk.Label(extract_frame, textvariable=self._preload_status_var).grid(
             row=2, column=0, columnspan=2, sticky=tk.W, pady=(5, 0),
@@ -458,6 +579,9 @@ class M3U8DownloaderGUI:
                 "提示：未安装 playwright，深度模式不可用；"
                 "安装：pip install playwright && playwright install chromium"
             )
+
+        # 队列计数按钮就绪后，同步当前（含启动时从持久化恢复的）队列长度
+        self._update_queue_indicator()
 
     # ===== UI 回调方法 =====
 
@@ -690,6 +814,10 @@ class M3U8DownloaderGUI:
         self._set_current_download_info(output_path, display_title)
         self._log("下载进行中可预载下一网页，链接和标题将在当前下载结束后一起回填")
 
+        # 功能二：记住本次下载对应的网页（仅当下载的是从网页提取出的 m3u8）。
+        self._inflight_download_url = url
+        self._inflight_download_page_url = self._current_source_page_url
+
         # 启动下载线程
         self._download_thread = threading.Thread(
             target=self._download_worker,
@@ -703,6 +831,10 @@ class M3U8DownloaderGUI:
         # 同时记录链接，「手动优先」——自动下载不再重复处理用户已手动触发的链接。
         self._session_manual_downloaded = True
         self._manual_downloaded_urls.add(url)
+        # 手动直链下载若正对应队列头：视为该页「轮到下载」，从待处理队列移除。
+        self._active_download_is_queue_page = self._drop_queue_head_if_page(
+            self._current_source_page_url
+        )
 
     def _stop_download(self) -> None:
         """停止下载，不影响独立进行的网页扫描。"""
@@ -872,16 +1004,30 @@ class M3U8DownloaderGUI:
             self._fill_tree(data if isinstance(data, list) else [])
         elif msg_type == "candidate_update":
             if self._downloading and self._extracting:
-                # A 下载中预载 B：候选暂存，不显示
+                # 下载中预载：候选暂存到「正在提取的队列条目」，不显示。
+                # 若该提取不是入队预载（如空闲提取中途开始下载），退化为旧暂存缓冲。
+                entry = self._current_preload_entry()
+                if entry is not None:
+                    entry.candidates.append(data)
+                else:
+                    self._pending_preload_candidates.append(data)
+            elif self._downloading:
+                # 下载中但提取标志已复位：兜底暂存，下载结束后流式显示。
                 self._pending_preload_candidates.append(data)
             else:
-                # A 下载结束后：先清空 A 候选（切换），再逐条流式显示 B 候选
+                # 下载结束后（或空闲正常提取）：先清空上一页候选（切换），再逐条显示。
                 if not self._preload_list_cleared:
                     self._clear_tree()
                     self._preload_list_cleared = True
                 self._upsert_candidate(data)
+                entry = self._current_preload_entry()
+                if entry is not None:
+                    # 预载页在下载结束后才继续流式出候选：同步累积进条目结果。
+                    entry.candidates.append(data)
         elif msg_type == "preloaded_extract":
             preload_result = data
+            # 先把结果固化到对应的待处理队列条目（若存在），再走旧的单页交接逻辑。
+            self._finalize_preload_entry(preload_result)
             # 结果和标题在主线程一起交接，避免下载完成与工作线程暂存结果竞态。
             if self._downloading:
                 self._pending_extract[:] = [preload_result]
@@ -907,13 +1053,23 @@ class M3U8DownloaderGUI:
                     f"预载：已载入 {len(preload_result.candidates)} 条结果"
                 )
                 self._on_extract_done(preload_result.state)
+                # 下载已结束、预载补完：尝试接着自动处理队列（含本条后续页）。
+                self._continue_queue_after_idle_completion(preload_result)
         elif msg_type == "preload_status":
             self._preload_status_var.set(str(data))
         elif msg_type == "page_title" and isinstance(data, PageTitleUpdate):
+            # 预载中（下载中或下载后补完）的完整标题：写入对应队列条目。
+            entry = self._current_preload_entry()
+            if entry is not None and entry.page_url == data.page_url:
+                entry.page_title = data.title
+                self._save_preload_queue()
             self._apply_page_title(data.page_url, data.title)
         elif msg_type == "suggest_filename":
             # 标题流式回传：下载中预载则暂存，下载结束后立即填充文件名。
             if self._downloading:
+                entry = self._current_preload_entry()
+                if entry is not None:
+                    entry.filename_title = str(data)
                 self._pending_preload_title = str(data)
             else:
                 self._suggest_filename(str(data))
@@ -963,6 +1119,8 @@ class M3U8DownloaderGUI:
         """
         # 串行下载队列：还有后续任务则继续，不恢复按钮
         if self._pending_jobs:
+            # 功能二：每完成一个任务都先把结果记入对应网页的下载记录。
+            self._finalize_inflight_download_record(result)
             self._log("")
             self._run_next_job()
             return
@@ -986,6 +1144,27 @@ class M3U8DownloaderGUI:
             self._status_var.set("下载已停止")
         elif result == "error":
             self._status_var.set("下载失败")
+
+        # 功能二：把本次下载结果记入对应网页的下载记录（仅当由网页发起时）。
+        self._finalize_inflight_download_record(result)
+        # 记录本次下载是否来自待处理队列头，随后复位（仅对单次下载生效）。
+        was_queue_download = self._active_download_is_queue_page
+        self._active_download_is_queue_page = False
+
+        # ===== 多页连续预载队列路径 =====
+        # 队列非空时，下载结束后自动衔接下一个待处理页；「停止下载」中断整条链
+        # （队列保留，续跑由用户再次点「下载选中 / 开始下载」触发）。
+        if self._preload_queue:
+            # 成功始终衔接；队列页自身下载失败也跳过继续；手动页失败不自动起链。
+            if result != "stopped" and (result == "success" or was_queue_download):
+                self._advance_preload_queue_when_idle()
+            # 文件名栏收尾：无下载继续、无进行中预载、且队列已清空时才清空。
+            if (not self._downloading and not self._extracting
+                    and not self._preload_queue):
+                self._filename_var.set("")
+            return
+
+        # ===== 旧单页预载交接（无待处理队列时保持既有行为） =====
 
         # 下载全部结束后：立即填充下载期间流式暂存的预载标题（文件名）。
         # 点确认后，标题（on_title 流式回传暂存的）立即填入文件名栏。
@@ -1041,12 +1220,21 @@ class M3U8DownloaderGUI:
         self._extract_btn.configure(state=tk.DISABLED)
         self._stop_extract_btn.configure(state=tk.NORMAL)
         self._download_selected_btn.configure(state=tk.DISABLED)
+        self._current_extract_page_url = page_url
+        self._extract_recorded = False
         deep = bool(self._deep_var.get())
         preload = self._downloading
         if preload:
             self._preload_status_var.set("预载：正在提取下一网页…")
             # 预载：保留 A 候选，下载结束后再清空并切换到 B 候选。
             self._preload_list_cleared = False
+            # 多页连续预载：每次下载中点击「提取网页」都追加为一个待处理队列条目，
+            # 而不是顶掉上一个；同时清空上一轮暂存缓冲，避免候选/标题串页。
+            self._preload_queue.append(PreloadQueueEntry(page_url=page_url))
+            self._pending_preload_candidates.clear()
+            self._pending_preload_title = ""
+            self._save_preload_queue()
+            self._update_queue_indicator()
         if not preload:
             self._page_title = ""
             self._candidate_page_url = page_url
@@ -1217,6 +1405,16 @@ class M3U8DownloaderGUI:
         Args:
             result: 抽取结果（"success" / "pending" / "empty" / "error" / "stopped"）.
         """
+        # 功能二：把本次「提取网页」事件记入网页下载记录（含下载中预载的页面）。
+        # 用 _extract_recorded 防止一次提取被多次收尾重复入账。
+        if self._current_extract_page_url and not self._extract_recorded:
+            self._extract_recorded = True
+            try:
+                from m3u8_downloader import page_history
+                page_history.record_page_extracted(self._current_extract_page_url)
+            except Exception:
+                pass  # 记录失败不影响提取主流程
+
         self._extracting = False
         self._extract_btn.configure(state=tk.NORMAL)
         self._stop_extract_btn.configure(state=tk.DISABLED)
@@ -1358,6 +1556,307 @@ class M3U8DownloaderGUI:
         self._log("已显示预加载网页的提取结果")
         self._status_var.set("抽取完成")
         return False
+
+    # ===== 多页连续预载队列（下载中预载、自动连播、持久化） =====
+
+    def _load_preload_queue(self) -> list:
+        """启动时从 PRELOAD_QUEUE_FILE 恢复待处理队列.
+
+        Returns:
+            恢复出的 ``PreloadQueueEntry`` 列表；文件缺失/损坏/结构异常时为空.
+        """
+        try:
+            with open(PRELOAD_QUEUE_FILE, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            entries = raw.get("entries", []) if isinstance(raw, dict) else []
+            queue = []
+            for e in entries:
+                if not isinstance(e, dict):
+                    continue
+                entry = PreloadQueueEntry.from_dict(e)
+                if entry.page_url:
+                    queue.append(entry)
+            return queue
+        except (OSError, ValueError):
+            return []
+
+    def _save_preload_queue(self) -> None:
+        """持久化待处理队列（无上限；写入失败静默，不影响主流程）."""
+        try:
+            PRELOAD_QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(PRELOAD_QUEUE_FILE, "w", encoding="utf-8") as f:
+                json.dump(
+                    {"entries": [e.to_dict() for e in self._preload_queue]},
+                    f, ensure_ascii=False,
+                )
+        except Exception:
+            pass
+
+    def _update_queue_indicator(self) -> None:
+        """同步「待处理 N 个」按钮的计数文本与可用状态（仅在变化时更新）."""
+        count = len(self._preload_queue)
+        want_state = tk.NORMAL if count else tk.DISABLED
+        if (count != self._queue_indicator_count
+                or want_state != self._queue_indicator_state):
+            self._queue_count_var.set(f"待处理 {count} 个")
+            if getattr(self, "_queue_count_btn", None) is not None:
+                self._queue_count_btn.configure(state=want_state)
+            self._queue_indicator_count = count
+            self._queue_indicator_state = want_state
+
+    def _current_preload_entry(self) -> "Optional[PreloadQueueEntry]":
+        """返回当前正在提取（尚未完成）的队列条目（队列尾）；没有则返回 None."""
+        if not self._preload_queue:
+            return None
+        tail = self._preload_queue[-1]
+        return tail if tail.state == "extracting" else None
+
+    def _finalize_preload_entry(self, result: PreloadResult) -> None:
+        """预载提取完成：把结果固化到对应的队列条目（缺失时防御性补建）.
+
+        Args:
+            result: 提取工作线程回传的预载结果.
+        """
+        entry = self._current_preload_entry()
+        if entry is None or entry.page_url != result.page_url:
+            entry = PreloadQueueEntry(page_url=result.page_url)
+            self._preload_queue.append(entry)
+        if result.state == PreloadState.SUCCESS:
+            entry.state = "success"
+        elif result.state == PreloadState.STOPPED:
+            entry.state = "stopped"
+        else:
+            entry.state = "error"
+        if result.candidates:
+            entry.candidates = list(result.candidates)
+        if result.filename_title:
+            entry.filename_title = result.filename_title
+        if result.page_title:
+            entry.page_title = result.page_title
+        self._save_preload_queue()
+        self._update_queue_indicator()
+
+    def _drop_queue_head_if_page(self, page_url: str) -> bool:
+        """队列头正对应 ``page_url`` 时，视为该页「轮到下载」并从队列移除.
+
+        成功 / 失败 / 用户手动再次下载都算已处理；停止下载只中断后续自动链，
+        尚未轮到（队列里更靠后）的条目保留。
+
+        Args:
+            page_url: 正在发起下载的网页 URL.
+
+        Returns:
+            True 表示本次下载确实移除了队列头（即下载的是待处理页）.
+        """
+        if not self._preload_queue:
+            return False
+        head = self._preload_queue[0]
+        if head.state != "extracting" and head.page_url == page_url:
+            self._preload_queue.pop(0)
+            self._save_preload_queue()
+            self._update_queue_indicator()
+            if not self._preload_queue:
+                # 队列清空：清理旧单页交接镜像，避免污染之后的无队列交接逻辑。
+                self._pending_extract.clear()
+                self._pending_extract_result = ""
+                self._pending_preload_candidates.clear()
+            return True
+        return False
+
+    def _present_queue_entry(self, entry: PreloadQueueEntry) -> None:
+        """把队列条目作为「当前正在处理的页」展示（列表只显示当前页）.
+
+        清空上一页候选、逐条填入该页候选，并回填网页标题 / 文件名。
+        """
+        self._preload_list_cleared = True
+        self._clear_tree()
+        for candidate in entry.candidates:
+            self._upsert_candidate(candidate)
+        self._candidate_page_url = entry.page_url
+        if entry.page_title:
+            self._page_title = entry.page_title
+            self._apply_page_title(entry.page_url, entry.page_title)
+        if entry.filename_title:
+            self._suggest_filename(entry.filename_title)
+        self._preload_status_var.set(
+            f"预载：已载入 {len(entry.candidates)} 条结果"
+        )
+        self._status_var.set("抽取完成" if entry.state == "success" else "网页结果已显示")
+        self._log(f"已显示待处理页结果：{entry.page_url}")
+
+    def _auto_trigger_download(self) -> bool:
+        """按现有自动下载规则尝试自动下载当前页.
+
+        Returns:
+            True 表示真正启动了下载（队列头已随之移除）；False 表示未启动.
+        """
+        self._auto_select_and_download()
+        return bool(self._downloading)
+
+    def _advance_preload_queue_when_idle(self) -> None:
+        """空闲时依次处理待处理队列：逐个展示并（满足规则时）自动下载.
+
+        仅在无下载、无提取时调用。队列头仍在提取中则等待其完成后继续；
+        stopped / error 条目视为不可连播，跳过并继续下一个（不中断整链）。
+        success 条目被展示后按自动下载规则决定是否立即下载：
+        - 规则满足 → 下载开始（该页已在下载启动时移出队列，链继续）；
+        - 规则不满足（未勾选自动下载 / 会话尚未手动下载过 / 无自动候选）
+          → 保留在队列，等用户手动点「下载选中 / 开始下载」续跑。
+        """
+        if self._downloading or self._extracting:
+            return
+        while self._preload_queue:
+            head = self._preload_queue[0]
+            if head.state == "extracting":
+                return  # 等该页预载完成后再继续
+            if head.state != "success":
+                self._preload_queue.pop(0)
+                self._save_preload_queue()
+                self._update_queue_indicator()
+                self._log(f"已跳过待处理页：{head.page_url}（{head.state}）")
+                continue
+            self._present_queue_entry(head)
+            if self._auto_trigger_download():
+                return  # 已开始下载该页；head 在下载启动时已从队列移除
+            return  # 规则不满足/无自动候选：head 保留队列，等用户手动续跑
+        # 队列清空后的收尾
+        self._pending_extract.clear()
+        self._pending_extract_result = ""
+        self._pending_preload_candidates.clear()
+
+    def _continue_queue_after_idle_completion(self, preload_result: PreloadResult) -> None:
+        """下载先结束、预载后完成时的队列簿记.
+
+        预载页在下载结束后才完成：候选已流式显示，``_on_extract_done(success)``
+        已尝试自动选中/下载。这里只负责收尾：
+        - 已开始下载（``_downloading=True``）→ head 已在下载启动时移除；
+        - success 但未开始下载 → 页面已展示，head 保留等待手动续跑；
+        - stopped / error → 该页不可连播，移除并继续队列下一个.
+
+        Args:
+            preload_result: 下载结束后才完成的预载结果.
+        """
+        if self._downloading:
+            return
+        if preload_result.state == PreloadState.SUCCESS:
+            return
+        self._drop_queue_head_if_page(preload_result.page_url)
+        self._advance_preload_queue_when_idle()
+
+    # ===== 功能二：网页下载记录（独立只读，与队列分开） =====
+
+    def _finalize_inflight_download_record(self, result: str) -> None:
+        """下载结束：把结果记入该下载所属网页的下载记录.
+
+        Args:
+            result: 下载完成状态（"success" / "error" / "stopped"）.
+        """
+        page_url = self._inflight_download_page_url
+        m3u8_url = self._inflight_download_url
+        self._inflight_download_page_url = ""
+        self._inflight_download_url = ""
+        if not page_url:
+            return
+        try:
+            from m3u8_downloader import page_history
+            if result == "success":
+                page_history.record_page_downloaded(page_url, m3u8_url)
+            elif result == "error":
+                page_history.record_page_failed(page_url)
+            # stopped（用户手动停止）不改写状态，保留为「已提取」。
+        except Exception:
+            pass
+
+    def _show_preload_queue_popup(self) -> None:
+        """点击「待处理 N 个」：弹出窗口列出各待处理页 URL."""
+        if not self._preload_queue:
+            return
+        win = tk.Toplevel(self._root)
+        win.title(f"待处理预载队列（{len(self._preload_queue)} 个）")
+        win.geometry("640x360")
+        frame = ttk.Frame(win, padding=8)
+        frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frame, text="以下页面将按顺序在当前下载结束后自动续播：").pack(
+            anchor=tk.W, pady=(0, 5)
+        )
+        body = ttk.Frame(frame)
+        body.pack(fill=tk.BOTH, expand=True)
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+        text = tk.Text(body, wrap=tk.WORD, state=tk.DISABLED)
+        text.grid(row=0, column=0, sticky=tk.NSEW)
+        scroll = ttk.Scrollbar(body, orient=tk.VERTICAL, command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        scroll.grid(row=0, column=1, sticky=tk.NS)
+        state_names = {
+            "extracting": "提取中",
+            "success": "已就绪",
+            "stopped": "已停止",
+            "error": "失败",
+        }
+        text.configure(state=tk.NORMAL)
+        for i, entry in enumerate(self._preload_queue, 1):
+            label = state_names.get(entry.state, entry.state)
+            text.insert(tk.END, f"{i}. [{label}] {entry.page_url}\n")
+        text.configure(state=tk.DISABLED)
+        ttk.Button(frame, text="关闭", command=win.destroy).pack(anchor=tk.E, pady=(6, 0))
+
+    def _show_page_history(self) -> None:
+        """打开独立只读的「网页下载记录」面板（新→旧，最多 500 条）."""
+        from m3u8_downloader import page_history
+        try:
+            records = page_history.list_records()
+        except Exception:
+            records = []
+        win = tk.Toplevel(self._root)
+        win.title("网页下载记录")
+        win.geometry("820x460")
+        frame = ttk.Frame(win, padding=8)
+        frame.pack(fill=tk.BOTH, expand=True)
+        body = ttk.Frame(frame)
+        body.pack(fill=tk.BOTH, expand=True)
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+        tree = ttk.Treeview(
+            body,
+            columns=("time", "status", "url", "m3u8"),
+            show="headings",
+        )
+        tree.heading("time", text="时间")
+        tree.heading("status", text="状态")
+        tree.heading("url", text="网页 URL")
+        tree.heading("m3u8", text="实际下载的 m3u8")
+        tree.column("time", width=150, anchor=tk.W)
+        tree.column("status", width=90, anchor=tk.CENTER)
+        tree.column("url", width=300)
+        tree.column("m3u8", width=300)
+        tree.grid(row=0, column=0, sticky=tk.NSEW)
+        scroll = ttk.Scrollbar(body, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        scroll.grid(row=0, column=1, sticky=tk.NS)
+        status_names = {
+            "downloaded": "已下载",
+            "failed": "下载失败",
+            "extracted": "已提取",
+        }
+        for record in records:
+            status = status_names.get(
+                str(record.get("status", "")), str(record.get("status", ""))
+            )
+            tree.insert(
+                "", tk.END,
+                values=(
+                    record.get("timestamp", ""),
+                    status,
+                    record.get("page_url", ""),
+                    record.get("m3u8_url", ""),
+                ),
+            )
+        if not records:
+            ttk.Label(frame, text="暂无记录。提取网页后，页面会显示在这里。").pack(
+                anchor=tk.W, pady=(6, 0)
+            )
+        ttk.Button(frame, text="关闭", command=win.destroy).pack(anchor=tk.E, pady=(6, 0))
 
     def _on_tree_selection_changed(self, _event=None) -> None:
         self._update_result_actions()
@@ -1554,6 +2053,10 @@ class M3U8DownloaderGUI:
             self._set_current_download_info(output_path, job.title)
             self._stop_btn.configure(state=tk.NORMAL)
 
+            # 功能二：记住本次下载对应的网页（记录下载成功/失败用）。
+            self._inflight_download_url = job.url
+            self._inflight_download_page_url = job.source_page_url
+
             self._download_thread = threading.Thread(
                 target=self._download_worker,
                 args=(job.url, output_path, workers, retries, timeout, use_ffmpeg,
@@ -1561,6 +2064,10 @@ class M3U8DownloaderGUI:
                 daemon=True,
             )
             self._download_thread.start()
+            # 若本次下载的正是待处理队列头页面：视为「轮到下载」，从队列移除。
+            self._active_download_is_queue_page = self._drop_queue_head_if_page(
+                job.source_page_url
+            )
             return  # 已启动一个任务，等 done 回调再弹下一个
 
         # 队列空（全部取消或本就没有任务）：未启动任何下载，恢复按钮

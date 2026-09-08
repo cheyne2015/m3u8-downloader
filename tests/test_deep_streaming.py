@@ -48,6 +48,10 @@ def video_page():
                 release_preload.wait(20)
                 body = b"<title>Next episode</title><script>fetch('/next.m3u8')</script>"
                 kind = "text/html"
+            elif self.path == "/?third":
+                # 多页连续预载测试用：可预载的第二个不同页面（第三集）。
+                body = b"<title>Third episode</title><script>fetch('/third.m3u8')</script>"
+                kind = "text/html"
             elif self.path == "/":
                 body = b'''<title>Streaming test</title><script>
                 fetch('/first.m3u8');
@@ -227,9 +231,13 @@ def tk_runtime():
 @pytest.fixture
 def desktop_gui(tmp_path, monkeypatch, tk_runtime):
     import tkinter as tk
-    from m3u8_downloader import gui, history
+    from m3u8_downloader import gui, history, page_history
     monkeypatch.setattr(gui, "GUI_CONFIG_PATH", tmp_path / "gui.json")
     monkeypatch.setattr(history, "HISTORY_FILE", str(tmp_path / "history.json"))
+    monkeypatch.setattr(gui, "PRELOAD_QUEUE_FILE", tmp_path / "preload_queue.json")
+    monkeypatch.setattr(
+        page_history, "PAGE_HISTORY_FILE", str(tmp_path / "page_history.json")
+    )
     root = tk.Toplevel(tk_runtime)
     root.withdraw()
     app = gui.M3U8DownloaderGUI(root)
