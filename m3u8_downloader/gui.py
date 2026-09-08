@@ -103,6 +103,15 @@ class M3U8DownloaderGUI:
         # 预载期间暂存的标题段（下载中暂存，下载结束后立即填充文件名）。
         self._pending_preload_title: str = ""
 
+        # ===== 自动选中 / 自动下载（会话级状态，不持久化） =====
+        # 本次会话（打开工具后）用户是否已手动下载过至少一次：「自动下载」的前置条件。
+        self._session_manual_downloaded: bool = False
+        # 本次会话已手动触发下载的链接；「手动优先」——自动下载不重复处理这些链接。
+        self._manual_downloaded_urls: set = set()
+        # 预载场景：下载中完成的提取结果（"success" / "stopped" / "error"；空串表示无）。
+        # 结果暂存于此，等当前下载结束后再判定是否自动选中 / 自动下载。
+        self._pending_extract_result: str = ""
+
         # 构建 UI
         self._build_ui()
 
@@ -273,6 +282,22 @@ class M3U8DownloaderGUI:
         self._proxy_var = tk.StringVar(value="127.0.0.1:7897")
         proxy_entry = ttk.Entry(param_frame, textvariable=self._proxy_var, width=24)
         proxy_entry.grid(row=5, column=1, columnspan=3, sticky=tk.W, pady=(5, 0))
+
+        # 自动下载（默认勾选）：提取正常完成后按规则自动选中并直接开始下载
+        self._auto_download_var = tk.BooleanVar(value=True)
+        auto_download_check = ttk.Checkbutton(
+            param_frame, text="自动下载", variable=self._auto_download_var,
+            command=self._save_config,
+        )
+        auto_download_check.grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+
+        # 连续下载（默认不勾选）：下载完成时自动确认「下载完成！」弹窗
+        self._continuous_download_var = tk.BooleanVar(value=False)
+        continuous_download_check = ttk.Checkbutton(
+            param_frame, text="连续下载", variable=self._continuous_download_var,
+            command=self._save_config,
+        )
+        continuous_download_check.grid(row=6, column=2, columnspan=2, sticky=tk.W, pady=(5, 0))
 
         row += 1
 
@@ -503,6 +528,8 @@ class M3U8DownloaderGUI:
         self._use_ffmpeg_var.set(bool(config.get("use_ffmpeg", True)))
         self._tmpdir_var.set(str(config.get("tmpdir", "") or ""))
         self._create_folder_var.set(bool(config.get("create_folder", False)))
+        self._auto_download_var.set(bool(config.get("auto_download", True)))
+        self._continuous_download_var.set(bool(config.get("continuous_download", False)))
 
         for key, var, default in (
             ("workers", self._workers_var, 8),
@@ -532,6 +559,8 @@ class M3U8DownloaderGUI:
             "use_ffmpeg": bool(self._use_ffmpeg_var.get()),
             "tmpdir": self._tmpdir_var.get().strip(),
             "create_folder": bool(self._create_folder_var.get()),
+            "auto_download": bool(self._auto_download_var.get()),
+            "continuous_download": bool(self._continuous_download_var.get()),
         }
         try:
             GUI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -669,6 +698,11 @@ class M3U8DownloaderGUI:
             daemon=True,
         )
         self._download_thread.start()
+
+        # 会话级标记：本次会话已手动下载过（「自动下载」的前置条件，不持久化）。
+        # 同时记录链接，「手动优先」——自动下载不再重复处理用户已手动触发的链接。
+        self._session_manual_downloaded = True
+        self._manual_downloaded_urls.add(url)
 
     def _stop_download(self) -> None:
         """停止下载，不影响独立进行的网页扫描。"""
@@ -945,7 +979,9 @@ class M3U8DownloaderGUI:
         if result == "success":
             self._progress_var.set(100)
             self._status_var.set("下载完成")
-            messagebox.showinfo("提示", "下载完成！")
+            # 「连续下载」勾选时自动确认「下载完成！」弹窗，无需用户点「确定」
+            if not self._continuous_download_var.get():
+                messagebox.showinfo("提示", "下载完成！")
         elif result == "stopped":
             self._status_var.set("下载已停止")
         elif result == "error":
@@ -969,10 +1005,18 @@ class M3U8DownloaderGUI:
                 self._upsert_candidate(candidate)
             self._pending_preload_candidates.clear()
 
-        # 下载完成后的文件名栏收尾：无预填标题且无进行中的预载提取时才清空。
-        # 预载仍在提取中（_extracting=True）时不清空，等预载完成后填充，避免空白中间态。
+        # 预载场景：下载 A 完成后，预载的 B 若已提取完毕（result == "success"），
+        # 按规则自动选中并自动下载 B，实现「连续下载」。
+        pending_result = self._pending_extract_result
+        self._pending_extract_result = ""
+        if result == "success" and pending_result == "success":
+            self._auto_select_and_download()
+
+        # 下载完成后的文件名栏收尾：无预填标题、无进行中的预载提取、且未自动开始
+        # 新下载时才清空。预载仍在提取中（_extracting=True）时不清空，等预载完成后
+        # 填充，避免空白中间态；已自动开始下一次下载时也不清空，避免抹掉当前文件名。
         # 注意：清空/用户修改都不影响「提取填充文件名」——后者始终无条件优先。
-        if not has_prefill and not self._extracting:
+        if not has_prefill and not self._extracting and not self._downloading:
             self._filename_var.set("")
 
     # ===== 网页抽取与多选下载 =====
@@ -1183,12 +1227,17 @@ class M3U8DownloaderGUI:
         if not self._downloading:
             self._stop_btn.configure(state=tk.DISABLED)
         else:
+            # 预载场景：结果先暂存，等当前下载结束后（_on_download_done）再判定
+            # 自动选中 / 自动下载；"pending" 表示预载已成功完成。
+            self._pending_extract_result = "success" if result == "pending" else result
             self._log("提取已停止，保留已有结果" if result == "stopped" else "网页提取结束，下载继续")
             return
         if result == "success":
             self._status_var.set("抽取完成")
             mode = getattr(self, "_extract_mode", "普通")
             self._log(f"本次提取模式：{mode}；以上大小均为估计值")
+            # 提取正常完成：按规则自动选中，满足条件时自动下载
+            self._auto_select_and_download()
         elif result == "pending":
             # 下载中预加载：不覆盖「正在下载」状态，等下载完成后由 _flush_pending_extract 显示
             pass
@@ -1199,6 +1248,91 @@ class M3U8DownloaderGUI:
             self._status_var.set("提取已停止")
         else:
             self._status_var.set("抽取失败")
+
+    # ===== 自动选中 / 自动下载 =====
+
+    def _pick_auto_candidate(self) -> "Optional[tuple[object, str]]":
+        """按规则挑出应自动选中的候选，不满足条件时返回 None.
+
+        规则（与产品确认一致）：
+            1. 候选数为 1 → 选中该候选；
+            2. 候选数 > 1 且所有候选的 ``display_duration()`` 字符串完全相同 →
+               选中 ``estimated_size`` 最大的那个；
+            3. 时长未知（``display_duration()`` 返回 ``"-"``）视为与任何其他时长都
+               不同 → 不满足「全部相同」→ 不自动选中；
+            4. 混合时长 / 全部时长都不同 → 不自动选中。
+
+        Returns:
+            ``(候选对象, 选中原因)``；无合适候选时返回 None.
+        """
+        candidates = list(self._candidates)
+        if not candidates:
+            return None
+
+        if len(candidates) == 1:
+            return candidates[0], "唯一结果"
+
+        # 任一候选时长未知即视为「与任何其他时长都不同」，不满足「全部相同」
+        if any(c.display_duration() == "-" for c in candidates):
+            return None
+        if len({c.display_duration() for c in candidates}) != 1:
+            return None
+        # 时长全部相同：取估计体积最大的候选（体积相同则取列表中第一个）
+        best = max(candidates, key=lambda c: int(getattr(c, "estimated_size", 0) or 0))
+        return best, "时长相同中最大"
+
+    def _auto_select_candidate(self) -> "Optional[object]":
+        """把 :meth:`_pick_auto_candidate` 挑中的候选在列表中选中并写日志.
+
+        Returns:
+            被自动选中的候选对象；无合适候选（或缺少对应列表行）时返回 None.
+        """
+        picked = self._pick_auto_candidate()
+        if picked is None:
+            return None
+        candidate, reason = picked
+
+        item_info = self._candidate_items.get(candidate.url)
+        if item_info is None:
+            return None
+        self._tree.selection_set(item_info[0])
+        self._update_result_actions()
+
+        label = candidate.title or candidate.url
+        self._log(f"已自动选中：{label}（{reason}）")
+        return candidate
+
+    def _auto_select_and_download(self) -> None:
+        """提取正常完成后的自动处理：先自动选中，满足条件时再自动下载.
+
+        自动下载需同时满足（与产品确认一致）：
+            1. 「自动下载」勾选框已勾选（默认勾选，持久化）；
+            2. 本次会话用户已手动下载过至少一次（会话级标记，不持久化）；
+            3. 本次提取正常完成（调用方保证 result == "success"）；
+            4. 手动优先：自动下载不重复处理用户已手动触发过的链接。
+
+        下载复用「下载选中」的入口 :meth:`_download_selected`，与手动点击行为一致
+        （同名文件仍走现有的「覆盖 / 自动改名 / 取消」提醒）。
+        """
+        # 下载进行中（含预载未交接）时不做任何自动处理
+        if self._downloading:
+            return
+
+        candidate = self._auto_select_candidate()
+        if candidate is None:
+            return
+
+        if not bool(self._auto_download_var.get()):
+            return
+        if not self._session_manual_downloaded:
+            self._log("提示：本次会话尚未手动下载过，未自动下载（需先手动下载一次）")
+            return
+        if candidate.url in self._manual_downloaded_urls:
+            return  # 手动优先：已手动触发过的链接不再自动下载
+
+        label = candidate.title or candidate.url
+        self._log(f"自动下载已启动：{label}")
+        self._download_selected()
 
     def _flush_pending_extract(self) -> bool:
         """下载全部完成后，显示最近一次挂起的「预加载」提取结果.
@@ -1375,6 +1509,11 @@ class M3U8DownloaderGUI:
         self._stop_btn.configure(state=tk.NORMAL)
         # 下载进行中保留「提取网页」可用，实现网页预加载（结果挂起，下载完成后显示）
         self._download_selected_btn.configure(state=tk.DISABLED)
+        # 会话级标记：本次会话已手动下载过（「自动下载」的前置条件，不持久化）。
+        # 同时记录链接，「手动优先」——自动下载不再重复处理用户已手动触发的链接。
+        self._session_manual_downloaded = True
+        for job in jobs:
+            self._manual_downloaded_urls.add(job.url)
         self._run_next_job()
 
     def _run_next_job(self) -> None:

@@ -425,6 +425,342 @@ class TestMainModule:
 
 
 # ---------------------------------------------------------------------------
+# 自动选中 / 自动下载 / 连续下载
+# ---------------------------------------------------------------------------
+
+
+def _seed_candidates(gui, candidates):
+    """Simulate a finished extraction: candidates + Treeview rows are in place."""
+    gui._candidates = list(candidates)
+    gui._candidate_items = {
+        c.url: (f"item-{i}", i) for i, c in enumerate(candidates)
+    }
+    return gui
+
+
+class TestAutoSelect:
+    """Tests for the auto-selection rules after a successful extraction."""
+
+    def test_single_candidate_is_auto_selected(self, gui_instance):
+        """唯一结果 → 自动选中该候选，并给出日志提示."""
+        cands = [Candidate(url="https://x/only.m3u8", title="独苗")]
+        _seed_candidates(gui_instance, cands)
+
+        with patch.object(gui_instance, "_log") as log:
+            picked = gui_instance._pick_auto_candidate()
+
+        assert picked is not None
+        assert picked[0].url == "https://x/only.m3u8"
+        assert picked[1] == "唯一结果"
+
+        with patch.object(gui_instance, "_log") as log:
+            selected = gui_instance._auto_select_candidate()
+
+        assert selected.url == "https://x/only.m3u8"
+        gui_instance._tree.selection_set.assert_called_once_with("item-0")
+        logged = " ".join(str(c.args[0]) for c in log.call_args_list)
+        assert "已自动选中" in logged and "唯一结果" in logged
+
+    def test_same_duration_picks_largest_size(self, gui_instance):
+        """全部时长相同 → 选中 estimated_size 最大的候选."""
+        cands = [
+            Candidate(url="https://x/small.m3u8", title="小", duration=60.0,
+                      estimated_size=100),
+            Candidate(url="https://x/big.m3u8", title="大", duration=60.0,
+                      estimated_size=900),
+            Candidate(url="https://x/mid.m3u8", title="中", duration=60.0,
+                      estimated_size=500),
+        ]
+        _seed_candidates(gui_instance, cands)
+
+        picked = gui_instance._pick_auto_candidate()
+        assert picked is not None
+        assert picked[0].url == "https://x/big.m3u8"
+        assert picked[1] == "时长相同中最大"
+
+        gui_instance._auto_select_candidate()
+        gui_instance._tree.selection_set.assert_called_once_with("item-1")
+
+    def test_mixed_durations_not_selected(self, gui_instance):
+        """混合时长（部分相同、部分不同）→ 不自动选中."""
+        cands = [
+            Candidate(url="https://x/a.m3u8", duration=60.0, estimated_size=100),
+            Candidate(url="https://x/b.m3u8", duration=60.0, estimated_size=900),
+            Candidate(url="https://x/c.m3u8", duration=120.0, estimated_size=900),
+        ]
+        _seed_candidates(gui_instance, cands)
+
+        assert gui_instance._pick_auto_candidate() is None
+        assert gui_instance._auto_select_candidate() is None
+        gui_instance._tree.selection_set.assert_not_called()
+
+    def test_all_durations_different_not_selected(self, gui_instance):
+        """全部时长都不同 → 不自动选中."""
+        cands = [
+            Candidate(url="https://x/a.m3u8", duration=60.0),
+            Candidate(url="https://x/b.m3u8", duration=120.0),
+        ]
+        _seed_candidates(gui_instance, cands)
+        assert gui_instance._pick_auto_candidate() is None
+
+    def test_unknown_duration_not_selected(self, gui_instance):
+        """含未知时长（"-"）→ 视为与其它时长不同 → 不自动选中."""
+        cands = [
+            Candidate(url="https://x/a.m3u8", duration=60.0, estimated_size=100),
+            Candidate(url="https://x/b.m3u8", duration=0.0, estimated_size=900),
+        ]
+        assert cands[1].display_duration() == "-"
+        _seed_candidates(gui_instance, cands)
+        assert gui_instance._pick_auto_candidate() is None
+
+    def test_all_unknown_duration_not_selected(self, gui_instance):
+        """全部时长未知 → 无法判定「全部相同」→ 不自动选中."""
+        cands = [
+            Candidate(url="https://x/a.m3u8", duration=0.0, estimated_size=100),
+            Candidate(url="https://x/b.m3u8", duration=0.0, estimated_size=900),
+        ]
+        _seed_candidates(gui_instance, cands)
+        assert gui_instance._pick_auto_candidate() is None
+
+    def test_no_candidates_not_selected(self, gui_instance):
+        """无候选 → 不自动选中."""
+        gui_instance._candidates = []
+        gui_instance._candidate_items = {}
+        assert gui_instance._pick_auto_candidate() is None
+
+
+class TestAutoDownload:
+    """Tests for the auto-download gating rules."""
+
+    def _ready(self, gui, candidates=None):
+        """Prepare a GUI that finished extracting one auto-selectable candidate."""
+        cands = candidates or [Candidate(url="https://x/a.m3u8", title="A")]
+        _seed_candidates(gui, cands)
+        gui._auto_download_var.get = MagicMock(return_value=True)
+        gui._session_manual_downloaded = True
+        return gui
+
+    def test_extract_success_triggers_auto_download(self, gui_instance):
+        """提取成功 + 勾选 + 已手动下载过 → 自动选中并自动下载."""
+        self._ready(gui_instance)
+        with patch.object(gui_instance, "_download_selected") as download:
+            with patch.object(gui_instance, "_log"):
+                gui_instance._on_extract_done("success")
+        gui_instance._tree.selection_set.assert_called_once_with("item-0")
+        download.assert_called_once_with()
+
+    def test_no_manual_download_yet_skips_auto_download(self, gui_instance):
+        """本次会话未手动下载过 → 即使自动选中也不自动下载."""
+        self._ready(gui_instance)
+        gui_instance._session_manual_downloaded = False
+        with patch.object(gui_instance, "_download_selected") as download:
+            with patch.object(gui_instance, "_log") as log:
+                gui_instance._auto_select_and_download()
+        download.assert_not_called()
+        # 但仍应自动选中
+        gui_instance._tree.selection_set.assert_called_once_with("item-0")
+        logged = " ".join(str(c.args[0]) for c in log.call_args_list)
+        assert "尚未手动下载过" in logged
+
+    def test_checkbox_off_skips_auto_download(self, gui_instance):
+        """「自动下载」未勾选 → 只自动选中，不下载."""
+        self._ready(gui_instance)
+        gui_instance._auto_download_var.get = MagicMock(return_value=False)
+        with patch.object(gui_instance, "_download_selected") as download:
+            gui_instance._auto_select_and_download()
+        download.assert_not_called()
+        gui_instance._tree.selection_set.assert_called_once_with("item-0")
+
+    def test_manual_first_skips_duplicate_link(self, gui_instance):
+        """手动优先：已手动触发过的链接不再自动下载."""
+        self._ready(gui_instance)
+        gui_instance._manual_downloaded_urls = {"https://x/a.m3u8"}
+        with patch.object(gui_instance, "_download_selected") as download:
+            gui_instance._auto_select_and_download()
+        download.assert_not_called()
+
+    def test_stopped_extract_does_not_auto_download(self, gui_instance):
+        """用户点了「停止提取」→ 不自动下载."""
+        self._ready(gui_instance)
+        with patch.object(gui_instance, "_download_selected") as download:
+            gui_instance._on_extract_done("stopped")
+            gui_instance._on_extract_done("error")
+            gui_instance._on_extract_done("empty")
+        download.assert_not_called()
+
+    def test_auto_download_skipped_while_downloading(self, gui_instance):
+        """下载进行中（预载未交接）→ 不做自动处理."""
+        self._ready(gui_instance)
+        gui_instance._downloading = True
+        with patch.object(gui_instance, "_download_selected") as download:
+            gui_instance._auto_select_and_download()
+        download.assert_not_called()
+        gui_instance._tree.selection_set.assert_not_called()
+
+    def test_preload_auto_downloads_after_download_done(self, gui_instance):
+        """预载场景：下载 A 完成后，预载 B 已提取完毕 → 自动下载 B."""
+        self._ready(gui_instance, [Candidate(url="https://x/b.m3u8", title="B")])
+        gui_instance._pending_extract_result = "success"
+        with patch.object(gui_instance, "_download_selected") as download:
+            gui_instance._on_download_done("success")
+        download.assert_called_once_with()
+        assert gui_instance._pending_extract_result == ""
+
+    def test_preload_stopped_extract_no_auto_download(self, gui_instance):
+        """预载期间点了「停止提取」→ 下载完成后也不自动下载."""
+        self._ready(gui_instance, [Candidate(url="https://x/b.m3u8", title="B")])
+        gui_instance._pending_extract_result = "stopped"
+        with patch.object(gui_instance, "_download_selected") as download:
+            gui_instance._on_download_done("success")
+        download.assert_not_called()
+
+    def test_preload_no_auto_download_when_download_stopped(self, gui_instance):
+        """A 被用户停止（非正常完成）→ 不自动开始 B."""
+        self._ready(gui_instance, [Candidate(url="https://x/b.m3u8", title="B")])
+        gui_instance._pending_extract_result = "success"
+        with patch.object(gui_instance, "_download_selected") as download:
+            gui_instance._on_download_done("stopped")
+        download.assert_not_called()
+
+    def test_download_selected_marks_manual_session_flag(self, gui_instance):
+        """「下载选中」启动后置位会话级「已手动下载过」标志并记录链接."""
+        gui_instance._candidates = [Candidate(url="https://x/a.m3u8")]
+        gui_instance._filename_var.get.return_value = "v.mp4"
+        gui_instance._dir_var.get.return_value = "/tmp/out"
+        gui_instance._tree.selection.return_value = ["i1"]
+        gui_instance._tree.item.return_value = (
+            1, "≈ 1MB", "01:00", "2 Mbps", "media", "普通", "A", "https://x/a.m3u8"
+        )
+        assert gui_instance._session_manual_downloaded is False
+        with patch.object(gui_instance, "_run_next_job"):
+            gui_instance._download_selected()
+        assert gui_instance._session_manual_downloaded is True
+        assert "https://x/a.m3u8" in gui_instance._manual_downloaded_urls
+
+    def test_start_download_marks_manual_session_flag(self, gui_instance):
+        """「开始下载」启动后置位会话级「已手动下载过」标志并记录链接."""
+        gui_instance._url_var.get = MagicMock(return_value="https://x/direct.m3u8")
+        gui_instance._filename_var.get = MagicMock(return_value="v.mp4")
+        gui_instance._dir_var.get = MagicMock(return_value="/tmp/out")
+        with patch.object(gui_instance, "_download_worker"):
+            gui_instance._start_download()
+        assert gui_instance._session_manual_downloaded is True
+        assert "https://x/direct.m3u8" in gui_instance._manual_downloaded_urls
+
+
+class TestContinuousDownload:
+    """Tests for the 连续下载 checkbox (auto-confirm the completion popup)."""
+
+    def test_checked_skips_popup(self, gui_instance):
+        """勾选「连续下载」→ 跳过「下载完成！」弹窗."""
+        gui_instance._continuous_download_var.get = MagicMock(return_value=True)
+        with patch("m3u8_downloader.gui.messagebox.showinfo") as info:
+            gui_instance._on_download_done("success")
+        info.assert_not_called()
+
+    def test_unchecked_shows_popup(self, gui_instance):
+        """未勾选「连续下载」→ 仍显示「下载完成！」弹窗."""
+        gui_instance._continuous_download_var.get = MagicMock(return_value=False)
+        with patch("m3u8_downloader.gui.messagebox.showinfo") as info:
+            gui_instance._on_download_done("success")
+        info.assert_called_once_with("提示", "下载完成！")
+
+
+class TestAutoDownloadPreference:
+    """Tests for the persistence of the two new checkboxes."""
+
+    def test_defaults_are_checked_and_unchecked(self, isolated_gui):
+        """默认：「自动下载」勾选、「连续下载」不勾选."""
+        gui, _ = isolated_gui
+        assert gui._auto_download_var.get() is True
+        assert gui._continuous_download_var.get() is False
+
+    def test_save_writes_both_flags(self, isolated_gui):
+        """两个勾选框状态写入配置文件."""
+        gui, config_path = isolated_gui
+        gui._auto_download_var.get = MagicMock(return_value=False)
+        gui._continuous_download_var.get = MagicMock(return_value=True)
+
+        gui._save_config()
+
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert data["auto_download"] is False
+        assert data["continuous_download"] is True
+
+    def test_load_restores_both_flags(self, isolated_gui):
+        """配置读取恢复两个勾选框状态."""
+        gui, config_path = isolated_gui
+        _write_config(
+            config_path, {"auto_download": False, "continuous_download": True}
+        )
+
+        gui._auto_download_var.set.reset_mock()
+        gui._continuous_download_var.set.reset_mock()
+        gui._load_config()
+
+        gui._auto_download_var.set.assert_called_once_with(False)
+        gui._continuous_download_var.set.assert_called_once_with(True)
+
+    def test_load_missing_flags_falls_back_to_defaults(self, isolated_gui):
+        """旧配置缺少新键 → 回退默认值（自动下载开、连续下载关）."""
+        gui, config_path = isolated_gui
+        _write_config(config_path, {"workers": 8})
+
+        gui._auto_download_var.set.reset_mock()
+        gui._continuous_download_var.set.reset_mock()
+        gui._load_config()
+
+        gui._auto_download_var.set.assert_called_once_with(True)
+        gui._continuous_download_var.set.assert_called_once_with(False)
+
+    def test_build_ui_wires_auto_download_checkbutton(self, tmp_path):
+        """「自动下载」勾选框绑定到对应变量并即时持久化."""
+        with ExitStack() as stack:
+            for p in _tk_patches():
+                stack.enter_context(p)
+            check_cls = stack.enter_context(
+                patch("tkinter.ttk.Checkbutton", return_value=MagicMock())
+            )
+            stack.enter_context(
+                patch(
+                    "m3u8_downloader.gui.GUI_CONFIG_PATH", tmp_path / "gui_config.json"
+                )
+            )
+            gui = M3U8DownloaderGUI(_make_mock_root())
+
+        calls = [
+            c for c in check_cls.call_args_list
+            if str(c.kwargs.get("text", "")) == "自动下载"
+        ]
+        assert len(calls) == 1, "未找到“自动下载”勾选框"
+        assert calls[0].kwargs["variable"] is gui._auto_download_var
+        assert calls[0].kwargs["command"] == gui._save_config
+
+    def test_build_ui_wires_continuous_download_checkbutton(self, tmp_path):
+        """「连续下载」勾选框绑定到对应变量并即时持久化."""
+        with ExitStack() as stack:
+            for p in _tk_patches():
+                stack.enter_context(p)
+            check_cls = stack.enter_context(
+                patch("tkinter.ttk.Checkbutton", return_value=MagicMock())
+            )
+            stack.enter_context(
+                patch(
+                    "m3u8_downloader.gui.GUI_CONFIG_PATH", tmp_path / "gui_config.json"
+                )
+            )
+            gui = M3U8DownloaderGUI(_make_mock_root())
+
+        calls = [
+            c for c in check_cls.call_args_list
+            if str(c.kwargs.get("text", "")) == "连续下载"
+        ]
+        assert len(calls) == 1, "未找到“连续下载”勾选框"
+        assert calls[0].kwargs["variable"] is gui._continuous_download_var
+        assert calls[0].kwargs["command"] == gui._save_config
+
+
+# ---------------------------------------------------------------------------
 # Helpers and fixture: keep the real ~/.m3u8-downloader config untouched
 # ---------------------------------------------------------------------------
 

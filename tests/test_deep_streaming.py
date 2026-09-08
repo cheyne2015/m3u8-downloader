@@ -281,6 +281,10 @@ def test_result_toolbar_selects_clears_and_copies_links(video_page, desktop_gui)
     tree = next(w for w in widgets(root) if isinstance(w, ttk.Treeview))
     start_deep_scan(root, video_page)
     pump_until(root, lambda: str(button(root, "提取网页").cget("state")) == "normal")
+    # 提取正常完成后「自动选中」生效：时长相同的候选中体积最大者被自动选中
+    assert "共 2 条，已选 1 条" in visible_text(root)
+    button(root, "取消选择").invoke()
+    root.update()
     assert "共 2 条，已选 0 条" in visible_text(root)
 
     button(root, "全选").invoke()
@@ -418,6 +422,37 @@ def test_stop_during_slow_estimate_returns_existing_candidates_promptly(video_pa
         session.close()
 
 
+def test_auto_download_chains_preloaded_episode(video_page, desktop_gui, tmp_path, monkeypatch):
+    """自动下载（真实 GUI）：A 下载完成后，预载的下一集 B 无需点击即自动下载."""
+    from tkinter import ttk, messagebox
+    root, app = desktop_gui
+    monkeypatch.setattr(messagebox, "showinfo", lambda *a, **kw: None)
+    entries = [w for w in widgets(root) if isinstance(w, ttk.Entry)]
+    entries[1].delete(0, "end")
+    entries[1].insert(0, str(tmp_path))
+    ffmpeg = next(w for w in widgets(root) if isinstance(w, ttk.Checkbutton) and "ffmpeg" in w.cget("text"))
+    root.setvar(ffmpeg.cget("variable"), False)
+    tree = next(w for w in widgets(root) if isinstance(w, ttk.Treeview))
+    start_deep_scan(root, video_page)
+    pump_until(root, lambda: str(button(root, "提取网页").cget("state")) == "normal")
+    # 提取完成后「自动选中」已选中一个候选，这里显式选第一个，等价于用户点「下载选中」
+    tree.selection_set(tree.get_children()[0])
+    video_page.release_download.clear()
+    try:
+        button(root, "下载选中").invoke()
+        pump_until(root, video_page.download_started.is_set)
+        # 下载 A 期间预载下一集 B（普通模式即可，无需浏览器）
+        start_deep_scan(root, video_page + "?next", deep=False)
+        pump_until(root, lambda: "预载：成功，找到 1 条，等待当前下载结束" in visible_text(root))
+    finally:
+        video_page.release_download.set()
+    # A 完成后 B 应被自动下载：无需再点「确定」或「下载选中」
+    pump_until(root, lambda: (tmp_path / "Next episode.mp4").exists())
+    assert (tmp_path / "Next episode.mp4").read_bytes() == video_page.segment
+    # A（Streaming test.mp4）与自动下载的 B（Next episode.mp4）都落盘
+    assert len([p for p in tmp_path.iterdir() if p.suffix == ".mp4"]) == 2
+
+
 def test_estimate_stream_clones_custom_adapter_and_hooks(monkeypatch):
     """后台估算会话应保留调用者定制的请求行为，但不能共享适配器生命周期。"""
     import requests
@@ -481,8 +516,10 @@ def test_preload_swaps_list_and_title_only_after_download(
     video_page, desktop_gui, tmp_path, monkeypatch, finish_order, deep,
 ):
     from tkinter import ttk, messagebox
-    root, _ = desktop_gui
+    root, app = desktop_gui
     monkeypatch.setattr(messagebox, "showinfo", lambda *a, **kw: None)
+    # 本用例只验证「预载在下载结束后才切换列表与标题」，关闭自动下载避免链式下载干扰
+    app._auto_download_var.set(False)
     entries = [w for w in widgets(root) if isinstance(w, ttk.Entry)]
     entries[1].delete(0, "end")
     entries[1].insert(0, str(tmp_path))
