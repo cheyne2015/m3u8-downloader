@@ -779,7 +779,7 @@ def test_real_gui_two_preloads_auto_chain(
     tree = next(w for w in widgets(root) if isinstance(w, ttk.Treeview))
 
     start_deep_scan(root, video_page)
-    pump_until(root, lambda: str(_find_button(root, "提取网页").cget("state")) == "normal")
+    pump_until(root, lambda: str(_find_button(root, "停止提取").cget("state")) == "disabled")
     tree.selection_set(tree.get_children()[0])
 
     video_page.release_download.clear()

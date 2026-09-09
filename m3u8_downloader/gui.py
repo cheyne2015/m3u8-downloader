@@ -1256,6 +1256,9 @@ class M3U8DownloaderGUI:
         后台串行泵式提取（同一时刻最多一个在飞），可连续点多个；空闲时单次提取行为不变。
         """
         if self._extracting and not self._downloading:
+            # 按钮不再变灰：提取进行中重复点击只提示，不重复起提取（单飞保护，
+            # 避免多个提取写同一组共享缓冲造成串页）。
+            self._log("提示：正在提取中，请等待本次提取完成")
             return
         page_url = self._url_var.get().strip()
         if not page_url:
@@ -1270,10 +1273,11 @@ class M3U8DownloaderGUI:
             self._enqueue_preload_extract(page_url)
             return
 
-        # 空闲模式：单次提取（保持原行为，含按钮禁用与单飞控制）。
+        # 空闲模式：单次提取。按钮**不再变灰**（用户要求：下载中与空闲首次提取
+        # 都保持可用），进行中的反馈改由「停止提取」按钮与状态文本/日志承担。
         self._extracting = True
         self._extract_stop_flag.clear()
-        self._extract_btn.configure(state=tk.DISABLED)
+        self._extract_btn.configure(state=tk.NORMAL)
         self._stop_extract_btn.configure(state=tk.NORMAL)
         self._download_selected_btn.configure(state=tk.DISABLED)
         self._current_extract_page_url = page_url

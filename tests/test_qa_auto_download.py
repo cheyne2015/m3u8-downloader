@@ -503,7 +503,7 @@ def test_qa_auto_download_on_does_not_break_preload_list_and_title_swap(
     assert bool(app._auto_download_var.get()) is True
 
     start_deep_scan(root, video_page)
-    pump_until(root, lambda: str(_gui_button(root, "提取网页").cget("state")) == "normal")
+    pump_until(root, lambda: str(_gui_button(root, "停止提取").cget("state")) == "disabled")
     assert "共 2 条，已选 1 条" in visible_text(root), "自动选中未生效"
 
     selected = tree.get_children()[0]
@@ -548,7 +548,7 @@ def test_qa_no_auto_download_before_any_manual_download(
     tree = next(w for w in widgets(root) if isinstance(w, ttk.Treeview))
 
     start_deep_scan(root, video_page)
-    pump_until(root, lambda: str(_gui_button(root, "提取网页").cget("state")) == "normal")
+    pump_until(root, lambda: str(_gui_button(root, "停止提取").cget("state")) == "disabled")
     assert "共 2 条，已选 1 条" in visible_text(root)
     assert app._session_manual_downloaded is False
 
@@ -569,7 +569,7 @@ def test_qa_stop_extract_during_preload_blocks_chain(
     tree = next(w for w in widgets(root) if isinstance(w, ttk.Treeview))
 
     start_deep_scan(root, video_page)
-    pump_until(root, lambda: str(_gui_button(root, "提取网页").cget("state")) == "normal")
+    pump_until(root, lambda: str(_gui_button(root, "停止提取").cget("state")) == "disabled")
     tree.selection_set(tree.get_children()[0])
 
     video_page.release_download.clear()
@@ -616,7 +616,7 @@ def test_qa_continuous_download_checkbox_suppresses_popup(
     tree = next(w for w in widgets(root) if isinstance(w, ttk.Treeview))
 
     start_deep_scan(root, video_page)
-    pump_until(root, lambda: str(_gui_button(root, "提取网页").cget("state")) == "normal")
+    pump_until(root, lambda: str(_gui_button(root, "停止提取").cget("state")) == "disabled")
     rows = tree.get_children()
     assert len(rows) == 2
 

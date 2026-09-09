@@ -273,11 +273,12 @@ def test_gui_shows_first_result_while_scanning_and_preserves_selection(video_pag
     tree = next(w for w in widgets(root) if isinstance(w, ttk.Treeview))
     start_deep_scan(root, video_page)
     pump_until(root, lambda: bool(tree.get_children()))
-    assert str(button(root, "提取网页").cget("state")) == "disabled"
+    # 空闲首次提取时「提取网页」按钮不再变灰（与下载中预载一致），
+    # 故不再用按钮态判断“正在扫描”，改用「停止提取」变 disabled 作为扫描完成信号。
     assert str(button(root, "下载选中").cget("state")) == "normal"
     first = tree.get_children()[0]
     tree.selection_set(first)
-    pump_until(root, lambda: str(button(root, "提取网页").cget("state")) == "normal")
+    pump_until(root, lambda: str(button(root, "停止提取").cget("state")) == "disabled")
     assert len(tree.get_children()) == 2
     assert tree.selection() == (first,)
     assert tree.item(first, "values")[-1] == video_page + "first.m3u8"
@@ -288,7 +289,7 @@ def test_result_toolbar_selects_clears_and_copies_links(video_page, desktop_gui)
     root, _ = desktop_gui
     tree = next(w for w in widgets(root) if isinstance(w, ttk.Treeview))
     start_deep_scan(root, video_page)
-    pump_until(root, lambda: str(button(root, "提取网页").cget("state")) == "normal")
+    pump_until(root, lambda: str(button(root, "停止提取").cget("state")) == "disabled")
     # 提取正常完成后「自动选中」生效：时长相同的候选中体积最大者被自动选中
     assert "共 2 条，已选 1 条" in visible_text(root)
     button(root, "取消选择").invoke()
@@ -338,7 +339,7 @@ def test_stop_scan_keeps_result_and_active_download(video_page, desktop_gui, tmp
         assert "保存文件：Streaming test.mp4" in labels
         assert str(button(root, "停止提取").cget("state")) == "normal"
         button(root, "停止提取").invoke()
-        pump_until(root, lambda: str(button(root, "提取网页").cget("state")) == "normal", timeout=3)
+        pump_until(root, lambda: str(button(root, "停止提取").cget("state")) == "disabled", timeout=3)
         assert tree.selection() == (first,)
         assert tree.item(first, "values")[-1] == video_page + "first.m3u8"
         assert str(button(root, "停止下载").cget("state")) == "normal"
@@ -442,7 +443,7 @@ def test_auto_download_chains_preloaded_episode(video_page, desktop_gui, tmp_pat
     root.setvar(ffmpeg.cget("variable"), False)
     tree = next(w for w in widgets(root) if isinstance(w, ttk.Treeview))
     start_deep_scan(root, video_page)
-    pump_until(root, lambda: str(button(root, "提取网页").cget("state")) == "normal")
+    pump_until(root, lambda: str(button(root, "停止提取").cget("state")) == "disabled")
     # 提取完成后「自动选中」已选中一个候选，这里显式选第一个，等价于用户点「下载选中」
     tree.selection_set(tree.get_children()[0])
     video_page.release_download.clear()
@@ -535,7 +536,7 @@ def test_preload_swaps_list_and_title_only_after_download(
     root.setvar(ffmpeg.cget("variable"), False)
     tree = next(w for w in widgets(root) if isinstance(w, ttk.Treeview))
     start_deep_scan(root, video_page)
-    pump_until(root, lambda: str(button(root, "提取网页").cget("state")) == "normal")
+    pump_until(root, lambda: str(button(root, "停止提取").cget("state")) == "disabled")
     original_rows = [tree.item(item, "values") for item in tree.get_children()]
     selected = tree.get_children()[0]
     tree.selection_set(selected)
