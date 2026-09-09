@@ -229,6 +229,8 @@ class M3U8DownloaderGUI:
         # 记录当前下载任务关联的网页（page_url -> 下载 m3u8 url）；用于功能二记录。
         self._inflight_download_page_url: str = ""
         self._inflight_download_url: str = ""
+        # 本次在飞下载的输出文件路径（供「下载记录 → 打开位置」定位文件）。
+        self._inflight_download_output_path: str = ""
         # 本次下载是否来自待处理队列头（用于「队列页下载失败→跳过继续」语义）。
         self._active_download_is_queue_page: bool = False
         # P2：用户点「停止下载」后置位，抑制自动连播链（含 in-flight 预载完成后
@@ -838,6 +840,8 @@ class M3U8DownloaderGUI:
         # 功能二：记住本次下载对应的网页（仅当下载的是从网页提取出的 m3u8）。
         self._inflight_download_url = url
         self._inflight_download_page_url = self._current_source_page_url
+        # 记住输出路径，下载成功后写入记录供「下载记录 → 打开位置」定位。
+        self._inflight_download_output_path = output_path
 
         # 启动下载线程
         self._download_thread = threading.Thread(
@@ -1503,7 +1507,9 @@ class M3U8DownloaderGUI:
             self._extract_recorded = True
             try:
                 from m3u8_downloader import page_history
-                page_history.record_page_extracted(self._current_extract_page_url)
+                page_history.record_page_extracted(
+                    self._current_extract_page_url, title=self._page_title
+                )
             except Exception:
                 pass  # 记录失败不影响提取主流程
 
@@ -1893,14 +1899,18 @@ class M3U8DownloaderGUI:
         """
         page_url = self._inflight_download_page_url
         m3u8_url = self._inflight_download_url
+        output_path = self._inflight_download_output_path
         self._inflight_download_page_url = ""
         self._inflight_download_url = ""
+        self._inflight_download_output_path = ""
         if not page_url:
             return
         try:
             from m3u8_downloader import page_history
             if result == "success":
-                page_history.record_page_downloaded(page_url, m3u8_url)
+                page_history.record_page_downloaded(
+                    page_url, m3u8_url, output_path=output_path
+                )
             elif result == "error":
                 page_history.record_page_failed(page_url)
             # stopped（用户手动停止）不改写状态，保留为「已提取」。
@@ -2015,8 +2025,43 @@ class M3U8DownloaderGUI:
         if not self._downloading and not self._extracting:
             self._advance_preload_queue_when_idle()
 
+    def _reveal_path_in_file_manager(self, path: str) -> bool:
+        """在系统文件管理器中定位 ``path``（跨平台）.
+
+        - Windows：``explorer /select, <path>``（打开所在文件夹并选中该文件）；
+        - macOS：``open -R <path>``（在 Finder 中显式）；
+        - Linux / 其他：``xdg-open <所在目录>``（无统一的「选中文件」语义）。
+
+        任何异常都被吞掉并静默降级为 False，绝不让 GUI 崩溃。
+
+        Args:
+            path: 要定位的文件（或目录）路径.
+
+        Returns:
+            已发起定位命令返回 True；路径为空或执行失败返回 False.
+        """
+        target = str(path or "").strip()
+        if not target:
+            return False
+        try:
+            if sys.platform == "win32":
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(target)])
+            elif sys.platform == "darwin":
+                subprocess.run(["open", "-R", target], check=False)
+            else:
+                folder = os.path.dirname(os.path.abspath(target)) or target
+                subprocess.Popen(["xdg-open", folder])
+            return True
+        except Exception:
+            return False
+
     def _show_page_history(self) -> None:
-        """打开独立只读的「网页下载记录」面板（新→旧，最多 500 条）."""
+        """打开独立只读的「网页下载记录」面板（新→旧，最多 500 条）.
+
+        列：时间 / 网页名（网页标题，取不到回退网页 URL）/ 状态 / 网页 URL /
+        最近一次下载的 m3u8。选中一行且该行有输出文件路径时可用「打开位置」
+        在系统文件管理器中定位该文件。
+        """
         from m3u8_downloader import page_history
         try:
             records = page_history.list_records()
@@ -2024,7 +2069,7 @@ class M3U8DownloaderGUI:
             records = []
         win = tk.Toplevel(self._root)
         win.title("网页下载记录")
-        win.geometry("820x460")
+        win.geometry("900x460")
         frame = ttk.Frame(win, padding=8)
         frame.pack(fill=tk.BOTH, expand=True)
         body = ttk.Frame(frame)
@@ -2033,17 +2078,19 @@ class M3U8DownloaderGUI:
         body.rowconfigure(0, weight=1)
         tree = ttk.Treeview(
             body,
-            columns=("time", "status", "url", "m3u8"),
+            columns=("time", "title", "status", "url", "m3u8"),
             show="headings",
         )
         tree.heading("time", text="时间")
+        tree.heading("title", text="网页名")
         tree.heading("status", text="状态")
         tree.heading("url", text="网页 URL")
         tree.heading("m3u8", text="实际下载的 m3u8")
-        tree.column("time", width=150, anchor=tk.W)
-        tree.column("status", width=90, anchor=tk.CENTER)
-        tree.column("url", width=300)
-        tree.column("m3u8", width=300)
+        tree.column("time", width=140, anchor=tk.W)
+        tree.column("title", width=170, anchor=tk.W)
+        tree.column("status", width=80, anchor=tk.CENTER)
+        tree.column("url", width=250)
+        tree.column("m3u8", width=250)
         tree.grid(row=0, column=0, sticky=tk.NSEW)
         scroll = ttk.Scrollbar(body, orient=tk.VERTICAL, command=tree.yview)
         tree.configure(yscrollcommand=scroll.set)
@@ -2053,27 +2100,84 @@ class M3U8DownloaderGUI:
             "failed": "下载失败",
             "extracted": "已提取",
         }
-        for record in records:
+        # 行 id -> 该行输出文件路径（供「打开位置」定位；空串表示不可定位）。
+        path_by_item = {}
+        for index, record in enumerate(records):
             status = status_names.get(
                 str(record.get("status", "")), str(record.get("status", ""))
             )
-            # 同一页多次下载过的 m3u8 以换行累积在 m3u8_url 字段；树状单元格换行
-            # 显示不佳，展示时用「 | 」连接便于阅读（记录本身仍完整保留）。
-            m3u8_display = str(record.get("m3u8_url", "") or "").replace("\n", " | ")
+            # 网页名 = 网页标题；取不到标题时回退显示该页的网页 URL。
+            title_display = str(record.get("title", "") or "").strip() or str(
+                record.get("page_url", "")
+            )
+            # 同一页多次下载过的 m3u8 累积在 downloads 里；这里只展示**最近一次**
+            # 下载的 m3u8（取 downloads 末项，无 downloads 时回退 m3u8_url 首行）。
+            m3u8_display = page_history.latest_m3u8_url(record)
+            item_id = f"r{index}"
             tree.insert(
-                "", tk.END,
+                "", tk.END, iid=item_id,
                 values=(
                     record.get("timestamp", ""),
+                    title_display,
                     status,
                     record.get("page_url", ""),
                     m3u8_display,
                 ),
             )
+            path_by_item[item_id] = str(record.get("output_path", "") or "")
+
+        def _selected_output_path() -> str:
+            """当前选中行对应的输出文件路径；未选中/无路径时返回空串."""
+            try:
+                selection = tree.selection()
+            except Exception:
+                return ""
+            if not selection:
+                return ""
+            try:
+                first = selection[0]
+            except (TypeError, IndexError, KeyError):
+                return ""
+            return str(path_by_item.get(str(first), "") or "")
+
+        def _on_history_select(_event=None) -> None:
+            """选中变化时同步「打开位置」按钮可用性."""
+            try:
+                open_btn.configure(
+                    state=tk.NORMAL if _selected_output_path() else tk.DISABLED
+                )
+            except Exception:
+                pass
+
+        def _open_location() -> None:
+            """在系统文件管理器中打开选中行文件所在文件夹并选中该文件."""
+            target = _selected_output_path()
+            if not target:
+                # 未选中行或该行没有可定位的输出文件路径：不做无意义操作。
+                return
+            if not self._reveal_path_in_file_manager(target):
+                try:
+                    self._log(f"打开位置失败：{target}")
+                except Exception:
+                    pass  # 日志失败也不能让弹窗崩溃
+
+        try:
+            tree.bind("<<TreeviewSelect>>", _on_history_select)
+        except Exception:
+            pass
+
         if not records:
             ttk.Label(frame, text="暂无记录。提取网页后，页面会显示在这里。").pack(
                 anchor=tk.W, pady=(6, 0)
             )
-        ttk.Button(frame, text="关闭", command=win.destroy).pack(anchor=tk.E, pady=(6, 0))
+        btn_bar = ttk.Frame(frame)
+        btn_bar.pack(anchor=tk.E, pady=(6, 0))
+        ttk.Button(btn_bar, text="关闭", command=win.destroy).pack(side=tk.RIGHT)
+        open_btn = ttk.Button(
+            btn_bar, text="打开位置", command=_open_location, state=tk.DISABLED
+        )
+        open_btn.pack(side=tk.RIGHT, padx=(0, 6))
+        _on_history_select()
 
     def _on_tree_selection_changed(self, _event=None) -> None:
         self._update_result_actions()

@@ -4,6 +4,7 @@ import inspect
 import json
 import os
 import queue
+import sys
 import tempfile
 import threading
 from contextlib import ExitStack
@@ -11,6 +12,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+import tkinter as tk
 
 from m3u8_downloader.gui import (
     DownloadJob, M3U8DownloaderGUI, PageTitleUpdate, PreloadResult, PreloadState, run_gui,
@@ -1542,3 +1544,254 @@ class TestWebExtractAndMultiDownload:
         gui_instance._tree.identify_row.return_value = ""
         gui_instance._on_tree_single_click(evt)
         gui_instance._root.after.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 「下载记录」面板：网页名列 / 最近一次 m3u8 / 打开位置按钮
+# ---------------------------------------------------------------------------
+
+
+class _ButtonFactory:
+    """ttk.Button 替身：每次调用返回新的 MagicMock，可按 text 找回对应按钮。"""
+
+    def __init__(self):
+        self.by_text = {}
+
+    def __call__(self, *args, **kwargs):
+        btn = MagicMock()
+        self.by_text[kwargs.get("text", "")] = (kwargs, btn)
+        return btn
+
+
+def _tk_patches_with_toplevel():
+    """标准 tkinter mock + 屏蔽 Toplevel（下载记录面板会新建独立窗口）。"""
+    return _tk_patches() + [patch("tkinter.Toplevel", return_value=MagicMock())]
+
+
+@pytest.fixture
+def page_history_gui(tmp_path, monkeypatch):
+    """headless GUI 实例 + 独立的 page_history.json（不污染真实用户目录）。"""
+    monkeypatch.setattr(
+        "m3u8_downloader.page_history.PAGE_HISTORY_FILE",
+        str(tmp_path / "page_history.json"),
+    )
+    with ExitStack() as stack:
+        for p in _tk_patches_with_toplevel():
+            stack.enter_context(p)
+        monkeypatch.setattr(
+            "m3u8_downloader.gui.PRELOAD_QUEUE_FILE",
+            tmp_path / "preload_queue.json",
+        )
+        yield M3U8DownloaderGUI(_make_mock_root())
+
+
+class TestPageHistoryPanel:
+    """下载记录面板三处改动：网页名列、m3u8 只显示最近一个、打开位置按钮。"""
+
+    def test_inflight_output_path_defaults_to_empty(self, page_history_gui):
+        """新增的实例属性默认空串（不破坏既有 __init__ 语义）。"""
+        assert page_history_gui._inflight_download_output_path == ""
+
+    def test_tree_has_title_column_after_time(self, page_history_gui):
+        """Treeview 增加「网页名」列，排在时间列之后。"""
+        with patch("tkinter.ttk.Treeview") as tree_mock:
+            page_history_gui._show_page_history()
+        assert tree_mock.call_args.kwargs["columns"] == (
+            "time", "title", "status", "url", "m3u8",
+        )
+        headings = {
+            c.args[0]: c.kwargs.get("text")
+            for c in tree_mock.return_value.heading.call_args_list
+        }
+        assert headings.get("title") == "网页名"
+
+    def test_title_column_shows_page_title_not_filename(self, page_history_gui):
+        """网页名列显示网页标题（page_title），不是保存的文件名。"""
+        from m3u8_downloader import page_history
+        page_history.record_page_extracted("https://x/page", title="仙界法务部 第55集")
+        page_history.record_page_downloaded(
+            "https://x/page", "https://cdn/x/a.m3u8", output_path="D:/out/saved.mp4"
+        )
+        with patch("tkinter.ttk.Treeview") as tree_mock:
+            page_history_gui._show_page_history()
+        values = tree_mock.return_value.insert.call_args.kwargs["values"]
+        assert values[1] == "仙界法务部 第55集"
+
+    def test_title_column_falls_back_to_page_url(self, page_history_gui):
+        """取不到网页标题时，网页名列回退显示该页的网页 URL。"""
+        from m3u8_downloader import page_history
+        page_history.record_page_extracted("https://x/no-title")
+        with patch("tkinter.ttk.Treeview") as tree_mock:
+            page_history_gui._show_page_history()
+        values = tree_mock.return_value.insert.call_args.kwargs["values"]
+        assert values[1] == "https://x/no-title"
+
+    def test_m3u8_column_shows_only_latest_download(self, page_history_gui):
+        """m3u8 列只显示最近一次下载的 m3u8，不再用「 | 」拼接全部。"""
+        from m3u8_downloader import page_history
+        page_history.record_page_downloaded("https://x/page", "https://cdn/x/old.m3u8")
+        page_history.record_page_downloaded("https://x/page", "https://cdn/x/new.m3u8")
+        with patch("tkinter.ttk.Treeview") as tree_mock:
+            page_history_gui._show_page_history()
+        values = tree_mock.return_value.insert.call_args.kwargs["values"]
+        assert values[4] == "https://cdn/x/new.m3u8"
+        assert "|" not in values[4]
+        # 记录本身仍保留全部历史（只在展示层取最近一个）
+        assert len(page_history.list_records()[0]["downloads"]) == 2
+
+    def test_open_location_button_disabled_without_selection(self, page_history_gui):
+        """未选中任何行时「打开位置」按钮为 DISABLED。"""
+        from m3u8_downloader import page_history
+        page_history.record_page_downloaded(
+            "https://x/page", "https://cdn/x/a.m3u8", output_path="D:/out/a.mp4"
+        )
+        factory = _ButtonFactory()
+        with patch("tkinter.ttk.Treeview") as tree_mock, patch(
+            "tkinter.ttk.Button", factory
+        ):
+            page_history_gui._show_page_history()
+        kwargs, open_btn = factory.by_text["打开位置"]
+        assert kwargs["state"] == tk.DISABLED
+        # 未选中行 → 点击不发起任何子进程
+        tree_mock.return_value.selection.return_value = ()
+        with patch("m3u8_downloader.gui.subprocess.Popen") as popen:
+            kwargs["command"]()
+        popen.assert_not_called()
+
+    def test_open_location_enabled_when_row_has_output_path(self, page_history_gui):
+        """选中且该行有输出路径 → 按钮 NORMAL。"""
+        from m3u8_downloader import page_history
+        page_history.record_page_downloaded(
+            "https://x/page", "https://cdn/x/a.m3u8", output_path="D:/out/a.mp4"
+        )
+        factory = _ButtonFactory()
+        with patch("tkinter.ttk.Treeview") as tree_mock, patch(
+            "tkinter.ttk.Button", factory
+        ):
+            page_history_gui._show_page_history()
+        _, open_btn = factory.by_text["打开位置"]
+        handler = tree_mock.return_value.bind.call_args.args[1]
+        tree_mock.return_value.selection.return_value = ("r0",)
+        handler()
+        open_btn.configure.assert_called_with(state=tk.NORMAL)
+
+    def test_open_location_disabled_when_row_has_no_path(self, page_history_gui):
+        """选中但该行没有可定位的输出路径 → 按钮保持 DISABLED，点击无动作。"""
+        from m3u8_downloader import page_history
+        page_history.record_page_extracted("https://x/page", title="只提取未下载")
+        factory = _ButtonFactory()
+        with patch("tkinter.ttk.Treeview") as tree_mock, patch(
+            "tkinter.ttk.Button", factory
+        ):
+            page_history_gui._show_page_history()
+        kwargs, open_btn = factory.by_text["打开位置"]
+        handler = tree_mock.return_value.bind.call_args.args[1]
+        tree_mock.return_value.selection.return_value = ("r0",)
+        handler()
+        open_btn.configure.assert_called_with(state=tk.DISABLED)
+        with patch("m3u8_downloader.gui.subprocess.Popen") as popen:
+            kwargs["command"]()
+        popen.assert_not_called()
+
+    def test_open_location_windows_selects_file(self, page_history_gui, monkeypatch, tmp_path):
+        """Windows：explorer /select, <normpath>（打开文件夹并选中文件）。"""
+        monkeypatch.setattr(sys, "platform", "win32")
+        from m3u8_downloader import page_history
+        target = str(tmp_path / "a.mp4")
+        page_history.record_page_downloaded(
+            "https://x/page", "https://cdn/x/a.m3u8", output_path=target
+        )
+        factory = _ButtonFactory()
+        with patch("tkinter.ttk.Treeview") as tree_mock, patch(
+            "tkinter.ttk.Button", factory
+        ):
+            page_history_gui._show_page_history()
+        command = factory.by_text["打开位置"][0]["command"]
+        tree_mock.return_value.selection.return_value = ("r0",)
+        with patch("m3u8_downloader.gui.subprocess.Popen") as popen:
+            command()
+        popen.assert_called_once_with(["explorer", "/select,", os.path.normpath(target)])
+
+    def test_open_location_macos_reveals_file(self, page_history_gui, monkeypatch, tmp_path):
+        """macOS：open -R <path>（Finder 中显式）。"""
+        monkeypatch.setattr(sys, "platform", "darwin")
+        from m3u8_downloader import page_history
+        target = str(tmp_path / "a.mp4")
+        page_history.record_page_downloaded(
+            "https://x/page", "https://cdn/x/a.m3u8", output_path=target
+        )
+        factory = _ButtonFactory()
+        with patch("tkinter.ttk.Treeview") as tree_mock, patch(
+            "tkinter.ttk.Button", factory
+        ):
+            page_history_gui._show_page_history()
+        command = factory.by_text["打开位置"][0]["command"]
+        tree_mock.return_value.selection.return_value = ("r0",)
+        with patch("m3u8_downloader.gui.subprocess.run") as run:
+            command()
+        run.assert_called_once_with(["open", "-R", target], check=False)
+
+    def test_open_location_linux_opens_folder(self, page_history_gui, monkeypatch, tmp_path):
+        """Linux：xdg-open 打开该文件所在目录。"""
+        monkeypatch.setattr(sys, "platform", "linux")
+        from m3u8_downloader import page_history
+        target = str(tmp_path / "a.mp4")
+        page_history.record_page_downloaded(
+            "https://x/page", "https://cdn/x/a.m3u8", output_path=target
+        )
+        factory = _ButtonFactory()
+        with patch("tkinter.ttk.Treeview") as tree_mock, patch(
+            "tkinter.ttk.Button", factory
+        ):
+            page_history_gui._show_page_history()
+        command = factory.by_text["打开位置"][0]["command"]
+        tree_mock.return_value.selection.return_value = ("r0",)
+        with patch("m3u8_downloader.gui.subprocess.Popen") as popen:
+            command()
+        popen.assert_called_once_with(["xdg-open", os.path.dirname(os.path.abspath(target))])
+
+    def test_reveal_blank_path_is_noop(self, page_history_gui, tmp_path):
+        """空路径直接返回 False；子进程异常时静默降级不抛异常。"""
+        assert page_history_gui._reveal_path_in_file_manager("") is False
+        assert page_history_gui._reveal_path_in_file_manager("   ") is False
+        with patch("m3u8_downloader.gui.subprocess.Popen", side_effect=OSError("boom")):
+            assert page_history_gui._reveal_path_in_file_manager(str(tmp_path)) is False
+
+
+class TestPageHistoryRecordWiring:
+    """GUI 触发链写入 title / output_path。"""
+
+    def test_extract_done_records_page_title(self, page_history_gui):
+        """提取完成 → 记录的 title 为当前网页标题。"""
+        from m3u8_downloader import page_history
+        page_history_gui._current_extract_page_url = "https://x/page"
+        page_history_gui._page_title = "网页标题A"
+        page_history_gui._on_extract_done("success")
+        records = page_history.list_records()
+        assert records[0]["page_url"] == "https://x/page"
+        assert records[0]["title"] == "网页标题A"
+
+    def test_download_success_records_output_path_and_resets(self, page_history_gui):
+        """下载成功 → 记录 output_path；读完复位，不串到下一次下载。"""
+        from m3u8_downloader import page_history
+        page_history_gui._inflight_download_page_url = "https://x/page"
+        page_history_gui._inflight_download_url = "https://cdn/v.m3u8"
+        page_history_gui._inflight_download_output_path = "D:/out/v.mp4"
+        page_history_gui._finalize_inflight_download_record("success")
+        records = page_history.list_records()
+        assert records[0]["output_path"] == "D:/out/v.mp4"
+        assert page_history_gui._inflight_download_output_path == ""
+        assert page_history_gui._inflight_download_url == ""
+        assert page_history_gui._inflight_download_page_url == ""
+
+    def test_download_error_does_not_record_output_path(self, page_history_gui):
+        """下载失败 → 不写 output_path（无成功产物可定位）。"""
+        from m3u8_downloader import page_history
+        page_history_gui._inflight_download_page_url = "https://x/page"
+        page_history_gui._inflight_download_url = "https://cdn/v.m3u8"
+        page_history_gui._inflight_download_output_path = "D:/out/v.mp4"
+        page_history_gui._finalize_inflight_download_record("error")
+        records = page_history.list_records()
+        assert records[0]["status"] == page_history.STATUS_FAILED
+        assert records[0]["output_path"] == ""
+        assert page_history_gui._inflight_download_output_path == ""

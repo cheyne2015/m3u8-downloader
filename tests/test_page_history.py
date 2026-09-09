@@ -188,3 +188,154 @@ def test_legacy_single_m3u8_field_migrates_to_downloads(tmp_path, monkeypatch):
     assert len(records[0]["downloads"]) == 1
     assert records[0]["downloads"][0]["m3u8_url"] == "https://cdn/x/a.m3u8"
     assert records[0]["m3u8_url"] == "https://cdn/x/a.m3u8"
+
+
+# ===========================================================================
+# 新增字段：title（网页名）/ output_path（打开位置）+ 只展示最近一次 m3u8
+# ===========================================================================
+
+
+def test_extracted_writes_title(tmp_path, monkeypatch):
+    """record_page_extracted(title=) 写入网页名."""
+    _tmp_file(tmp_path, monkeypatch)
+    page_history.record_page_extracted("https://x/page", title="仙界法务部 第55集")
+    records = page_history.list_records()
+    assert records[0]["title"] == "仙界法务部 第55集"
+    assert records[0]["output_path"] == ""
+
+
+def test_extracted_blank_title_does_not_overwrite_existing(tmp_path, monkeypatch):
+    """空标题不覆盖已有标题（避免提取标题失败时把旧标题抹掉）。"""
+    _tmp_file(tmp_path, monkeypatch)
+    page_history.record_page_extracted("https://x/page", title="原标题")
+    page_history.record_page_extracted("https://x/page")  # 未传 title
+    page_history.record_page_extracted("https://x/page", title="   ")  # 空白
+    records = page_history.list_records()
+    assert records[0]["title"] == "原标题"
+
+
+def test_extracted_non_blank_title_updates_existing(tmp_path, monkeypatch):
+    """同一页重新提取拿到新标题 → 更新为该标题."""
+    _tmp_file(tmp_path, monkeypatch)
+    page_history.record_page_extracted("https://x/page", title="旧标题")
+    page_history.record_page_extracted("https://x/page", title="新标题")
+    assert page_history.list_records()[0]["title"] == "新标题"
+
+
+def test_downloaded_writes_output_path(tmp_path, monkeypatch):
+    """record_page_downloaded(output_path=) 写入最近一次成功下载的输出路径。"""
+    _tmp_file(tmp_path, monkeypatch)
+    page_history.record_page_downloaded(
+        "https://x/page", "https://cdn/x/a.m3u8", output_path="D:\\out\\a.mp4"
+    )
+    records = page_history.list_records()
+    assert records[0]["output_path"] == "D:\\out\\a.mp4"
+
+
+def test_output_path_keeps_latest_download(tmp_path, monkeypatch):
+    """多次下载 → output_path 始终为最近一次下载的输出路径。"""
+    _tmp_file(tmp_path, monkeypatch)
+    page_history.record_page_downloaded(
+        "https://x/page", "https://cdn/x/a.m3u8", output_path="D:\\out\\first.mp4"
+    )
+    page_history.record_page_downloaded(
+        "https://x/page", "https://cdn/x/b.m3u8", output_path="D:\\out\\second.mp4"
+    )
+    assert page_history.list_records()[0]["output_path"] == "D:\\out\\second.mp4"
+
+
+def test_blank_output_path_does_not_overwrite_existing(tmp_path, monkeypatch):
+    """未传/空 output_path 不覆盖已有路径（记录仍可定位）。"""
+    _tmp_file(tmp_path, monkeypatch)
+    page_history.record_page_downloaded(
+        "https://x/page", "https://cdn/x/a.m3u8", output_path="D:\\out\\a.mp4"
+    )
+    page_history.record_page_downloaded("https://x/page", "https://cdn/x/b.m3u8")
+    assert page_history.list_records()[0]["output_path"] == "D:\\out\\a.mp4"
+
+
+def test_title_and_output_path_persist_round_trip(tmp_path, monkeypatch):
+    """title / output_path 持久化往返（写盘后重载仍在）。"""
+    p = _tmp_file(tmp_path, monkeypatch)
+    page_history.record_page_extracted("https://x/page", title="网页名A")
+    page_history.record_page_downloaded(
+        "https://x/page", "https://cdn/x/a.m3u8", output_path="D:\\out\\a.mp4"
+    )
+    raw = json.loads(p.read_text(encoding="utf-8"))
+    entry = raw["records"][0]
+    assert entry["title"] == "网页名A"
+    assert entry["output_path"] == "D:\\out\\a.mp4"
+    records = page_history.list_records()
+    assert records[0]["title"] == "网页名A"
+    assert records[0]["output_path"] == "D:\\out\\a.mp4"
+
+
+def test_legacy_record_without_new_fields_degrades_to_empty(tmp_path, monkeypatch):
+    """旧记录（无 title / output_path）读取不报错，安全降级为空串。"""
+    p = _tmp_file(tmp_path, monkeypatch)
+    p.write_text(json.dumps({"records": [
+        {"page_url": "https://x/old", "status": "downloaded",
+         "m3u8_url": "https://cdn/x/a.m3u8", "timestamp": "2026-01-01 00:00:00"},
+        {"page_url": "https://x/older", "status": "extracted",
+         "timestamp": "2025-12-31 00:00:00"},
+    ]}), encoding="utf-8")
+    records = page_history.list_records()
+    assert len(records) == 2
+    for record in records:
+        assert record["title"] == ""
+        assert record["output_path"] == ""
+    # 旧记录仍可正常读写：追加下载不应报错，且新字段被补齐
+    page_history.record_page_downloaded(
+        "https://x/old", "https://cdn/x/b.m3u8", output_path="D:\\out\\b.mp4"
+    )
+    after = {r["page_url"]: r for r in page_history.list_records()}
+    assert after["https://x/old"]["output_path"] == "D:\\out\\b.mp4"
+    assert after["https://x/old"]["title"] == ""
+    # 状态/历史 m3u8 不受影响
+    assert after["https://x/old"]["status"] == page_history.STATUS_DOWNLOADED
+    assert len(after["https://x/old"]["downloads"]) == 2
+
+
+def test_legacy_record_failed_path_keeps_new_fields(tmp_path, monkeypatch):
+    """旧记录走 record_page_failed 分支也不丢新字段（不抛 KeyError）。"""
+    p = _tmp_file(tmp_path, monkeypatch)
+    p.write_text(json.dumps({"records": [
+        {"page_url": "https://x/old", "status": "extracted",
+         "timestamp": "2026-01-01 00:00:00"},
+    ]}), encoding="utf-8")
+    page_history.record_page_failed("https://x/old")
+    records = page_history.list_records()
+    assert records[0]["status"] == page_history.STATUS_FAILED
+    assert records[0]["title"] == ""
+    assert records[0]["output_path"] == ""
+
+
+def test_latest_m3u8_url_returns_most_recent(tmp_path, monkeypatch):
+    """只取最近一次下载的 m3u8（downloads 末项），不是全部拼接。"""
+    _tmp_file(tmp_path, monkeypatch)
+    page_history.record_page_downloaded("https://x/page", "https://cdn/x/hd.m3u8")
+    page_history.record_page_downloaded("https://x/page", "https://cdn/x/sd.m3u8")
+    page_history.record_page_downloaded("https://x/page", "https://cdn/x/latest.m3u8")
+    record = page_history.list_records()[0]
+    # 记录本身仍完整保留全部历史（不破坏观察 D）
+    assert len(record["downloads"]) == 3
+    assert page_history.latest_m3u8_url(record) == "https://cdn/x/latest.m3u8"
+    # 最近一次不能带出其它 m3u8（旧行为用「 | 」/换行拼接全部）
+    assert "|" not in page_history.latest_m3u8_url(record)
+    assert "\n" not in page_history.latest_m3u8_url(record)
+
+
+def test_latest_m3u8_url_falls_back_to_legacy_field():
+    """无 downloads（旧记录）时回退 m3u8_url 字段第一行。"""
+    assert page_history.latest_m3u8_url({
+        "page_url": "https://x/page", "downloads": [],
+        "m3u8_url": "https://cdn/x/a.m3u8\nhttps://cdn/x/b.m3u8",
+    }) == "https://cdn/x/a.m3u8"
+
+
+def test_latest_m3u8_url_edge_cases():
+    """空记录 / 空 downloads / 非法入参 → 空串，不抛异常。"""
+    assert page_history.latest_m3u8_url({}) == ""
+    assert page_history.latest_m3u8_url({"downloads": [], "m3u8_url": ""}) == ""
+    assert page_history.latest_m3u8_url(None) == ""
+    assert page_history.latest_m3u8_url("not-a-dict") == ""
