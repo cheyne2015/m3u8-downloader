@@ -2410,6 +2410,9 @@ class M3U8DownloaderGUI:
             # 功能二：记住本次下载对应的网页（记录下载成功/失败用）。
             self._inflight_download_url = job.url
             self._inflight_download_page_url = job.source_page_url
+            # 记住输出路径（已过同名覆盖/自动改名），下载成功后写入记录
+            # 供「下载记录 → 打开位置」定位；与 _start_download 入口保持一致。
+            self._inflight_download_output_path = output_path
 
             self._download_thread = threading.Thread(
                 target=self._download_worker,

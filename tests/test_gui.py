@@ -1795,3 +1795,43 @@ class TestPageHistoryRecordWiring:
         assert records[0]["status"] == page_history.STATUS_FAILED
         assert records[0]["output_path"] == ""
         assert page_history_gui._inflight_download_output_path == ""
+
+
+def test_run_next_job_records_output_path(page_history_gui, monkeypatch, tmp_path):
+    """「下载选中」走 _run_next_job 串行队列，同样必须把最终 output_path 记入记录.
+
+    回归防护：此前只有单文件入口 _start_download 设置了
+    _inflight_download_output_path，_run_next_job 漏了赋值 → 主力下载路径
+    （下载选中）记录不到 output_path，「下载记录 → 打开位置」定位不到文件。
+    """
+    from m3u8_downloader import page_history
+
+    gui = page_history_gui
+    gui._dir_var.get.return_value = str(tmp_path)
+    gui._filename_var.get.return_value = "video.mp4"
+    gui._candidate_page_url = "https://example.com/page"
+    gui._page_title = "Example Page"
+    gui._tree.selection.return_value = ("i1",)
+    gui._tree.item.return_value = (
+        1, "", "", "", "", "", "", "https://cdn.example/1.m3u8",
+    )
+    # 屏蔽真实下载线程（headless 且不起网络）
+    monkeypatch.setattr(gui, "_download_worker", lambda *a, **kw: None)
+    # 真实流程：先「提取网页」写入记录（带网页名），再「下载选中」
+    page_history.record_page_extracted(gui._candidate_page_url, gui._page_title)
+
+    gui._download_selected()
+
+    expected = os.path.join(str(tmp_path), "video.mp4")
+    assert gui._downloading, "应已通过 _run_next_job 启动下载"
+    assert gui._inflight_download_output_path == expected, (
+        "_run_next_job 未记录 output_path：实际=%r 期望=%r"
+        % (gui._inflight_download_output_path, expected)
+    )
+
+    gui._on_download_done("success")
+    records = page_history.list_records()
+    assert records, "下载成功后应写入网页下载记录"
+    assert records[0]["output_path"] == expected
+    assert records[0]["title"] == "Example Page"
+
