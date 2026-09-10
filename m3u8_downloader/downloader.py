@@ -62,6 +62,12 @@ class _SpeedLimiter:
                 rate = max(1, int(self._rate_source()))
                 delay = self._bytes / rate - (self._clock() - self._started)
 
+    def rebase(self) -> None:
+        """从当前时刻重新计算额度，避免运行中改限速继承旧账。"""
+        with self._lock:
+            self._started = self._clock()
+            self._bytes = 0
+
 
 class _CombinedSpeedLimiter:
     def __init__(self, *limiters) -> None:
@@ -396,6 +402,8 @@ class M3U8Downloader:
         self._cache_job_key: Optional[str] = None
         self._cache_job_lock: Optional[_CacheJobLock] = None
         self._cache_lock_draining = False
+        self._cleanup_complete = threading.Event()
+        self._cleanup_complete.set()
         self._session = create_http_session(
             timeout=timeout, no_proxy=no_proxy, proxy=proxy, pool_maxsize=max(1, workers)
         )
@@ -464,6 +472,11 @@ class M3U8Downloader:
         finally:
             self._release_cache_job_lock()
             self._cache_lock_draining = False
+            self._cleanup_complete.set()
+
+    def wait_for_cleanup(self) -> None:
+        """等待取消后的分片线程彻底退出并释放缓存文件。"""
+        self._cleanup_complete.wait()
 
     def cancel(self) -> None:
         """请求停止；协调线程会轮询该状态。"""
@@ -738,6 +751,7 @@ class M3U8Downloader:
                 self._drain_cancelled_executor(executor)
             else:
                 self._cache_lock_draining = True
+                self._cleanup_complete.clear()
                 cleanup_thread = threading.Thread(
                     target=self._drain_cancelled_executor,
                     args=(executor,),

@@ -2,7 +2,12 @@
 
 from pathlib import Path
 
-from m3u8_downloader.downloader_adapter_v2 import ExistingDownloaderAdapter
+import pytest
+
+from m3u8_downloader.downloader_adapter_v2 import (
+    ExistingDownloaderAdapter,
+    _SharedGlobalSpeedPool,
+)
 from m3u8_downloader.tasking import (
     CreateTaskRequest,
     SQLiteTaskRepository,
@@ -55,3 +60,49 @@ def test_adapter_passes_threads_retry_proxy_and_callbacks(tmp_path):
     assert result == output
     assert progress == [{"downloaded": 5, "total": 10}]
     assert logs == ["正在下载"]
+
+
+def test_adapter_waits_for_cancelled_downloader_cleanup_before_returning(tmp_path):
+    calls = []
+
+    class FakeDownloader:
+        def __init__(self, **_kwargs):
+            pass
+
+        def download(self):
+            calls.append("download")
+            raise RuntimeError("已暂停")
+
+        def wait_for_cleanup(self):
+            calls.append("cleanup")
+
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8",
+        save_directory=str(tmp_path),
+    ))[0]
+    item = service.list_items(task.id)[0]
+
+    with pytest.raises(RuntimeError, match="已暂停"):
+        ExistingDownloaderAdapter(downloader_factory=FakeDownloader).download(
+            task,
+            item,
+            tmp_path / "video.mp4",
+            stop_event=None,
+            on_progress=lambda _value: None,
+            on_log=lambda _message: None,
+        )
+
+    assert calls == ["download", "cleanup"]
+
+
+def test_changing_global_speed_limit_rebases_shared_limiter():
+    pool = _SharedGlobalSpeedPool(1_000_000)
+    limiter = pool.acquire()
+    limiter._bytes = 60_000_000
+    limiter._started = -1
+
+    pool.set_limit(10_000_000)
+
+    assert limiter._bytes == 0
+    assert limiter._started >= 0

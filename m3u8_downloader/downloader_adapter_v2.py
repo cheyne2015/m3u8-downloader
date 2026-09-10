@@ -26,6 +26,7 @@ class _SharedGlobalSpeedPool:
     def set_limit(self, limit: int) -> None:
         with self._lock:
             self._limit = max(0, int(limit))
+        self._limiter.rebase()
 
 
 class ExistingDownloaderAdapter:
@@ -61,7 +62,12 @@ class ExistingDownloaderAdapter:
                     session.headers["User-Agent"] = settings.user_agent
                 if settings.protected_cookie:
                     session.headers["Cookie"] = unprotect_secret(settings.protected_cookie)
-            result = downloader.download()
-            return Path(result)
+            try:
+                result = downloader.download()
+                return Path(result)
+            finally:
+                wait_for_cleanup = getattr(downloader, "wait_for_cleanup", None)
+                if wait_for_cleanup is not None:
+                    wait_for_cleanup()
         finally:
             self._global_pool.release()
