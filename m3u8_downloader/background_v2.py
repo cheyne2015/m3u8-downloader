@@ -84,6 +84,8 @@ class TaskBackgroundController(QObject):
         self.dispatch()
 
     def dispatch(self) -> None:
+        if self._extracting or self._downloading:
+            self.changed.emit()
         settings = self._service.load_app_settings()
         tasks = self._service.list_tasks()
         plan = self._scheduler.plan(

@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QSplitter,
     QStackedWidget,
@@ -116,7 +117,7 @@ _ITEM_STATUS_TEXT = {
 
 
 class TaskCard(QWidget):
-    def __init__(self, task: Task, parent: QWidget | None = None) -> None:
+    def __init__(self, task: Task, items=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 10, 14, 10)
@@ -130,6 +131,26 @@ class TaskCard(QWidget):
         path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(name)
         layout.addWidget(self.status_label)
+        selected = [item for item in (items or []) if item.status.value != "unselected"]
+        if selected:
+            total = sum(item.total_bytes or item.estimated_bytes or 0 for item in selected)
+            done = sum(
+                (item.total_bytes or item.estimated_bytes or 0)
+                if item.status.value in {"completed", "skipped"}
+                else item.downloaded_bytes
+                for item in selected
+            )
+            if total:
+                progress_value = max(0, min(100, int(done * 100 / total)))
+            else:
+                handled = sum(item.status.value in {"completed", "skipped"} for item in selected)
+                progress_value = int(handled * 100 / len(selected))
+            progress = QProgressBar()
+            progress.setRange(0, 100)
+            progress.setValue(progress_value)
+            progress.setTextVisible(True)
+            progress.setFixedHeight(8)
+            layout.addWidget(progress)
         layout.addWidget(path)
 
 
@@ -506,6 +527,11 @@ class MainWindow(QMainWindow):
         self._refresh_logs()
 
     def refresh_tasks(self) -> None:
+        selected_id = ""
+        current_list = self.completed_list if self.pages.currentIndex() == 1 else self.task_list
+        current = current_list.currentItem()
+        if current is not None:
+            selected_id = current.data(Qt.ItemDataRole.UserRole).id
         query = self.search_edit.text().strip().lower() if hasattr(self, "search_edit") else ""
         tasks = self._service.list_tasks()
         self.task_list.clear()
@@ -520,9 +546,12 @@ class MainWindow(QMainWindow):
             )
             item = QListWidgetItem(task.name)
             item.setData(Qt.ItemDataRole.UserRole, task)
-            item.setSizeHint(QSize(0, 72))
+            task_items = self._service.list_items(task.id)
+            item.setSizeHint(QSize(0, 88 if task_items else 72))
             target.addItem(item)
-            target.setItemWidget(item, TaskCard(task))
+            target.setItemWidget(item, TaskCard(task, task_items))
+            if task.id == selected_id:
+                target.setCurrentItem(item)
 
     def _show_task_detail(self, current: QListWidgetItem | None, _previous) -> None:
         if current is None:
@@ -541,7 +570,16 @@ class MainWindow(QMainWindow):
                 estimate = f"约 {item.duration_seconds:.0f} 秒"
             else:
                 estimate = "正在估算"
-            values = [display_name, estimate, _ITEM_STATUS_TEXT[item.status.value], "0%"]
+            total = item.total_bytes or item.estimated_bytes or 0
+            progress_value = int(item.downloaded_bytes * 100 / total) if total else 0
+            if item.status.value == "completed":
+                progress_value = 100
+            values = [
+                display_name,
+                estimate,
+                _ITEM_STATUS_TEXT[item.status.value],
+                f"{max(0, min(100, progress_value))}%",
+            ]
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(value)
                 cell.setToolTip(item.source_url)

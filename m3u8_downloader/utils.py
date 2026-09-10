@@ -304,10 +304,11 @@ def is_ffmpeg_available() -> bool:
         True 如果 ffmpeg 可用.
     """
     import subprocess
+    from m3u8_downloader.ffmpeg_v2 import resolve_ffmpeg_executable
 
     try:
         result = subprocess.run(
-            ["ffmpeg", "-version"],
+            [resolve_ffmpeg_executable(), "-version"],
             capture_output=True,
             text=True,
             timeout=10,

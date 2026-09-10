@@ -11,6 +11,7 @@ from typing import List, Optional
 
 from m3u8_downloader.parser import M3U8Segment
 from m3u8_downloader.utils import is_ffmpeg_available
+from m3u8_downloader.ffmpeg_v2 import resolve_ffmpeg_executable
 
 
 def _decrypt_segment(
@@ -112,7 +113,7 @@ def merge_with_ffmpeg_concat(
 
         # 调用 ffmpeg
         cmd = [
-            "ffmpeg",
+            resolve_ffmpeg_executable(),
             "-y",  # 覆盖输出
             "-f", "concat",
             "-safe", "0",
@@ -153,7 +154,7 @@ def convert_ts_to_mp4_ffmpeg(
         RuntimeError: 如果 ffmpeg 执行失败.
     """
     cmd = [
-        "ffmpeg",
+        resolve_ffmpeg_executable(),
         "-y",
         "-i", ts_path,
         "-c", "copy",
