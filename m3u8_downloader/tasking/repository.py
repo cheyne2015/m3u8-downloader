@@ -1,0 +1,204 @@
+"""SQLite任务仓库。"""
+
+import json
+import sqlite3
+from dataclasses import asdict
+from datetime import datetime
+from pathlib import Path
+from typing import Iterable, List
+
+from .models import (
+    DownloadStatus,
+    DownloadItem,
+    ExtractionStatus,
+    ItemStatus,
+    SelectionMode,
+    SourceKind,
+    Task,
+    TaskSettings,
+)
+
+
+class SQLiteTaskRepository:
+    """以SQLite持久化父任务，写入操作使用单事务。"""
+
+    def __init__(self, database_path) -> None:
+        self.database_path = Path(database_path)
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        self._initialize()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(str(self.database_path))
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    def _initialize(self) -> None:
+        with self._connect() as connection:
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id TEXT PRIMARY KEY,
+                    source_url TEXT NOT NULL,
+                    source_kind TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    save_directory TEXT NOT NULL,
+                    extraction_status TEXT NOT NULL,
+                    download_status TEXT NOT NULL,
+                    queue_position INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    selection_mode TEXT NOT NULL DEFAULT 'auto',
+                    settings_json TEXT NOT NULL
+                )
+            """)
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS download_items (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    source_url TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    output_index INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    estimated_bytes INTEGER,
+                    duration_seconds REAL,
+                    UNIQUE(task_id, source_url),
+                    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+                )
+            """)
+
+    def next_queue_position(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COALESCE(MAX(queue_position), 0) + 1 AS value FROM tasks"
+            ).fetchone()
+        return int(row["value"])
+
+    def add_many(self, tasks: Iterable[Task]) -> None:
+        rows = [(
+            task.id,
+            task.source_url,
+            task.source_kind.value,
+            task.name,
+            task.save_directory,
+            task.extraction_status.value,
+            task.download_status.value,
+            task.queue_position,
+            task.created_at.isoformat(),
+            task.updated_at.isoformat(),
+            task.selection_mode.value,
+            json.dumps(asdict(task.settings), ensure_ascii=False, separators=(",", ":")),
+        ) for task in tasks]
+        if not rows:
+            return
+        with self._connect() as connection:
+            connection.executemany("""
+                INSERT INTO tasks (
+                    id, source_url, source_kind, name, save_directory,
+                    extraction_status, download_status, queue_position,
+                    created_at, updated_at, selection_mode, settings_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, rows)
+
+    def save_many(self, tasks: Iterable[Task]) -> None:
+        """原子保存已有任务的可变快照。"""
+        rows = [(
+            task.source_url,
+            task.source_kind.value,
+            task.name,
+            task.save_directory,
+            task.extraction_status.value,
+            task.download_status.value,
+            task.queue_position,
+            task.created_at.isoformat(),
+            task.updated_at.isoformat(),
+            task.selection_mode.value,
+            json.dumps(asdict(task.settings), ensure_ascii=False, separators=(",", ":")),
+            task.id,
+        ) for task in tasks]
+        if not rows:
+            return
+        with self._connect() as connection:
+            connection.executemany("""
+                UPDATE tasks SET
+                    source_url = ?, source_kind = ?, name = ?, save_directory = ?,
+                    extraction_status = ?, download_status = ?, queue_position = ?,
+                    created_at = ?, updated_at = ?, selection_mode = ?, settings_json = ?
+                WHERE id = ?
+            """, rows)
+
+    def list_tasks(self) -> List[Task]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM tasks ORDER BY queue_position, created_at, id"
+            ).fetchall()
+        return [self._from_row(row) for row in rows]
+
+    def get_task(self, task_id: str) -> Task:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(task_id)
+        return self._from_row(row)
+
+    def add_items(self, items: Iterable[DownloadItem]) -> None:
+        rows = [(
+            item.id, item.task_id, item.source_url, item.label,
+            item.output_index, item.status.value, item.estimated_bytes,
+            item.duration_seconds,
+        ) for item in items]
+        if not rows:
+            return
+        with self._connect() as connection:
+            connection.executemany("""
+                INSERT OR IGNORE INTO download_items (
+                    id, task_id, source_url, label, output_index, status,
+                    estimated_bytes, duration_seconds
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, rows)
+
+    def list_items(self, task_id: str) -> List[DownloadItem]:
+        with self._connect() as connection:
+            rows = connection.execute("""
+                SELECT * FROM download_items WHERE task_id = ?
+                ORDER BY output_index, id
+            """, (task_id,)).fetchall()
+        return [DownloadItem(
+            id=row["id"], task_id=row["task_id"], source_url=row["source_url"],
+            label=row["label"], output_index=int(row["output_index"]),
+            status=ItemStatus(row["status"]),
+            estimated_bytes=row["estimated_bytes"],
+            duration_seconds=row["duration_seconds"],
+        ) for row in rows]
+
+    def save_items(self, items: Iterable[DownloadItem]) -> None:
+        rows = [(
+            item.source_url, item.label, item.output_index, item.status.value,
+            item.estimated_bytes, item.duration_seconds, item.id,
+        ) for item in items]
+        if not rows:
+            return
+        with self._connect() as connection:
+            connection.executemany("""
+                UPDATE download_items SET source_url = ?, label = ?,
+                    output_index = ?, status = ?, estimated_bytes = ?,
+                    duration_seconds = ? WHERE id = ?
+            """, rows)
+
+    @staticmethod
+    def _from_row(row: sqlite3.Row) -> Task:
+        settings = TaskSettings(**json.loads(row["settings_json"]))
+        return Task(
+            id=row["id"],
+            source_url=row["source_url"],
+            source_kind=SourceKind(row["source_kind"]),
+            name=row["name"],
+            save_directory=row["save_directory"],
+            extraction_status=ExtractionStatus(row["extraction_status"]),
+            download_status=DownloadStatus(row["download_status"]),
+            queue_position=int(row["queue_position"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+            selection_mode=SelectionMode(row["selection_mode"]),
+            settings=settings,
+        )
