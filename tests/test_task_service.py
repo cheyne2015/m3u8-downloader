@@ -46,9 +46,12 @@ def test_user_can_create_and_restore_page_and_m3u8_tasks(tmp_path):
     assert created[1].name == "video"
     assert [task.queue_position for task in created] == [1, 2]
     assert all(task.save_directory == str(tmp_path / "downloads") for task in created)
-    assert all(task.settings.download_task_limit == 3 for task in created)
-    assert all(task.settings.extraction_task_limit == 3 for task in created)
     assert all(task.settings.auto_download_threshold == 3 for task in created)
+    assert all(task.settings.segment_threads == 8 for task in created)
+    direct_items = repository.list_items("task-m3u8")
+    assert len(direct_items) == 1
+    assert direct_items[0].source_url == "https://cdn.example/video/master.m3u8?token=secret"
+    assert direct_items[0].status is ItemStatus.WAITING
 
     reopened = SQLiteTaskRepository(tmp_path / "tasks.db")
     restored = reopened.list_tasks()

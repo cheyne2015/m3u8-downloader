@@ -15,6 +15,7 @@ setup(
         "pycryptodome>=3.18.0",
         "tqdm>=4.65.0",
         "beautifulsoup4>=4.12.0",
+        "PySide6>=6.8.0",
     ],
     extras_require={
         # 深度模式（无头浏览器抽取）可选依赖：

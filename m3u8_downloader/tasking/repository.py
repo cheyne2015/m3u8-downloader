@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Iterable, List
 
 from .models import (
+    AppSettings,
     DownloadStatus,
     DownloadItem,
     ExtractionStatus,
@@ -51,6 +52,12 @@ class SQLiteTaskRepository:
                 )
             """)
             connection.execute("""
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                    settings_json TEXT NOT NULL
+                )
+            """)
+            connection.execute("""
                 CREATE TABLE IF NOT EXISTS download_items (
                     id TEXT PRIMARY KEY,
                     task_id TEXT NOT NULL,
@@ -71,6 +78,21 @@ class SQLiteTaskRepository:
                 "SELECT COALESCE(MAX(queue_position), 0) + 1 AS value FROM tasks"
             ).fetchone()
         return int(row["value"])
+
+    def load_app_settings(self) -> AppSettings:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT settings_json FROM app_settings WHERE singleton = 1"
+            ).fetchone()
+        return AppSettings() if row is None else AppSettings(**json.loads(row["settings_json"]))
+
+    def save_app_settings(self, settings: AppSettings) -> None:
+        payload = json.dumps(asdict(settings), ensure_ascii=False, separators=(",", ":"))
+        with self._connect() as connection:
+            connection.execute("""
+                INSERT INTO app_settings(singleton, settings_json) VALUES(1, ?)
+                ON CONFLICT(singleton) DO UPDATE SET settings_json = excluded.settings_json
+            """, (payload,))
 
     def add_many(self, tasks: Iterable[Task]) -> None:
         rows = [(

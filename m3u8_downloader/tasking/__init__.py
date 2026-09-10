@@ -1,6 +1,7 @@
 """新版父子任务管理公共接口。"""
 
 from .models import (
+    AppSettings,
     Candidate,
     CreateTaskRequest,
     DownloadItem,
@@ -17,6 +18,7 @@ from .scheduler import SchedulePlan, TaskScheduler
 from .service import TaskService
 
 __all__ = [
+    "AppSettings",
     "Candidate",
     "CreateTaskRequest",
     "DownloadItem",

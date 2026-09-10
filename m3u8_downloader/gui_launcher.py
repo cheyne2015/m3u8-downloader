@@ -1,6 +1,7 @@
-"""GUI 专用启动入口：双击无控制台 EXE 时固定启动图形界面."""
+"""新版 GUI 专用启动入口。"""
 
-from m3u8_downloader.gui import run_gui
+from m3u8_downloader.gui_v2 import run_gui_v2
+from m3u8_downloader.runtime_v2 import build_task_service
 
 if __name__ == "__main__":
-    run_gui()
+    raise SystemExit(run_gui_v2(build_task_service()))

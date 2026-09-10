@@ -10,6 +10,7 @@ from typing import Callable, List
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from .models import (
+    AppSettings,
     Candidate,
     CreateTaskRequest,
     DownloadItem,
@@ -36,10 +37,12 @@ class TaskService:
         *,
         clock: Callable[[], datetime] = datetime.now,
         id_factory: Callable[[], str] = lambda: str(uuid.uuid4()),
+        item_id_factory: Callable[[], str] = lambda: str(uuid.uuid4()),
     ) -> None:
         self._repository = repository
         self._clock = clock
         self._id_factory = id_factory
+        self._item_id_factory = item_id_factory
 
     def create_tasks(self, request: CreateTaskRequest) -> List[Task]:
         addresses = self._normalize_addresses(request.addresses)
@@ -66,7 +69,28 @@ class TaskService:
                 settings=request.settings,
             ))
         self._repository.add_many(tasks)
+        direct_items = [DownloadItem(
+            id=self._item_id_factory(),
+            task_id=task.id,
+            source_url=task.source_url,
+            label=task.name,
+            output_index=1,
+            status=ItemStatus.WAITING,
+        ) for task in tasks if task.source_kind is SourceKind.DIRECT_M3U8]
+        self._repository.add_items(direct_items)
         return tasks
+
+    def list_tasks(self) -> List[Task]:
+        return self._repository.list_tasks()
+
+    def list_items(self, task_id: str) -> List[DownloadItem]:
+        return self._repository.list_items(task_id)
+
+    def load_app_settings(self) -> AppSettings:
+        return self._repository.load_app_settings()
+
+    def save_app_settings(self, settings: AppSettings) -> None:
+        self._repository.save_app_settings(settings)
 
     def restore_tasks_after_restart(self) -> List[Task]:
         """将中断时仍在执行的状态落盘为暂停，并返回恢复后的任务。"""
@@ -112,7 +136,7 @@ class TaskService:
                 continue
             known_urls.add(url)
             added.append(DownloadItem(
-                id=self._id_factory(), task_id=task_id, source_url=url,
+                id=self._item_id_factory(), task_id=task_id, source_url=url,
                 label=candidate.label, output_index=next_index,
                 status=ItemStatus.UNSELECTED,
                 estimated_bytes=candidate.estimated_bytes,
