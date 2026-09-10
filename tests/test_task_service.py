@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +13,7 @@ from m3u8_downloader.tasking import (
     DuplicateSourceError,
     ExtractionStatus,
     ItemStatus,
+    OutputPlanner,
     SelectionMode,
     SourceKind,
     SQLiteTaskRepository,
@@ -219,3 +221,153 @@ def test_existing_source_requires_explicit_duplicate_creation(tmp_path):
     duplicate = service.create_tasks(request, allow_duplicates=True)[0]
     assert duplicate.id != original.id
     assert duplicate.queue_position == 2
+
+
+def test_stop_extraction_applies_threshold_to_current_candidates(tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    service = TaskService(repository, id_factory=lambda: "parent")
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42", save_directory=str(tmp_path)
+    ))[0]
+    service.start_extraction(task.id)
+    service.add_candidates(task.id, [
+        Candidate("https://cdn.example/1.m3u8"),
+        Candidate("https://cdn.example/2.m3u8"),
+    ])
+
+    stopped = service.stop_extraction(task.id)
+
+    assert stopped.extraction_status is ExtractionStatus.COMPLETED
+    assert stopped.download_status is DownloadStatus.WAITING
+    assert all(item.status is ItemStatus.WAITING for item in service.list_items(task.id))
+
+
+def test_retry_failed_items_returns_parent_to_download_queue(tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    service = TaskService(repository, id_factory=lambda: "parent")
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8", save_directory=str(tmp_path)
+    ))[0]
+    item = service.list_items(task.id)[0]
+    service.fail_item(task.id, item.id, "断线")
+
+    retried = service.retry_failed_items(task.id)
+
+    assert retried.download_status is DownloadStatus.WAITING
+    assert retried.last_error == ""
+    assert service.get_item(task.id, item.id).status is ItemStatus.WAITING
+
+
+def test_redownload_item_creates_independent_parent_copy(tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    task_ids = iter(["original", "copy"])
+    item_ids = iter(["original-item", "copy-item"])
+    service = TaskService(
+        repository,
+        id_factory=lambda: next(task_ids),
+        item_id_factory=lambda: next(item_ids),
+    )
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8", save_directory=str(tmp_path)
+    ))[0]
+    original_item = service.list_items(task.id)[0]
+    output = tmp_path / "video.mp4"
+    output.write_bytes(b"done")
+    service.complete_item(task.id, original_item.id, output)
+    service.finish_parent_if_handled(task.id)
+
+    copied = service.redownload_item(task.id, original_item.id)
+
+    assert copied.id == "copy"
+    assert copied.download_status is DownloadStatus.WAITING
+    assert service.get_task(task.id).download_status is DownloadStatus.COMPLETED
+    assert service.get_item(task.id, original_item.id).output_path == str(output)
+    copy_item = service.list_items(copied.id)[0]
+    assert copy_item.id == "copy-item"
+    assert copy_item.source_url == original_item.source_url
+    assert copy_item.status is ItemStatus.WAITING
+
+
+def test_rename_output_file_changes_disk_and_persisted_path(tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    service = TaskService(repository, id_factory=lambda: "parent")
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8", save_directory=str(tmp_path)
+    ))[0]
+    item = service.list_items(task.id)[0]
+    output = tmp_path / "video.mp4"
+    output.write_bytes(b"done")
+    service.complete_item(task.id, item.id, output)
+
+    renamed = service.rename_output_file(task.id, item.id, "新名称")
+
+    assert renamed.output_path == str(tmp_path / "新名称.mp4")
+    assert not output.exists()
+    assert Path(renamed.output_path).read_bytes() == b"done"
+
+
+def test_pause_one_item_keeps_other_selected_items_runnable(tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    service = TaskService(repository, id_factory=lambda: "parent")
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42", save_directory=str(tmp_path)
+    ))[0]
+    items = service.add_candidates(task.id, [
+        Candidate("https://cdn.example/1.m3u8"),
+        Candidate("https://cdn.example/2.m3u8"),
+    ])
+    service.finish_extraction(task.id)
+    service.start_item(task.id, items[0].id)
+
+    paused = service.pause_item(task.id, items[0].id)
+
+    assert paused.download_status is DownloadStatus.WAITING
+    assert [item.status for item in service.list_items(task.id)] == [
+        ItemStatus.PAUSED, ItemStatus.WAITING,
+    ]
+
+    service.resume_item(task.id, items[0].id)
+    assert all(item.status is ItemStatus.WAITING for item in service.list_items(task.id))
+
+
+def test_stop_extraction_completes_parent_when_selected_download_already_finished(tmp_path):
+    service = TaskService(
+        SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "parent"
+    )
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42", save_directory=str(tmp_path)
+    ))[0]
+    service.start_extraction(task.id)
+    item = service.add_candidates(
+        task.id, [Candidate("https://cdn.example/1.m3u8")]
+    )[0]
+    service.select_items_for_download(task.id, [item.id])
+    output = tmp_path / "done.mp4"; output.write_bytes(b"done")
+    service.complete_item(task.id, item.id, output)
+    assert service.finish_parent_if_handled(task.id).download_status is DownloadStatus.RUNNING
+
+    stopped = service.stop_extraction(task.id)
+
+    assert stopped.download_status is DownloadStatus.COMPLETED
+
+
+def test_late_title_replans_only_unstarted_outputs(tmp_path):
+    service = TaskService(
+        SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "parent"
+    )
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42", save_directory=str(tmp_path)
+    ))[0]
+    items = service.add_candidates(task.id, [
+        Candidate("https://cdn.example/1.m3u8"), Candidate("https://cdn.example/2.m3u8")
+    ])
+    service.finish_extraction(task.id)
+    service.prepare_output_paths(task.id, OutputPlanner())
+    service.start_item(task.id, items[0].id)
+    before = service.list_items(task.id)
+
+    service.apply_page_title(task.id, "晚到标题")
+    after = service.list_items(task.id)
+
+    assert after[0].output_path == before[0].output_path
+    assert after[1].output_path == ""

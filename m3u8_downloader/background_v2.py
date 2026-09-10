@@ -57,6 +57,8 @@ class TaskBackgroundController(QObject):
         self._workers: set[_Worker] = set()
         self._extract_events: dict[str, threading.Event] = {}
         self._download_events: dict[str, threading.Event] = {}
+        self._completion_emitted: set[str] = set()
+        self._pending_deletions: dict[str, bool] = {}
         self._timer = QTimer(self)
         self._timer.setInterval(max(10, poll_interval_ms))
         self._timer.timeout.connect(self.dispatch)
@@ -83,10 +85,54 @@ class TaskBackgroundController(QObject):
         self.changed.emit()
         self.dispatch()
 
+    def pause_item(self, task_id: str, item_id: str) -> None:
+        item = self._service.get_item(task_id, item_id)
+        event = self._download_events.get(task_id)
+        if event is not None and item.status.value == "downloading":
+            event.set()
+        self._service.pause_item(task_id, item_id)
+        self.changed.emit()
+
+    def resume_item(self, task_id: str, item_id: str) -> None:
+        self._service.resume_item(task_id, item_id)
+        self.changed.emit()
+        self.dispatch()
+
+    def delete_task(self, task_id: str, *, delete_outputs: bool) -> None:
+        extract_event = self._extract_events.get(task_id)
+        download_event = self._download_events.get(task_id)
+        if extract_event is not None:
+            setattr(extract_event, "delete_requested", True)
+            extract_event.set()
+        if download_event is not None:
+            setattr(download_event, "delete_requested", True)
+            download_event.set()
+        if task_id in self._extracting or task_id in self._downloading:
+            self._pending_deletions[task_id] = delete_outputs
+        else:
+            self._service.delete_task(task_id, delete_outputs=delete_outputs)
+        self.changed.emit()
+
+    def stop_extraction(self, task_id: str) -> None:
+        event = self._extract_events.get(task_id)
+        if event is not None:
+            event.set()
+        task = self._service.stop_extraction(task_id)
+        if (
+            task.download_status.value == "completed"
+            and task.id not in self._completion_emitted
+        ):
+            self._completion_emitted.add(task.id)
+            self.parent_completed.emit(task.id, task.name)
+        self.changed.emit()
+        self.dispatch()
+
     def dispatch(self) -> None:
         if self._extracting or self._downloading:
             self.changed.emit()
         settings = self._service.load_app_settings()
+        for task in self._service.promote_due_retries():
+            self._record_log(task.id, "下载", "自动重试等待结束，任务已重新排队")
         tasks = self._service.list_tasks()
         plan = self._scheduler.plan(
             tasks,
@@ -141,12 +187,25 @@ class TaskBackgroundController(QObject):
             worker for worker in self._workers
             if not (worker.kind == kind and worker.task_id == task_id)
         }
+        if (
+            task_id in self._pending_deletions
+            and task_id not in self._extracting
+            and task_id not in self._downloading
+        ):
+            delete_outputs = self._pending_deletions.pop(task_id)
+            self._service.delete_task(task_id, delete_outputs=delete_outputs)
+            self.changed.emit()
+            return
         if error:
             self._service.add_log(task_id, "错误", kind, error)
             self.log.emit(task_id, f"操作失败：{error}")
-        elif kind == "download":
+        else:
             task = self._service.get_task(task_id)
-            if task.download_status.value == "completed":
+            if (
+                task.download_status.value == "completed"
+                and task.id not in self._completion_emitted
+            ):
+                self._completion_emitted.add(task.id)
                 self.parent_completed.emit(task.id, task.name)
         self.changed.emit()
         if self._timer.isActive():

@@ -29,6 +29,7 @@ def test_adapter_passes_threads_retry_proxy_and_callbacks(tmp_path):
         request_retries=4,
         proxy="127.0.0.1:7897",
         timeout_seconds=45,
+        speed_limit=2_000_000,
     )
     service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
     task = service.create_tasks(CreateTaskRequest(
@@ -50,7 +51,7 @@ def test_adapter_passes_threads_retry_proxy_and_callbacks(tmp_path):
     assert captured["max_retries"] == 4
     assert captured["proxy"] == "127.0.0.1:7897"
     assert captured["timeout"] == 45
+    assert captured["speed_limit"] == 2_000_000
     assert result == output
     assert progress == [{"downloaded": 5, "total": 10}]
     assert logs == ["正在下载"]
-

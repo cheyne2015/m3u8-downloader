@@ -39,10 +39,19 @@ class TaskCoordinator:
                 self._service.add_candidates(task_id, list(candidates or []))
                 if stop_event.is_set():
                     return self._service.get_task(task_id)
+                has_valid = any(
+                    item.valid for item in self._service.list_items(task_id)
+                )
+                if deep and mode == "smart" and not has_valid:
+                    continue
+                if not has_valid:
+                    return self._service.fail_extraction(task_id, "未找到可下载的 m3u8 链接")
                 self._service.finish_extraction(task_id)
                 return self._service.finish_parent_if_handled(task_id)
             except Exception as exc:
                 last_error = exc
+                if stop_event.is_set():
+                    return self._service.get_task(task_id)
                 if deep and mode == "smart":
                     continue
                 self._service.fail_extraction(task_id, str(exc))

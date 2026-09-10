@@ -3,7 +3,9 @@
 import os
 import re
 import shutil
+import threading
 import uuid
+from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -51,6 +53,7 @@ class TaskService:
         self._clock = clock
         self._id_factory = id_factory
         self._item_id_factory = item_id_factory
+        self._task_locks = defaultdict(threading.RLock)
 
     def create_tasks(
         self, request: CreateTaskRequest, *, allow_duplicates: bool = False
@@ -86,7 +89,6 @@ class TaskService:
                 updated_at=now,
                 settings=request.settings,
             ))
-        self._repository.add_many(tasks)
         direct_items = [DownloadItem(
             id=self._item_id_factory(),
             task_id=task.id,
@@ -95,7 +97,7 @@ class TaskService:
             output_index=1,
             status=ItemStatus.WAITING,
         ) for task in tasks if task.source_kind is SourceKind.DIRECT_M3U8]
-        self._repository.add_items(direct_items)
+        self._repository.add_bundle(tasks, direct_items)
         return tasks
 
     def list_tasks(self) -> List[Task]:
@@ -165,13 +167,45 @@ class TaskService:
 
     def add_candidates(self, task_id: str, candidates: List[Candidate]) -> List[DownloadItem]:
         """把流式发现的候选加入父任务；新候选默认不选择。"""
+        with self._task_locks[task_id]:
+            task = self._repository.get_task(task_id)
+            if task.extraction_status in {
+                ExtractionStatus.COMPLETED,
+                ExtractionStatus.FAILED,
+                ExtractionStatus.NOT_REQUIRED,
+            }:
+                return []
+            return self._add_candidates_locked(task_id, candidates)
+
+    def _add_candidates_locked(
+        self, task_id: str, candidates: List[Candidate]
+    ) -> List[DownloadItem]:
         existing = self._repository.list_items(task_id)
-        known_urls = {item.source_url for item in existing}
+        known_by_url = {item.source_url: item for item in existing}
+        known_urls = set(known_by_url)
         next_index = max((item.output_index for item in existing), default=0) + 1
         added: List[DownloadItem] = []
         for candidate in candidates:
             url = candidate.url.strip()
-            if not url or url in known_urls:
+            if not url:
+                continue
+            if url in known_urls:
+                current = known_by_url[url]
+                improved = replace(
+                    current,
+                    label=candidate.label or current.label,
+                    estimated_bytes=(
+                        candidate.estimated_bytes
+                        if candidate.estimated_bytes is not None else current.estimated_bytes
+                    ),
+                    duration_seconds=(
+                        candidate.duration_seconds
+                        if candidate.duration_seconds is not None else current.duration_seconds
+                    ),
+                    valid=current.valid or candidate.valid,
+                )
+                if improved != current:
+                    self._repository.save_items([improved])
                 continue
             known_urls.add(url)
             added.append(DownloadItem(
@@ -208,6 +242,7 @@ class TaskService:
             updated_at=self._clock(),
         )
         self._repository.save_many([task])
+        self._clear_unstarted_output_paths(task_id)
         return task
 
     def rename_task(self, task_id: str, name: str) -> Task:
@@ -218,6 +253,27 @@ class TaskService:
             self._repository.get_task(task_id),
             name=name,
             name_edited=True,
+            updated_at=self._clock(),
+        )
+        self._repository.save_many([task])
+        self._clear_unstarted_output_paths(task_id)
+        return task
+
+    def _clear_unstarted_output_paths(self, task_id: str) -> None:
+        items = self._repository.list_items(task_id)
+        changed = [
+            replace(item, output_path="")
+            for item in items
+            if item.output_path
+            and item.downloaded_bytes == 0
+            and item.status in {ItemStatus.UNSELECTED, ItemStatus.WAITING}
+        ]
+        self._repository.save_items(changed)
+
+    def update_task_settings(self, task_id: str, settings) -> Task:
+        task = replace(
+            self._repository.get_task(task_id),
+            settings=settings,
             updated_at=self._clock(),
         )
         self._repository.save_many([task])
@@ -232,6 +288,36 @@ class TaskService:
         )
         self._repository.save_many([task])
         return task
+
+    def retry_extraction(self, task_id: str) -> Task:
+        task = self._repository.get_task(task_id)
+        if task.source_kind is SourceKind.DIRECT_M3U8:
+            raise ValueError("直接 m3u8 任务不需要提取")
+        task = replace(
+            task,
+            extraction_status=ExtractionStatus.WAITING,
+            download_status=(
+                task.download_status
+                if any(item.status is not ItemStatus.UNSELECTED for item in self.list_items(task_id))
+                else DownloadStatus.NOT_READY
+            ),
+            last_error="",
+            updated_at=self._clock(),
+        )
+        self._repository.save_many([task])
+        return task
+
+    def stop_extraction(self, task_id: str) -> Task:
+        """用户主动停止提取，并把当前候选立即视为最终结果。"""
+        task = self._repository.get_task(task_id)
+        if task.extraction_status in {
+            ExtractionStatus.NOT_REQUIRED,
+            ExtractionStatus.COMPLETED,
+            ExtractionStatus.FAILED,
+        }:
+            return task
+        self.finish_extraction(task_id)
+        return self.finish_parent_if_handled(task_id)
 
     def prepare_output_paths(self, task_id: str, planner) -> List[DownloadItem]:
         task = self._repository.get_task(task_id)
@@ -259,10 +345,17 @@ class TaskService:
         item = self.get_item(task_id, item_id)
         item = replace(
             item,
-            downloaded_bytes=max(0, int(progress.get("downloaded", item.downloaded_bytes))),
-            total_bytes=max(0, int(progress.get("total", item.total_bytes))),
+            downloaded_bytes=max(0, int(progress.get(
+                "downloaded", progress.get("total_bytes", item.downloaded_bytes)
+            ))),
+            total_bytes=max(0, int(progress.get("byte_total", item.total_bytes))),
+            progress_percent=max(0.0, min(100.0, float(progress.get(
+                "percent", item.progress_percent
+            )))),
+            speed_bps=max(0.0, float(progress.get("speed", item.speed_bps))),
+            eta_seconds=max(0.0, float(progress.get("eta", item.eta_seconds))),
         )
-        self._repository.save_items([item])
+        self._repository.update_item_progress(item)
 
     def complete_item(self, task_id: str, item_id: str, output_path) -> DownloadItem:
         size = os.path.getsize(output_path) if os.path.isfile(output_path) else 0
@@ -272,8 +365,16 @@ class TaskService:
             output_path=str(output_path),
             downloaded_bytes=size,
             total_bytes=size,
+            progress_percent=100.0,
+            speed_bps=0.0,
+            eta_seconds=0.0,
         )
         self._repository.save_items([item])
+        task = self._repository.get_task(task_id)
+        if task.retry_count or task.retry_at is not None or task.last_error:
+            self._repository.save_many([replace(
+                task, retry_count=0, retry_at=None, last_error="", updated_at=self._clock()
+            )])
         return item
 
     def fail_item(self, task_id: str, item_id: str, error: str) -> Task:
@@ -288,12 +389,247 @@ class TaskService:
         self._repository.save_many([task])
         return task
 
+    def retry_item(self, task_id: str, item_id: str) -> Task:
+        item = self.get_item(task_id, item_id)
+        if item.status not in {ItemStatus.FAILED, ItemStatus.SKIPPED}:
+            raise ValueError("只有失败或已跳过的下载项可以重试")
+        self._repository.save_items([replace(
+            item,
+            status=ItemStatus.WAITING,
+            downloaded_bytes=0,
+            total_bytes=0,
+            progress_percent=0.0,
+            speed_bps=0.0,
+            eta_seconds=0.0,
+        )])
+        task = replace(
+            self._repository.get_task(task_id),
+            download_status=DownloadStatus.WAITING,
+            last_error="",
+            retry_count=0,
+            retry_at=None,
+            updated_at=self._clock(),
+        )
+        self._repository.save_many([task])
+        return task
+
+    def retry_failed_items(self, task_id: str) -> Task:
+        failed = [
+            item for item in self._repository.list_items(task_id)
+            if item.status is ItemStatus.FAILED
+        ]
+        if not failed:
+            return self._repository.get_task(task_id)
+        self._repository.save_items([
+            replace(
+                item, status=ItemStatus.WAITING, downloaded_bytes=0, total_bytes=0,
+                progress_percent=0.0, speed_bps=0.0, eta_seconds=0.0,
+            )
+            for item in failed
+        ])
+        task = replace(
+            self._repository.get_task(task_id),
+            download_status=DownloadStatus.WAITING,
+            last_error="",
+            retry_count=0,
+            retry_at=None,
+            updated_at=self._clock(),
+        )
+        self._repository.save_many([task])
+        return task
+
+    def schedule_item_retry(self, task_id: str, item_id: str, error: str) -> Task:
+        task = self._repository.get_task(task_id)
+        if task.retry_count >= task.settings.task_retries:
+            return self.fail_item(task_id, item_id, error)
+        item = replace(self.get_item(task_id, item_id), status=ItemStatus.RETRY_WAIT)
+        self._repository.save_items([item])
+        task = replace(
+            task,
+            download_status=DownloadStatus.RETRY_WAIT,
+            last_error=str(error),
+            retry_count=task.retry_count + 1,
+            retry_at=self._clock() + timedelta(seconds=task.settings.retry_delay_seconds),
+            updated_at=self._clock(),
+        )
+        self._repository.save_many([task])
+        return task
+
+    def promote_due_retries(self) -> List[Task]:
+        now = self._clock()
+        promoted: List[Task] = []
+        for task in self._repository.list_tasks():
+            if (
+                task.download_status is not DownloadStatus.RETRY_WAIT
+                or task.retry_at is None
+                or task.retry_at > now
+            ):
+                continue
+            items = self._repository.list_items(task.id)
+            self._repository.save_items([
+                replace(item, status=ItemStatus.WAITING)
+                if item.status is ItemStatus.RETRY_WAIT else item
+                for item in items
+            ])
+            task = replace(
+                task,
+                download_status=DownloadStatus.WAITING,
+                retry_at=None,
+                updated_at=now,
+            )
+            self._repository.save_many([task])
+            promoted.append(task)
+        return promoted
+
+    def redownload_item(self, task_id: str, item_id: str) -> Task:
+        """为一个下载项创建独立父任务，原任务及文件保持不变。"""
+        source_task = self._repository.get_task(task_id)
+        source_item = self.get_item(task_id, item_id)
+        now = self._clock()
+        task = Task(
+            id=self._id_factory(),
+            source_url=source_item.source_url,
+            source_kind=SourceKind.DIRECT_M3U8,
+            name=source_task.name,
+            save_directory=source_task.save_directory,
+            extraction_status=ExtractionStatus.NOT_REQUIRED,
+            download_status=DownloadStatus.WAITING,
+            queue_position=self._repository.next_queue_position(),
+            created_at=now,
+            updated_at=now,
+            original_title=source_task.original_title,
+            name_edited=True,
+            settings=source_task.settings,
+        )
+        item = DownloadItem(
+            id=self._item_id_factory(),
+            task_id=task.id,
+            source_url=source_item.source_url,
+            label=source_item.label,
+            output_index=1,
+            status=ItemStatus.WAITING,
+            estimated_bytes=source_item.estimated_bytes,
+            duration_seconds=source_item.duration_seconds,
+            valid=source_item.valid,
+        )
+        self._repository.add_bundle([task], [item])
+        return task
+
+    def redownload_task(self, task_id: str) -> Task:
+        """复制父任务中曾选择的下载项，生成一个新的待下载父任务。"""
+        source_task = self._repository.get_task(task_id)
+        source_items = [
+            item for item in self._repository.list_items(task_id)
+            if item.status is not ItemStatus.UNSELECTED
+        ]
+        if not source_items:
+            raise ValueError("任务中没有可重新下载的项目")
+        now = self._clock()
+        task = replace(
+            source_task,
+            id=self._id_factory(),
+            extraction_status=ExtractionStatus.NOT_REQUIRED,
+            download_status=DownloadStatus.WAITING,
+            queue_position=self._repository.next_queue_position(),
+            created_at=now,
+            updated_at=now,
+            last_error="",
+            selection_mode=SelectionMode.MANUAL,
+            completed_at=None,
+        )
+        items = [replace(
+            item,
+            id=self._item_id_factory(),
+            task_id=task.id,
+            status=ItemStatus.WAITING,
+            output_path="",
+            downloaded_bytes=0,
+            total_bytes=0,
+            progress_percent=0.0,
+            speed_bps=0.0,
+            eta_seconds=0.0,
+        ) for item in source_items]
+        self._repository.add_bundle([task], items)
+        return task
+
+    def rename_output_file(self, task_id: str, item_id: str, name: str) -> DownloadItem:
+        item = self.get_item(task_id, item_id)
+        if not item.output_path:
+            raise ValueError("该下载项还没有磁盘文件")
+        source = Path(item.output_path)
+        if not source.is_file():
+            raise FileNotFoundError("磁盘文件不存在")
+        safe_name = _INVALID_FILE_CHARS.sub("_", name).strip(" ._")
+        if not safe_name:
+            raise ValueError("文件名不能为空")
+        suffix = source.suffix or ".mp4"
+        if safe_name.lower().endswith(suffix.lower()):
+            safe_name = safe_name[:-len(suffix)].rstrip(" .")
+        target = source.with_name(safe_name + suffix)
+        if target != source and target.exists():
+            index = 1
+            while True:
+                candidate = source.with_name(f"{safe_name} ({index}){suffix}")
+                if not candidate.exists():
+                    target = candidate
+                    break
+                index += 1
+        source.rename(target)
+        item = replace(item, output_path=str(target))
+        self._repository.save_items([item])
+        return item
+
+    def relink_output_file(self, task_id: str, item_id: str, path) -> DownloadItem:
+        target = Path(path)
+        if not target.is_file():
+            raise FileNotFoundError("选择的文件不存在")
+        item = replace(
+            self.get_item(task_id, item_id),
+            output_path=str(target),
+            downloaded_bytes=target.stat().st_size,
+            total_bytes=target.stat().st_size,
+            progress_percent=100.0,
+        )
+        self._repository.save_items([item])
+        return item
+
     def skip_item(self, task_id: str, item_id: str) -> Task:
         item = self.get_item(task_id, item_id)
         if item.status is ItemStatus.COMPLETED:
             raise ValueError("已完成的下载项不能跳过")
         self._repository.save_items([replace(item, status=ItemStatus.SKIPPED)])
         return self.finish_parent_if_handled(task_id)
+
+    def pause_item(self, task_id: str, item_id: str) -> Task:
+        item = self.get_item(task_id, item_id)
+        if item.status not in {ItemStatus.WAITING, ItemStatus.DOWNLOADING, ItemStatus.RETRY_WAIT}:
+            raise ValueError("该下载项当前不能暂停")
+        self._repository.save_items([replace(item, status=ItemStatus.PAUSED)])
+        items = self._repository.list_items(task_id)
+        task = replace(
+            self._repository.get_task(task_id),
+            download_status=(
+                DownloadStatus.WAITING
+                if any(candidate.status is ItemStatus.WAITING for candidate in items)
+                else DownloadStatus.PAUSED
+            ),
+            updated_at=self._clock(),
+        )
+        self._repository.save_many([task])
+        return task
+
+    def resume_item(self, task_id: str, item_id: str) -> Task:
+        item = self.get_item(task_id, item_id)
+        if item.status is not ItemStatus.PAUSED:
+            raise ValueError("只有已暂停的下载项可以继续")
+        self._repository.save_items([replace(item, status=ItemStatus.WAITING)])
+        task = replace(
+            self._repository.get_task(task_id),
+            download_status=DownloadStatus.WAITING,
+            updated_at=self._clock(),
+        )
+        self._repository.save_many([task])
+        return task
 
     def pause_task(self, task_id: str) -> Task:
         task = self._repository.get_task(task_id)
@@ -392,7 +728,15 @@ class TaskService:
         return task
 
     def move_task(self, task_id: str, direction: str) -> List[Task]:
-        tasks = self._repository.list_tasks()
+        all_tasks = self._repository.list_tasks()
+        completed = [
+            task for task in all_tasks
+            if task.download_status is DownloadStatus.COMPLETED
+        ]
+        tasks = [
+            task for task in all_tasks
+            if task.download_status is not DownloadStatus.COMPLETED
+        ]
         index = next((i for i, task in enumerate(tasks) if task.id == task_id), None)
         if index is None:
             raise KeyError(task_id)
@@ -409,12 +753,13 @@ class TaskService:
             raise ValueError("未知队列移动方式")
         tasks.insert(target, task)
         now = self._clock()
-        tasks = [
+        reordered = tasks + completed
+        reordered = [
             replace(item, queue_position=position, updated_at=now)
-            for position, item in enumerate(tasks, start=1)
+            for position, item in enumerate(reordered, start=1)
         ]
-        self._repository.save_many(tasks)
-        return tasks
+        self._repository.save_many(reordered)
+        return reordered
 
     def finish_parent_if_handled(self, task_id: str) -> Task:
         task = self._repository.get_task(task_id)
@@ -437,7 +782,16 @@ class TaskService:
             )
         else:
             status = task.download_status
-        task = replace(task, download_status=status, updated_at=self._clock())
+        now = self._clock()
+        task = replace(
+            task,
+            download_status=status,
+            completed_at=(
+                task.completed_at or now
+                if status is DownloadStatus.COMPLETED else None
+            ),
+            updated_at=now,
+        )
         self._repository.save_many([task])
         return task
 
@@ -469,6 +823,10 @@ class TaskService:
 
     def finish_extraction(self, task_id: str) -> Task:
         """结束提取，并按任务阈值决定自动下载或等待用户选择。"""
+        with self._task_locks[task_id]:
+            return self._finish_extraction_locked(task_id)
+
+    def _finish_extraction_locked(self, task_id: str) -> Task:
         task = self._repository.get_task(task_id)
         items = self._repository.list_items(task_id)
         valid_items = [item for item in items if item.valid]

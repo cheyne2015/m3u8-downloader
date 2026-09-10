@@ -34,9 +34,9 @@ def test_new_link_dialog_adds_tasks_to_downloading_view(qtbot, tmp_path):
     qtbot.mouseClick(dialog.start_button, Qt.MouseButton.LeftButton)
 
     assert window.task_list.count() == 2
-    assert window.task_list.item(0).text() == "正在获取标题"
+    assert window.task_list.item(0).data(Qt.ItemDataRole.UserRole).name == "正在获取标题"
     assert "等待提取" in window.task_list.itemWidget(window.task_list.item(0)).status_label.text()
-    assert window.task_list.item(1).text() == "video"
+    assert window.task_list.item(1).data(Qt.ItemDataRole.UserRole).name == "video"
     assert "等待下载" in window.task_list.itemWidget(window.task_list.item(1)).status_label.text()
     window.task_list.setCurrentRow(1)
     assert window.item_table.rowCount() == 1
@@ -98,3 +98,27 @@ def test_pending_task_can_queue_checked_download_items(qtbot, tmp_path):
         ItemStatus.UNSELECTED,
     ]
     window._force_exit = True
+
+
+def test_live_refresh_preserves_unsubmitted_candidate_checks(qtbot, tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    service = TaskService(repository, id_factory=lambda: "page")
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42", save_directory=str(tmp_path)
+    ))[0]
+    service.add_candidates(task.id, [
+        Candidate(f"https://cdn.example/{index}.m3u8", valid=index != 4)
+        for index in range(1, 5)
+    ])
+    service.finish_extraction(task.id)
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window.task_list.setCurrentRow(0)
+
+    window.item_table.item(1, 0).setCheckState(Qt.CheckState.Checked)
+    window.refresh_tasks()
+
+    window._force_exit = True
+    assert window.item_table.item(1, 0).checkState() is Qt.CheckState.Checked
+    assert not (window.item_table.item(3, 0).flags() & Qt.ItemFlag.ItemIsUserCheckable)

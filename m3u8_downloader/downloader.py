@@ -31,6 +31,47 @@ CANCEL_POLL_INTERVAL = 0.1
 CACHE_MANIFEST_NAME = ".m3u8-download.json"
 
 
+class _SpeedLimiter:
+    """在一个父任务的所有分片线程之间共享总速度上限。"""
+
+    def __init__(self, bytes_per_second, *, clock=time.monotonic) -> None:
+        self._rate_source = (
+            bytes_per_second if callable(bytes_per_second) else lambda: bytes_per_second
+        )
+        self._clock = clock
+        self._started = clock()
+        self._bytes = 0
+        self._lock = threading.Lock()
+
+    def consume(self, count: int, stop_event: Optional[threading.Event] = None) -> None:
+        with self._lock:
+            rate = int(self._rate_source())
+            if rate <= 0:
+                self._started = self._clock()
+                self._bytes = 0
+                return
+            self._bytes += max(0, int(count))
+            delay = self._bytes / rate - (self._clock() - self._started)
+            while delay > 0:
+                wait = min(delay, CANCEL_POLL_INTERVAL)
+                if stop_event is not None:
+                    if stop_event.wait(wait):
+                        raise DownloadCancelled("用户停止")
+                else:
+                    time.sleep(wait)
+                rate = max(1, int(self._rate_source()))
+                delay = self._bytes / rate - (self._clock() - self._started)
+
+
+class _CombinedSpeedLimiter:
+    def __init__(self, *limiters) -> None:
+        self._limiters = [limiter for limiter in limiters if limiter is not None]
+
+    def consume(self, count: int, stop_event=None) -> None:
+        for limiter in self._limiters:
+            limiter.consume(count, stop_event)
+
+
 class _CacheJobLock:
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -100,6 +141,7 @@ def _download_with_retry(
     backoff_factor: float = DEFAULT_BACKOFF_FACTOR,
     timeout: int = 30,
     stop_event: Optional[threading.Event] = None,
+    speed_limiter=None,
 ) -> Tuple[bool, int]:
     """带重试机制的文件下载.
 
@@ -171,6 +213,8 @@ def _download_with_retry(
                     if stop_event is not None and stop_event.is_set():
                         raise DownloadCancelled("用户停止")
                     if chunk:
+                        if speed_limiter is not None:
+                            speed_limiter.consume(len(chunk), stop_event)
                         f.write(chunk)
                         response_bytes += len(chunk)
 
@@ -202,7 +246,9 @@ def _download_with_retry(
             return True, file_size
         except DownloadCancelled:
             raise
-        except (requests.RequestException, OSError) as e:
+        except OSError:
+            raise
+        except requests.RequestException as e:
             if stop_event is not None and stop_event.is_set():
                 raise DownloadCancelled("用户停止") from e
             if attempt < attempts - 1:
@@ -257,6 +303,7 @@ def _download_segment_task(
     max_retries: int = DEFAULT_MAX_RETRIES,
     timeout: int = 30,
     stop_event: Optional[threading.Event] = None,
+    speed_limiter=None,
 ) -> Tuple[int, bool, int]:
     """下载单个 TS 片段（供线程池调用）.
 
@@ -281,6 +328,7 @@ def _download_segment_task(
         max_retries=max_retries,
         timeout=timeout,
         stop_event=stop_event,
+        speed_limiter=speed_limiter,
     )
     return segment.sequence, success, size
 
@@ -310,6 +358,8 @@ class M3U8Downloader:
         stop_event: Optional[threading.Event] = None,
         progress_callback: Optional[Callable[[dict], None]] = None,
         log_callback: Optional[Callable[[str], None]] = None,
+        speed_limit: int = 0,
+        speed_limiter=None,
     ) -> None:
         """初始化下载器.
 
@@ -334,6 +384,12 @@ class M3U8Downloader:
         self._stop_event = stop_event or threading.Event()
         self._progress_callback = progress_callback
         self._log_callback = log_callback
+        local_limiter = _SpeedLimiter(speed_limit) if speed_limit > 0 else None
+        self._speed_limiter = (
+            _CombinedSpeedLimiter(local_limiter, speed_limiter)
+            if local_limiter is not None and speed_limiter is not None
+            else local_limiter or speed_limiter
+        )
         self._worker_local = threading.local()
         self._worker_sessions: set = set()
         self._worker_sessions_lock = threading.Lock()
@@ -587,6 +643,7 @@ class M3U8Downloader:
         return _download_segment_task(
             self._get_worker_session(), segment, seg_path,
             self._max_retries, self._timeout, self._stop_event,
+            self._speed_limiter,
         )
 
     def _download_segments(self, playlist: M3U8Playlist) -> List[str]:
@@ -677,17 +734,20 @@ class M3U8Downloader:
             for pending in futures:
                 pending.cancel()
             self.cancel()
-            self._cache_lock_draining = True
-            cleanup_thread = threading.Thread(
-                target=self._drain_cancelled_executor,
-                args=(executor,),
-                daemon=True,
-                name="m3u8-download-cleanup",
-            )
-            try:
-                cleanup_thread.start()
-            except RuntimeError:
+            if getattr(self._stop_event, "delete_requested", False):
                 self._drain_cancelled_executor(executor)
+            else:
+                self._cache_lock_draining = True
+                cleanup_thread = threading.Thread(
+                    target=self._drain_cancelled_executor,
+                    args=(executor,),
+                    daemon=True,
+                    name="m3u8-download-cleanup",
+                )
+                try:
+                    cleanup_thread.start()
+                except RuntimeError:
+                    self._drain_cancelled_executor(executor)
             raise
         except Exception:
             executor.shutdown(wait=True, cancel_futures=True)

@@ -131,6 +131,9 @@ class Task:
     original_title: str = ""
     name_edited: bool = False
     last_error: str = ""
+    retry_count: int = 0
+    retry_at: datetime | None = None
+    completed_at: datetime | None = None
     selection_mode: SelectionMode = SelectionMode.AUTO
     settings: TaskSettings = field(default_factory=TaskSettings)
 
@@ -165,6 +168,9 @@ class DownloadItem:
     output_path: str = ""
     downloaded_bytes: int = 0
     total_bytes: int = 0
+    progress_percent: float = 0.0
+    speed_bps: float = 0.0
+    eta_seconds: float = 0.0
 
 
 @dataclass(frozen=True)

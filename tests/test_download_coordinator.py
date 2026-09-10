@@ -1,6 +1,7 @@
 """父任务内部下载协调测试。"""
 
 from pathlib import Path
+from datetime import datetime, timedelta
 
 from m3u8_downloader.tasking import (
     Candidate,
@@ -11,6 +12,7 @@ from m3u8_downloader.tasking import (
     OutputPlanner,
     SQLiteTaskRepository,
     TaskService,
+    TaskSettings,
 )
 
 
@@ -78,3 +80,62 @@ def test_user_skipped_child_counts_as_handled_for_parent_completion(tmp_path):
 
     assert finished.download_status is DownloadStatus.COMPLETED
     assert service.get_item(task.id, items[1].id).status is ItemStatus.SKIPPED
+
+
+def test_transient_failure_waits_without_holding_download_slot(tmp_path):
+    now = [datetime(2026, 9, 10, 12, 0, 0)]
+    service = TaskService(
+        SQLiteTaskRepository(tmp_path / "tasks.db"),
+        clock=lambda: now[0],
+        id_factory=lambda: "parent",
+    )
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8",
+        save_directory=str(tmp_path),
+        settings=TaskSettings(task_retries=1, retry_delay_seconds=30),
+    ))[0]
+
+    class FailingDownloader:
+        def download(self, *_args, **_kwargs):
+            raise ConnectionError("临时断线")
+
+    waiting = DownloadCoordinator(service, downloader=FailingDownloader()).run_parent(task.id)
+
+    assert waiting.download_status is DownloadStatus.RETRY_WAIT
+    assert service.list_items(task.id)[0].status is ItemStatus.RETRY_WAIT
+    assert service.promote_due_retries() == []
+
+    now[0] += timedelta(seconds=30)
+    promoted = service.promote_due_retries()
+
+    assert [candidate.id for candidate in promoted] == [task.id]
+    assert service.get_task(task.id).download_status is DownloadStatus.WAITING
+
+
+def test_low_space_during_progress_pauses_parent(tmp_path):
+    service = TaskService(
+        SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "parent"
+    )
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8", save_directory=str(tmp_path)
+    ))[0]
+
+    class ChangingGuard:
+        def __init__(self):
+            self.calls = 0
+
+        def check(self, _directory, _items):
+            from types import SimpleNamespace
+            self.calls += 1
+            return SimpleNamespace(
+                can_start=self.calls == 1,
+                free_bytes=100,
+                required_bytes=500,
+            )
+
+    finished = DownloadCoordinator(
+        service, downloader=RecordingDownloader(), disk_guard=ChangingGuard()
+    ).run_parent(task.id)
+
+    assert finished.download_status is DownloadStatus.PAUSED
+    assert "磁盘空间不足" in finished.last_error

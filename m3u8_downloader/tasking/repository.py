@@ -51,6 +51,9 @@ class SQLiteTaskRepository:
                     original_title TEXT NOT NULL DEFAULT '',
                     name_edited INTEGER NOT NULL DEFAULT 0,
                     last_error TEXT NOT NULL DEFAULT '',
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    retry_at TEXT,
+                    completed_at TEXT,
                     selection_mode TEXT NOT NULL DEFAULT 'auto',
                     settings_json TEXT NOT NULL
                 )
@@ -58,6 +61,9 @@ class SQLiteTaskRepository:
             self._ensure_task_column(connection, "original_title", "TEXT NOT NULL DEFAULT ''")
             self._ensure_task_column(connection, "name_edited", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_task_column(connection, "last_error", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_task_column(connection, "retry_count", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_task_column(connection, "retry_at", "TEXT")
+            self._ensure_task_column(connection, "completed_at", "TEXT")
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS app_settings (
                     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -90,6 +96,9 @@ class SQLiteTaskRepository:
             self._ensure_item_column(connection, "output_path", "TEXT NOT NULL DEFAULT ''")
             self._ensure_item_column(connection, "downloaded_bytes", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_item_column(connection, "total_bytes", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_item_column(connection, "progress_percent", "REAL NOT NULL DEFAULT 0")
+            self._ensure_item_column(connection, "speed_bps", "REAL NOT NULL DEFAULT 0")
+            self._ensure_item_column(connection, "eta_seconds", "REAL NOT NULL DEFAULT 0")
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS task_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -154,6 +163,9 @@ class SQLiteTaskRepository:
             task.original_title,
             int(task.name_edited),
             task.last_error,
+            task.retry_count,
+            task.retry_at.isoformat() if task.retry_at else None,
+            task.completed_at.isoformat() if task.completed_at else None,
             task.selection_mode.value,
             json.dumps(asdict(task.settings), ensure_ascii=False, separators=(",", ":")),
         ) for task in tasks]
@@ -165,9 +177,53 @@ class SQLiteTaskRepository:
                     id, source_url, source_kind, name, save_directory,
                     extraction_status, download_status, queue_position,
                     created_at, updated_at, original_title, name_edited, last_error,
+                    retry_count, retry_at, completed_at,
                     selection_mode, settings_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, rows)
+
+    def add_bundle(self, tasks: Iterable[Task], items: Iterable[DownloadItem]) -> None:
+        """在一个事务中创建父任务和首批下载项。"""
+        tasks = list(tasks)
+        items = list(items)
+        task_rows = [(
+            task.id, task.source_url, task.source_kind.value, task.name,
+            task.save_directory, task.extraction_status.value,
+            task.download_status.value, task.queue_position,
+            task.created_at.isoformat(), task.updated_at.isoformat(),
+            task.original_title, int(task.name_edited), task.last_error,
+            task.retry_count, task.retry_at.isoformat() if task.retry_at else None,
+            task.completed_at.isoformat() if task.completed_at else None,
+            task.selection_mode.value,
+            json.dumps(asdict(task.settings), ensure_ascii=False, separators=(",", ":")),
+        ) for task in tasks]
+        item_rows = [(
+            item.id, item.task_id, item.source_url, item.label,
+            item.output_index, item.status.value, item.estimated_bytes,
+            item.duration_seconds, int(item.valid), item.output_path,
+            item.downloaded_bytes, item.total_bytes, item.progress_percent,
+            item.speed_bps, item.eta_seconds,
+        ) for item in items]
+        with self._connect() as connection:
+            if task_rows:
+                connection.executemany("""
+                    INSERT INTO tasks (
+                        id, source_url, source_kind, name, save_directory,
+                        extraction_status, download_status, queue_position,
+                        created_at, updated_at, original_title, name_edited,
+                        last_error, retry_count, retry_at, completed_at,
+                        selection_mode, settings_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, task_rows)
+            if item_rows:
+                connection.executemany("""
+                    INSERT INTO download_items (
+                        id, task_id, source_url, label, output_index, status,
+                        estimated_bytes, duration_seconds, valid, output_path,
+                        downloaded_bytes, total_bytes, progress_percent, speed_bps,
+                        eta_seconds
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, item_rows)
 
     def save_many(self, tasks: Iterable[Task]) -> None:
         """原子保存已有任务的可变快照。"""
@@ -184,6 +240,9 @@ class SQLiteTaskRepository:
             task.original_title,
             int(task.name_edited),
             task.last_error,
+            task.retry_count,
+            task.retry_at.isoformat() if task.retry_at else None,
+            task.completed_at.isoformat() if task.completed_at else None,
             task.selection_mode.value,
             json.dumps(asdict(task.settings), ensure_ascii=False, separators=(",", ":")),
             task.id,
@@ -196,7 +255,8 @@ class SQLiteTaskRepository:
                     source_url = ?, source_kind = ?, name = ?, save_directory = ?,
                     extraction_status = ?, download_status = ?, queue_position = ?,
                     created_at = ?, updated_at = ?, original_title = ?, name_edited = ?,
-                    last_error = ?, selection_mode = ?, settings_json = ?
+                    last_error = ?, retry_count = ?, retry_at = ?, completed_at = ?,
+                    selection_mode = ?, settings_json = ?
                 WHERE id = ?
             """, rows)
 
@@ -223,6 +283,7 @@ class SQLiteTaskRepository:
             item.duration_seconds,
             int(item.valid),
             item.output_path, item.downloaded_bytes, item.total_bytes,
+            item.progress_percent, item.speed_bps, item.eta_seconds,
         ) for item in items]
         if not rows:
             return
@@ -231,8 +292,9 @@ class SQLiteTaskRepository:
                 INSERT OR IGNORE INTO download_items (
                     id, task_id, source_url, label, output_index, status,
                     estimated_bytes, duration_seconds, valid, output_path,
-                    downloaded_bytes, total_bytes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    downloaded_bytes, total_bytes, progress_percent, speed_bps,
+                    eta_seconds
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, rows)
 
     def list_items(self, task_id: str) -> List[DownloadItem]:
@@ -251,13 +313,17 @@ class SQLiteTaskRepository:
             output_path=row["output_path"],
             downloaded_bytes=int(row["downloaded_bytes"]),
             total_bytes=int(row["total_bytes"]),
+            progress_percent=float(row["progress_percent"]),
+            speed_bps=float(row["speed_bps"]),
+            eta_seconds=float(row["eta_seconds"]),
         ) for row in rows]
 
     def save_items(self, items: Iterable[DownloadItem]) -> None:
         rows = [(
             item.source_url, item.label, item.output_index, item.status.value,
             item.estimated_bytes, item.duration_seconds, int(item.valid),
-            item.output_path, item.downloaded_bytes, item.total_bytes, item.id,
+            item.output_path, item.downloaded_bytes, item.total_bytes,
+            item.progress_percent, item.speed_bps, item.eta_seconds, item.id,
         ) for item in items]
         if not rows:
             return
@@ -266,8 +332,21 @@ class SQLiteTaskRepository:
                 UPDATE download_items SET source_url = ?, label = ?,
                     output_index = ?, status = ?, estimated_bytes = ?,
                     duration_seconds = ?, valid = ?, output_path = ?,
-                    downloaded_bytes = ?, total_bytes = ? WHERE id = ?
+                    downloaded_bytes = ?, total_bytes = ?, progress_percent = ?,
+                    speed_bps = ?, eta_seconds = ? WHERE id = ?
             """, rows)
+
+    def update_item_progress(self, item: DownloadItem) -> None:
+        """只更新进度列，避免覆盖并发发生的暂停或跳过状态。"""
+        with self._connect() as connection:
+            connection.execute("""
+                UPDATE download_items SET downloaded_bytes = ?, total_bytes = ?,
+                    progress_percent = ?, speed_bps = ?, eta_seconds = ?
+                WHERE id = ?
+            """, (
+                item.downloaded_bytes, item.total_bytes, item.progress_percent,
+                item.speed_bps, item.eta_seconds, item.id,
+            ))
 
     def append_log(
         self, task_id: str, level: str, category: str, message: str, created_at: datetime
@@ -328,6 +407,12 @@ class SQLiteTaskRepository:
             original_title=row["original_title"],
             name_edited=bool(row["name_edited"]),
             last_error=row["last_error"],
+            retry_count=int(row["retry_count"]),
+            retry_at=(datetime.fromisoformat(row["retry_at"]) if row["retry_at"] else None),
+            completed_at=(
+                datetime.fromisoformat(row["completed_at"])
+                if row["completed_at"] else None
+            ),
             selection_mode=SelectionMode(row["selection_mode"]),
             settings=settings,
         )
