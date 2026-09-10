@@ -1822,6 +1822,105 @@ class TestPageHistoryPanel:
         assert opened == "D:/out/legacy.mp4"
 
 
+class TestPageDownloadsDetail:
+    """「查看全部下载」详情窗：主面板不拆行，点开后该网页每次下载单独一行。"""
+
+    def test_detail_lists_every_download_of_page(self, page_history_gui):
+        """同一网页多次下载 → 详情窗每次下载一行（m3u8 与文件成对）。"""
+        from m3u8_downloader import page_history
+        page_history.record_page_downloaded(
+            "https://x/page", "https://cdn/x/a.m3u8", output_path="D:/out/a.mp4"
+        )
+        page_history.record_page_downloaded(
+            "https://x/page", "https://cdn/x/b.m3u8", output_path="D:/out/b.mp4"
+        )
+        record = page_history.list_records()[0]
+        with patch("tkinter.ttk.Treeview") as tree_mock:
+            page_history_gui._show_page_downloads_detail(record)
+        rows = [
+            c.kwargs["values"] for c in tree_mock.return_value.insert.call_args_list
+        ]
+        assert len(rows) == 2
+        assert rows[0][1] == "https://cdn/x/a.m3u8"
+        assert rows[0][2] == "D:/out/a.mp4"
+        assert rows[1][1] == "https://cdn/x/b.m3u8"
+        assert rows[1][2] == "D:/out/b.mp4"
+
+    def test_detail_open_location_uses_selected_rows_file(
+        self, page_history_gui, monkeypatch, tmp_path
+    ):
+        """选中详情窗**第一次**下载那行 → 定位该次的文件，而非最近一次。"""
+        monkeypatch.setattr(sys, "platform", "win32")
+        from m3u8_downloader import page_history
+        first = str(tmp_path / "a.mp4")
+        second = str(tmp_path / "b.mp4")
+        page_history.record_page_downloaded(
+            "https://x/page", "https://cdn/x/a.m3u8", output_path=first
+        )
+        page_history.record_page_downloaded(
+            "https://x/page", "https://cdn/x/b.m3u8", output_path=second
+        )
+        record = page_history.list_records()[0]
+        factory = _ButtonFactory()
+        with patch("tkinter.ttk.Treeview") as tree_mock, patch(
+            "tkinter.ttk.Button", factory
+        ):
+            page_history_gui._show_page_downloads_detail(record)
+        command = factory.by_text["打开位置"][0]["command"]
+        tree_mock.return_value.selection.return_value = ("d0",)
+        with patch("m3u8_downloader.gui.subprocess.Popen") as popen:
+            command()
+        popen.assert_called_once_with(["explorer", "/select,", os.path.normpath(first)])
+
+    def test_detail_button_state_follows_selected_row(self, page_history_gui):
+        """选中行有下载 → 「查看全部下载」可用；仅提取无下载 → 禁用。"""
+        from m3u8_downloader import page_history
+        # 先写入仅提取的页（会排到列表后面 = r1），再写有下载的页（= r0）
+        page_history.record_page_extracted("https://x/only", title="仅提取")
+        page_history.record_page_downloaded(
+            "https://x/page", "https://cdn/x/a.m3u8", output_path="D:/out/a.mp4"
+        )
+        factory = _ButtonFactory()
+        with patch("tkinter.ttk.Treeview") as tree_mock, patch(
+            "tkinter.ttk.Button", factory
+        ):
+            page_history_gui._show_page_history()
+        _, detail_btn = factory.by_text["查看全部下载"]
+        handler = tree_mock.return_value.bind.call_args.args[1]
+        tree_mock.return_value.selection.return_value = ("r0",)
+        handler()
+        detail_btn.configure.assert_called_with(state=tk.NORMAL)
+        tree_mock.return_value.selection.return_value = ("r1",)
+        handler()
+        detail_btn.configure.assert_called_with(state=tk.DISABLED)
+
+    def test_detail_button_opens_detail_window(self, page_history_gui):
+        """点击「查看全部下载」→ 打开该网页的详情窗。"""
+        from m3u8_downloader import page_history
+        page_history.record_page_downloaded(
+            "https://x/page", "https://cdn/x/a.m3u8", output_path="D:/out/a.mp4"
+        )
+        factory = _ButtonFactory()
+        with patch("tkinter.ttk.Treeview") as tree_mock, patch(
+            "tkinter.ttk.Button", factory
+        ):
+            page_history_gui._show_page_history()
+        command = factory.by_text["查看全部下载"][0]["command"]
+        tree_mock.return_value.selection.return_value = ("r0",)
+        with patch.object(page_history_gui, "_show_page_downloads_detail") as detail:
+            command()
+        detail.assert_called_once()
+
+    def test_detail_window_survives_page_without_downloads(self, page_history_gui):
+        """无下载的网页打开详情窗：不崩、不产生行。"""
+        from m3u8_downloader import page_history
+        page_history.record_page_extracted("https://x/empty", title="空")
+        record = page_history.list_records()[0]
+        with patch("tkinter.ttk.Treeview") as tree_mock:
+            page_history_gui._show_page_downloads_detail(record)
+        assert tree_mock.return_value.insert.call_count == 0
+
+
 class TestPageHistoryRecordWiring:
     """GUI 触发链写入 title / output_path。"""
 

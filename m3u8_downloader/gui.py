@@ -2109,6 +2109,10 @@ class M3U8DownloaderGUI:
         }
         # 行 id -> 该行输出文件路径（供「打开位置」定位；空串表示不可定位）。
         path_by_item = {}
+        # 行 id -> 该网页历次下载列表（供「查看全部下载」详情窗展示，每次下载一条）。
+        downloads_by_item = {}
+        # 行 id -> 原始记录 dict（详情窗标题 / 网页 URL 用）。
+        record_by_item = {}
         for index, record in enumerate(records):
             status = status_names.get(
                 str(record.get("status", "")), str(record.get("status", ""))
@@ -2141,6 +2145,8 @@ class M3U8DownloaderGUI:
                 ),
             )
             path_by_item[item_id] = row_output_path
+            downloads_by_item[item_id] = list(record.get("downloads") or [])
+            record_by_item[item_id] = record
 
         def _selected_output_path() -> str:
             """当前选中行对应的输出文件路径；未选中/无路径时返回空串."""
@@ -2156,11 +2162,44 @@ class M3U8DownloaderGUI:
                 return ""
             return str(path_by_item.get(str(first), "") or "")
 
+        def _selected_downloads() -> list:
+            """当前选中行对应网页的历次下载列表（每次下载一个 dict）."""
+            try:
+                selection = tree.selection()
+            except Exception:
+                return []
+            if not selection:
+                return []
+            return list(downloads_by_item.get(str(selection[0]), []) or [])
+
+        def _selected_record():
+            """当前选中行对应的原始记录 dict；未选中时返回 None."""
+            try:
+                selection = tree.selection()
+            except Exception:
+                return None
+            if not selection:
+                return None
+            return record_by_item.get(str(selection[0]))
+
+        def _open_all_downloads() -> None:
+            """打开详情窗：该网页的全部下载（每次下载单独一行）."""
+            record = _selected_record()
+            if record is None:
+                return
+            self._show_page_downloads_detail(record)
+
         def _on_history_select(_event=None) -> None:
-            """选中变化时同步「打开位置」按钮可用性."""
+            """选中变化时同步「打开位置」/「查看全部下载」按钮可用性."""
             try:
                 open_btn.configure(
                     state=tk.NORMAL if _selected_output_path() else tk.DISABLED
+                )
+            except Exception:
+                pass
+            try:
+                detail_btn.configure(
+                    state=tk.NORMAL if _selected_downloads() else tk.DISABLED
                 )
             except Exception:
                 pass
@@ -2177,6 +2216,13 @@ class M3U8DownloaderGUI:
                 except Exception:
                     pass  # 日志失败也不能让弹窗崩溃
 
+        # 双击行 = 查看该网页的全部下载（主面板保持一行一网页，不拆行）。
+        # 注意：必须**先于**下面的 <<TreeviewSelect>> 绑定，保证选中回调是最后一次
+        # bind（既有测试以「最后一次 bind」取选中处理器并无形参调用）。
+        try:
+            tree.bind("<Double-1>", lambda _event=None: _open_all_downloads())
+        except Exception:
+            pass
         try:
             tree.bind("<<TreeviewSelect>>", _on_history_select)
         except Exception:
@@ -2186,6 +2232,11 @@ class M3U8DownloaderGUI:
             ttk.Label(frame, text="暂无记录。提取网页后，页面会显示在这里。").pack(
                 anchor=tk.W, pady=(6, 0)
             )
+        else:
+            ttk.Label(
+                frame,
+                text="提示：双击某一行可查看该网页的全部下载（每次下载单独一条）。",
+            ).pack(anchor=tk.W, pady=(6, 0))
         btn_bar = ttk.Frame(frame)
         btn_bar.pack(anchor=tk.E, pady=(6, 0))
         ttk.Button(btn_bar, text="关闭", command=win.destroy).pack(side=tk.RIGHT)
@@ -2193,7 +2244,115 @@ class M3U8DownloaderGUI:
             btn_bar, text="打开位置", command=_open_location, state=tk.DISABLED
         )
         open_btn.pack(side=tk.RIGHT, padx=(0, 6))
+        detail_btn = ttk.Button(
+            btn_bar,
+            text="查看全部下载",
+            command=_open_all_downloads,
+            state=tk.DISABLED,
+        )
+        detail_btn.pack(side=tk.RIGHT, padx=(0, 6))
         _on_history_select()
+
+    def _show_page_downloads_detail(self, record) -> None:
+        """展示**单个网页**的全部下载记录（每次下载一行）.
+
+        主面板保持「一行 = 一个网页」不拆行；本窗用于点开查看该网页的历次下载，
+        每行可单独「打开位置」定位到该次下载的输出文件（m3u8 与文件严格同源）。
+
+        Args:
+            record: :func:`page_history.list_records` 返回的展示记录 dict。
+        """
+        win = tk.Toplevel(self._root)
+        title = str(record.get("title", "") or "").strip() or str(
+            record.get("page_url", "")
+        )
+        win.title(f"全部下载 - {title}")
+        win.geometry("980x420")
+        frame = ttk.Frame(win, padding=8)
+        frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            frame, text=str(record.get("page_url", "") or ""), wraplength=940
+        ).pack(anchor=tk.W, pady=(0, 6))
+        body = ttk.Frame(frame)
+        body.pack(fill=tk.BOTH, expand=True)
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+        tree = ttk.Treeview(
+            body, columns=("time", "m3u8", "file"), show="headings"
+        )
+        tree.heading("time", text="下载时间")
+        tree.heading("m3u8", text="m3u8 直链")
+        tree.heading("file", text="输出文件")
+        tree.column("time", width=150, anchor=tk.W)
+        tree.column("m3u8", width=400)
+        tree.column("file", width=360)
+        tree.grid(row=0, column=0, sticky=tk.NSEW)
+        scroll = ttk.Scrollbar(body, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        scroll.grid(row=0, column=1, sticky=tk.NS)
+
+        downloads = list(record.get("downloads") or [])
+        path_by_item = {}
+        for index, item in enumerate(downloads):
+            if not isinstance(item, dict):
+                continue
+            out_path = str(item.get("output_path", "") or "")
+            item_id = f"d{index}"
+            tree.insert(
+                "", tk.END, iid=item_id,
+                values=(
+                    str(item.get("timestamp", "") or ""),
+                    str(item.get("m3u8_url", "") or ""),
+                    out_path,
+                ),
+            )
+            path_by_item[item_id] = out_path
+
+        def _selected_path() -> str:
+            """选中行对应的该次下载输出文件路径."""
+            try:
+                selection = tree.selection()
+            except Exception:
+                return ""
+            if not selection:
+                return ""
+            return str(path_by_item.get(str(selection[0]), "") or "")
+
+        def _on_select(_event=None) -> None:
+            try:
+                open_btn.configure(
+                    state=tk.NORMAL if _selected_path() else tk.DISABLED
+                )
+            except Exception:
+                pass
+
+        def _open_location() -> None:
+            target = _selected_path()
+            if not target:
+                return
+            if not self._reveal_path_in_file_manager(target):
+                try:
+                    self._log(f"打开位置失败：{target}")
+                except Exception:
+                    pass
+
+        try:
+            tree.bind("<<TreeviewSelect>>", _on_select)
+        except Exception:
+            pass
+
+        if not downloads:
+            ttk.Label(frame, text="该网页暂无成功下载记录。").pack(
+                anchor=tk.W, pady=(6, 0)
+            )
+        btn_bar = ttk.Frame(frame)
+        btn_bar.pack(anchor=tk.E, pady=(6, 0))
+        ttk.Button(btn_bar, text="关闭", command=win.destroy).pack(side=tk.RIGHT)
+        open_btn = ttk.Button(
+            btn_bar, text="打开位置", command=_open_location, state=tk.DISABLED
+        )
+        open_btn.pack(side=tk.RIGHT, padx=(0, 6))
+        _on_select()
 
     def _on_tree_selection_changed(self, _event=None) -> None:
         self._update_result_actions()
