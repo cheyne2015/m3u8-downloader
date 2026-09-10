@@ -2,6 +2,7 @@
 """m3u8 下载器 v2 文件夹式候选包。"""
 
 import shutil
+from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules
 
 ffmpeg = shutil.which("ffmpeg")
@@ -33,6 +34,14 @@ a = Analysis(
     excludes=["playwright", "tkinter"],
     noarchive=False,
 )
+# Codex 运行环境会把 Poppler 的 ICU 78 放进 PATH。PyInstaller 会误把它当作
+# Qt 依赖收进包中，但当前 Qt 使用 Windows 自带 ICU 接口，混用后 QtCore
+# 会报 WinError 127。过滤这两个误收集文件，让系统加载兼容版本。
+incompatible_icu = {"icuuc.dll", "icudt78.dll"}
+a.binaries = [
+    entry for entry in a.binaries
+    if Path(entry[0]).name.lower() not in incompatible_icu
+]
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz,

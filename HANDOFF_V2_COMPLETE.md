@@ -70,8 +70,8 @@ py -3.13 -m PyInstaller -y --distpath dist-v2 --workpath build-v2 build-v2.spec
 ```
 
 成品目录是 `dist-v2\m3u8-downloader-v2`，入口是 `m3u8-dl-v2.exe`。打包配置会把
-`ffmpeg.exe`、`deep_worker.py`、Playwright 所需 Python 模块和 Qt 运行库收入目录。
-深度模式仍要求目标电脑安装与 Python Playwright 版本相匹配的 Chromium 浏览器资源。
+`ffmpeg.exe`、`deep_worker.py` 和 Qt 运行库收入目录。深度模式通过系统 Python 调用
+Playwright，因此目标电脑仍需安装 Playwright 及与其版本匹配的 Chromium 浏览器资源。
 
 打包后应验证入口可启动、重复启动只保留一个进程、`_internal\ffmpeg.exe -version`
 可以执行、便携模式能创建 `data\tasks-v2.db`，再用一个实际网页和一个直接 m3u8 做端到端
