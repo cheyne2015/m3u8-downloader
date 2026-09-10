@@ -10,7 +10,9 @@ from m3u8_downloader.downloader_adapter_v2 import (
     ExistingDownloaderAdapter,
     _SharedGlobalSpeedPool,
 )
+from m3u8_downloader.downloader import PlaylistFetchError
 from m3u8_downloader.tasking import (
+    Candidate,
     CreateTaskRequest,
     SQLiteTaskRepository,
     TaskService,
@@ -125,3 +127,94 @@ def test_changing_global_speed_limit_rebases_without_waiting_for_consumer():
         stopped.set()
         consumer.join(timeout=1)
         setter.join(timeout=1)
+
+
+def test_web_task_refreshes_page_access_once_after_playlist_403(tmp_path):
+    calls = []
+    attempts = {"count": 0}
+    requested_urls = []
+
+    class FakeDownloader:
+        def __init__(self, **kwargs):
+            self.output = kwargs["output"]
+            requested_urls.append(kwargs["url"])
+
+        def download(self):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise PlaylistFetchError("https://cdn.example/video.m3u8", 403)
+            Path(self.output).write_bytes(b"done")
+            return self.output
+
+        def wait_for_cleanup(self):
+            pass
+
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42",
+        save_directory=str(tmp_path),
+    ))[0]
+    item = service.list_items(task.id)
+    assert item == []
+    service.add_candidates(task.id, [Candidate("https://cdn.example/video.m3u8")])
+    item = service.list_items(task.id)[0]
+    output = tmp_path / "video.mp4"
+
+    result = ExistingDownloaderAdapter(
+        downloader_factory=FakeDownloader,
+        access_refresher=lambda task, stop_event: (
+            calls.append(task.source_url),
+            [Candidate("https://cdn.example/fresh.m3u8")],
+        )[1],
+    ).download(
+        task,
+        item,
+        output,
+        stop_event=None,
+        on_progress=lambda _value: None,
+        on_log=lambda _message: None,
+    )
+
+    assert result == output
+    assert attempts["count"] == 2
+    assert calls == [task.source_url]
+    assert requested_urls == [
+        "https://cdn.example/video.m3u8",
+        "https://cdn.example/fresh.m3u8",
+    ]
+
+
+def test_direct_m3u8_403_does_not_open_page_refresher(tmp_path):
+    calls = []
+
+    class ForbiddenDownloader:
+        def __init__(self, **_kwargs):
+            pass
+
+        def download(self):
+            raise PlaylistFetchError("https://cdn.example/video.m3u8", 403)
+
+        def wait_for_cleanup(self):
+            pass
+
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8",
+        save_directory=str(tmp_path),
+    ))[0]
+    item = service.list_items(task.id)[0]
+
+    with pytest.raises(PlaylistFetchError):
+        ExistingDownloaderAdapter(
+            downloader_factory=ForbiddenDownloader,
+            access_refresher=lambda *_args: calls.append("called"),
+        ).download(
+            task,
+            item,
+            tmp_path / "video.mp4",
+            stop_event=None,
+            on_progress=lambda _value: None,
+            on_log=lambda _message: None,
+        )
+
+    assert calls == []

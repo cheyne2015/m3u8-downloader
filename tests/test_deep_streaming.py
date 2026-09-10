@@ -490,6 +490,27 @@ def test_estimate_stream_clones_custom_adapter_and_hooks(monkeypatch):
     source.close()
 
 
+def test_large_candidate_estimation_uses_fast_sampling_plan(monkeypatch):
+    """候选很多时应提高估算并发并减少抽样，避免任务长时间停在提取中。"""
+    import requests
+
+    captured = {}
+
+    def estimate_many(urls, **kwargs):
+        captured["count"] = len(urls)
+        captured.update(kwargs)
+
+    monkeypatch.setattr("m3u8_downloader.extractor.estimate_many", estimate_many)
+    candidates = [Candidate(url=f"mock://video/{index}") for index in range(100)]
+
+    with requests.Session() as session:
+        _estimate_stream(candidates, session, 10, 8, None, None)
+
+    assert captured["count"] == 100
+    assert captured["max_workers"] == 16
+    assert captured["head_samples"] == 1
+
+
 def test_fast_metadata_is_reported_without_waiting_for_slow_candidate(video_page):
     import requests
     snapshots = []

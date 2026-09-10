@@ -2,7 +2,7 @@
 
 ## 交付位置
 
-- 完整源码工作树：`C:\Users\cheyn\WorkBuddy\2026-06-15-13-47-25\m3u8-downloader-v2`
+- 完整源码工作树：`C:\Users\cheyn\Documents\软件修改\m3u8-downloader-v2`
 - Git 分支：`rebuild/thunder-gui-v2`
 - 产品规格：`docs\v2_product_spec.md`
 - 架构说明：`docs\v2_architecture.md`
@@ -75,4 +75,5 @@ Playwright，因此目标电脑仍需安装 Playwright 及与其版本匹配的 
 
 打包后应验证入口可启动、重复启动只保留一个进程、`_internal\ffmpeg.exe -version`
 可以执行、便携模式能创建 `data\tasks-v2.db`，再用一个实际网页和一个直接 m3u8 做端到端
-下载。没有实际网站样本时，本地测试只能证明状态、调度和界面链路，不能替代目标网站验证。
+下载。LenTV 四个实际页面的验证结果与 403 自动恢复说明见
+`docs/live-site-validation-20260911.md`；其他站点仍应按相同步骤复测。

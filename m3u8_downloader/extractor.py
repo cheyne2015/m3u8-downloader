@@ -1347,6 +1347,12 @@ def _estimate_stream(
     """用独立会话估算；取消后调用者可返回，在途请求自行收尾。"""
     updates = queue.Queue()
     by_url = {candidate.url: candidate for candidate in candidates}
+    # 剧集页可能一次返回数百条清单。逐条抽样 3 个分片会让“提取中”额外持续近一分钟。
+    # 大批量时改用 1 个分片做近似体积估算，并用估算层允许的最大并发；时长仍由
+    # 完整 m3u8 清单精确累计，候选较少时继续使用原来的 3 分片精度。
+    large_batch = len(by_url) >= 100
+    estimate_workers = MAX_ESTIMATE_WORKERS if large_batch else workers
+    head_samples = 1 if large_batch else 3
     background_session = requests.Session()
     background_session.adapters.clear()
     for prefix, adapter in session.adapters.items():
@@ -1365,7 +1371,8 @@ def _estimate_stream(
     def work():
         try:
             estimate_many(
-                list(by_url), session=background_session, timeout=timeout, max_workers=workers,
+                list(by_url), session=background_session, timeout=timeout,
+                max_workers=estimate_workers, head_samples=head_samples,
                 on_result=lambda url, result: updates.put((url, result)), stop_event=stop_event,
             )
         except Exception as exc:

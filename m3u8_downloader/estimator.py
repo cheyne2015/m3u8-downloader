@@ -392,6 +392,7 @@ def estimate_many(
     session: Optional[requests.Session] = None,
     timeout: int = 30,
     max_workers: int = DEFAULT_ESTIMATE_WORKERS,
+    head_samples: int = DEFAULT_HEAD_SAMPLES,
     on_result: Optional[Callable[[str, SizeEstimate], None]] = None,
     stop_event: Optional[Event] = None,
 ) -> Dict[str, SizeEstimate]:
@@ -405,6 +406,7 @@ def estimate_many(
         session: 复用的 HTTP 会话；为 None 时内部自建并在结束时关闭.
         timeout: HTTP 超时秒数.
         max_workers: 并发数，内部会被钳制到 ``1..MAX_ESTIMATE_WORKERS``.
+        head_samples: 每个媒体清单抽样的分片数；大量候选可设为 1 以优先速度.
         on_result: 在调用线程中逐个报告 ``(url, estimate)``，不必等待最慢的 URL。
         stop_event: 停止后跳过尚未开始的探测；已发送请求按原超时结束。
 
@@ -432,10 +434,12 @@ def estimate_many(
 
     workers = max(1, min(int(max_workers or 1), MAX_ESTIMATE_WORKERS, len(unique_urls)))
 
+    samples = max(1, int(head_samples or 1))
+
     def probe(target_url):
         if stop_event and stop_event.is_set():
             return SizeEstimate(error="已停止估算")
-        return _safe_estimate(target_url, session, timeout, DEFAULT_HEAD_SAMPLES)
+        return _safe_estimate(target_url, session, timeout, samples)
 
     def report(target_url):
         if on_result and not (stop_event and stop_event.is_set()):

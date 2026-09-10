@@ -12,6 +12,7 @@ import requests
 from m3u8_downloader.downloader import (
     DownloadCancelled,
     M3U8Downloader,
+    PlaylistFetchError,
     _download_key,
     _download_with_retry,
 )
@@ -228,6 +229,21 @@ def test_playlist_and_key_requests_retry_transient_failures(tmp_path, monkeypatc
     _download_key(key_session, key, timeout=1, max_retries=1)
     assert key.key == b"0123456789abcdef"
     assert playlist_response.closed and key_response.closed
+
+
+def test_playlist_403_surfaces_immediately_for_page_access_recovery(tmp_path):
+    downloader = M3U8Downloader(
+        "https://x/index.m3u8", tmp_dir=str(tmp_path), max_retries=3
+    )
+    forbidden = FakeResponse([], status=403)
+    downloader._session = FakeSession([forbidden])
+
+    with pytest.raises(PlaylistFetchError) as caught:
+        downloader._fetch_m3u8_content("https://x/index.m3u8")
+
+    assert caught.value.status_code == 403
+    assert len(downloader._session.calls) == 1
+    assert forbidden.closed
 
 
 def _playlist(*urls):

@@ -101,6 +101,19 @@ class DownloadCancelled(RuntimeError):
     """下载被调用方主动停止。"""
 
 
+class PlaylistFetchError(RuntimeError):
+    """获取媒体清单失败，并保留可供上层恢复的 HTTP 状态。"""
+
+    def __init__(self, url: str, status_code=None, cause=None) -> None:
+        self.url = url
+        self.status_code = status_code
+        self.cause = cause
+        detail = str(cause) if cause is not None else (
+            f"HTTP {status_code}" if status_code is not None else "未知错误"
+        )
+        super().__init__(f"获取 m3u8 文件失败 ({url}): {detail}")
+
+
 def _wait_before_retry(
     delay: float, stop_event: Optional[threading.Event],
 ) -> None:
@@ -132,8 +145,19 @@ def _fetch_small_with_retry(
             return response.content
         except requests.RequestException as exc:
             last_error = exc
+            status_code = getattr(response, "status_code", None)
+            if getattr(exc, "response", None) is None and response is not None:
+                exc.response = response
             if stop_event is not None and stop_event.is_set():
                 raise DownloadCancelled("用户停止") from exc
+            # 403 等确定性客户端错误不会靠相同请求重试恢复；立即交给上层按来源页
+            # 刷新访问上下文。408/429 仍属于可恢复的超时/限流响应。
+            if (
+                status_code is not None
+                and 400 <= status_code < 500
+                and status_code not in {408, 429}
+            ):
+                break
             if attempt < attempts - 1:
                 _wait_before_retry(DEFAULT_RETRY_DELAY * (DEFAULT_BACKOFF_FACTOR ** attempt),
                                    stop_event)
@@ -602,7 +626,9 @@ class M3U8Downloader:
             )
             return content.decode("utf-8-sig", errors="replace")
         except requests.RequestException as e:
-            raise RuntimeError(f"获取 m3u8 文件失败 ({url}): {e}")
+            response = getattr(e, "response", None)
+            status_code = getattr(response, "status_code", None)
+            raise PlaylistFetchError(url, status_code, e) from e
 
     def _resolve_playlist(self) -> M3U8Playlist:
         """解析 m3u8 播放列表，如果是 master playlist 则选择最高码率流.
