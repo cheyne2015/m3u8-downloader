@@ -246,14 +246,14 @@ def _download_with_retry(
             return True, file_size
         except DownloadCancelled:
             raise
-        except OSError:
-            raise
         except requests.RequestException as e:
             if stop_event is not None and stop_event.is_set():
                 raise DownloadCancelled("用户停止") from e
             if attempt < attempts - 1:
                 delay = retry_delay * (backoff_factor ** attempt)
                 _wait_before_retry(delay, stop_event)
+        except OSError:
+            raise
         finally:
             if response is not None:
                 try:
