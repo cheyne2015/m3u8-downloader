@@ -35,38 +35,47 @@ class _SpeedLimiter:
     """在一个父任务的所有分片线程之间共享总速度上限。"""
 
     def __init__(self, bytes_per_second, *, clock=time.monotonic) -> None:
-        self._rate_source = (
-            bytes_per_second if callable(bytes_per_second) else lambda: bytes_per_second
-        )
+        self._rate = max(0, int(bytes_per_second))
         self._clock = clock
-        self._started = clock()
-        self._bytes = 0
-        self._lock = threading.Lock()
+        self._updated = clock()
+        self._tokens = 0.0
+        self._condition = threading.Condition()
 
     def consume(self, count: int, stop_event: Optional[threading.Event] = None) -> None:
-        with self._lock:
-            rate = int(self._rate_source())
-            if rate <= 0:
-                self._started = self._clock()
-                self._bytes = 0
-                return
-            self._bytes += max(0, int(count))
-            delay = self._bytes / rate - (self._clock() - self._started)
-            while delay > 0:
-                wait = min(delay, CANCEL_POLL_INTERVAL)
-                if stop_event is not None:
-                    if stop_event.wait(wait):
-                        raise DownloadCancelled("用户停止")
-                else:
-                    time.sleep(wait)
-                rate = max(1, int(self._rate_source()))
-                delay = self._bytes / rate - (self._clock() - self._started)
+        count = max(0, int(count))
+        if count == 0:
+            return
+        with self._condition:
+            while True:
+                if stop_event is not None and stop_event.is_set():
+                    raise DownloadCancelled("用户停止")
+                now = self._clock()
+                rate = self._rate
+                if rate <= 0:
+                    return
+                capacity = max(float(count), rate * 0.25)
+                self._tokens = min(
+                    capacity,
+                    self._tokens + max(0.0, now - self._updated) * rate,
+                )
+                self._updated = now
+                if self._tokens >= count:
+                    self._tokens -= count
+                    return
+                delay = (count - self._tokens) / rate
+                self._condition.wait(timeout=min(delay, CANCEL_POLL_INTERVAL))
 
-    def rebase(self) -> None:
-        """从当前时刻重新计算额度，避免运行中改限速继承旧账。"""
-        with self._lock:
-            self._started = self._clock()
-            self._bytes = 0
+    def current_rate(self) -> int:
+        with self._condition:
+            return self._rate
+
+    def set_rate(self, bytes_per_second: int) -> None:
+        """原子更新速度并唤醒等待线程，从当前时刻重新计量。"""
+        with self._condition:
+            self._rate = max(0, int(bytes_per_second))
+            self._tokens = 0.0
+            self._updated = self._clock()
+            self._condition.notify_all()
 
 
 class _CombinedSpeedLimiter:

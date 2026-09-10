@@ -1,6 +1,8 @@
 """现有下载核心到新版协调器的适配测试。"""
 
 from pathlib import Path
+import threading
+import time
 
 import pytest
 
@@ -96,13 +98,30 @@ def test_adapter_waits_for_cancelled_downloader_cleanup_before_returning(tmp_pat
     assert calls == ["download", "cleanup"]
 
 
-def test_changing_global_speed_limit_rebases_shared_limiter():
-    pool = _SharedGlobalSpeedPool(1_000_000)
+def test_changing_global_speed_limit_rebases_without_waiting_for_consumer():
+    pool = _SharedGlobalSpeedPool(10_000)
     limiter = pool.acquire()
-    limiter._bytes = 60_000_000
-    limiter._started = -1
+    stopped = threading.Event()
 
-    pool.set_limit(10_000_000)
+    def consume_until_stopped():
+        try:
+            limiter.consume(64 * 1024, stopped)
+        except Exception:
+            pass
 
-    assert limiter._bytes == 0
-    assert limiter._started >= 0
+    consumer = threading.Thread(target=consume_until_stopped)
+    consumer.start()
+    time.sleep(0.05)
+
+    changed = threading.Event()
+    setter = threading.Thread(
+        target=lambda: (pool.set_limit(1_000), changed.set())
+    )
+    setter.start()
+
+    try:
+        assert changed.wait(0.5), "修改限速不能被正在等待的下载线程阻塞"
+    finally:
+        stopped.set()
+        consumer.join(timeout=1)
+        setter.join(timeout=1)

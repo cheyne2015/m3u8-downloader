@@ -1,7 +1,6 @@
 """把现有下载核心接入新版父任务协调器。"""
 
 from pathlib import Path
-import threading
 
 from .downloader import M3U8Downloader, _SpeedLimiter
 from .secrets_v2 import unprotect_secret
@@ -9,9 +8,7 @@ from .secrets_v2 import unprotect_secret
 
 class _SharedGlobalSpeedPool:
     def __init__(self, limit: int) -> None:
-        self._limit = max(0, int(limit))
-        self._lock = threading.Lock()
-        self._limiter = _SpeedLimiter(self.current_limit)
+        self._limiter = _SpeedLimiter(limit)
 
     def acquire(self):
         return self._limiter
@@ -20,13 +17,10 @@ class _SharedGlobalSpeedPool:
         return None
 
     def current_limit(self) -> int:
-        with self._lock:
-            return self._limit
+        return self._limiter.current_rate()
 
     def set_limit(self, limit: int) -> None:
-        with self._lock:
-            self._limit = max(0, int(limit))
-        self._limiter.rebase()
+        self._limiter.set_rate(limit)
 
 
 class ExistingDownloaderAdapter:
