@@ -18,20 +18,26 @@
     timestamp:   最近一次更新/插入的本地时间字符串。
     title:       网页名/网页标题（页维度，``record_page_extracted(title=)`` 写入；
                  旧记录缺失时降级为空串，展示层回退显示网页 URL）。
-    output_path: 最近一次成功下载的输出文件完整路径（供 GUI「打开位置」定位）；
-                 旧记录缺失时降级为空串。
-    downloads:   该页历次成功下载的 m3u8 列表：``[{"m3u8_url", "timestamp"}, ...]``
-                 （同一 m3u8 去重，仅更新时间；按时间旧→新排列）。
+    output_path: 最近一次成功下载的输出文件完整路径（记录级兜底，供 GUI
+                 「打开位置」在条目级路径缺失时回退）；旧记录缺失时降级为空串。
+    downloads:   该页历次成功下载的 m3u8 列表：
+                 ``[{"m3u8_url", "timestamp", "output_path"}, ...]``
+                 （同一 m3u8 去重；重下时更新时间与输出路径并移到列表末尾，
+                 故列表始终维持时间旧→新排列）。每个条目自带 ``output_path``，
+                 保证「某个 m3u8 ↔ 它下载出来的文件」一一对应；旧记录条目缺该
+                 字段时降级为空串，展示层回退记录级 ``output_path``。
     m3u8_url:    冗余兼容字段 = 全部已下载 m3u8 的换行拼接（供旧版本读取/展示）。
                  展示「最近一次下载的 m3u8」请用 :func:`latest_m3u8_url`，
+                 要同时拿到 m3u8 与对应文件路径请用 :func:`latest_download`，
                  不要直接用本字段（它包含历史全部）。
 
 语义要点：
 - ``record_page_extracted`` 只做「触达」：已有 downloaded 记录时状态与 m3u8 列表
   原样保留（不重置为 extracted、不丢 m3u8），仅把该页移到列表头部刷新时间；
   从未成功下载的页重新提取时才保持/回到 extracted。
-- ``record_page_downloaded`` 把本次 m3u8 追加进 ``downloads``（同一 m3u8 只更新
-  时间），状态置 downloaded，永不清空已有 m3u8。
+- ``record_page_downloaded`` 把本次 m3u8 与本次输出文件路径追加进 ``downloads``
+  （同一 m3u8 只更新时间/路径并移到列表末尾），状态置 downloaded，永不清空已有
+  m3u8。
 - ``record_page_failed`` 仅当该页从未成功下载时把状态置 failed；已有成功下载
   记录时保持 downloaded（不抹掉已下载的 m3u8）。
 """
@@ -72,7 +78,8 @@ def _clean_path(value) -> str:
 def _normalize(record) -> "Dict[str, object]":
     """把一条原始 dict 归一化为内存结构；结构非法时返回 None.
 
-    向后兼容：旧版记录缺 ``title`` / ``output_path`` 字段时安全降级为空串。
+    向后兼容：旧版记录缺 ``title`` / ``output_path``（记录级与 ``downloads``
+    条目级）字段时安全降级为空串。
 
     Returns:
         含 ``page_url/status/timestamp/title/output_path/downloads`` 的记录；
@@ -99,12 +106,18 @@ def _normalize(record) -> "Dict[str, object]":
             downloads.append({
                 "m3u8_url": url,
                 "timestamp": str(item.get("timestamp") or ""),
+                # 旧记录条目没有 output_path → 降级空串（展示层回退记录级路径）
+                "output_path": _clean_path(item.get("output_path")),
             })
     else:
         # 旧版单 m3u8_url 字段 → 迁移为 downloads 列表
         url = _clean_text(record.get("m3u8_url"))
         if url:
-            downloads.append({"m3u8_url": url, "timestamp": timestamp})
+            downloads.append({
+                "m3u8_url": url,
+                "timestamp": timestamp,
+                "output_path": "",
+            })
     return {
         "page_url": page_url,
         "status": status,
@@ -143,7 +156,12 @@ def _save(records: List[Dict[str, object]]) -> None:
         out = []
         for r in records:
             downloads = [
-                {"m3u8_url": d["m3u8_url"], "timestamp": d["timestamp"]}
+                {
+                    "m3u8_url": d["m3u8_url"],
+                    "timestamp": d["timestamp"],
+                    # 条目级输出路径：保证「该 m3u8 ↔ 它下载出的文件」不错位
+                    "output_path": _clean_path(d.get("output_path")),
+                }
                 for d in (r.get("downloads") or [])
             ]
             out.append({
@@ -187,10 +205,52 @@ def _display(records: List[Dict[str, object]]) -> List[Dict[str, str]]:
     return out
 
 
+def latest_download(record) -> Dict[str, str]:
+    """取该页**最近一次**成功下载的条目（m3u8 与其输出文件成对返回）.
+
+    按条目 ``timestamp`` 最大者判定「最近一次」（时间戳格式固定为
+    ``YYYY-MM-DD HH:MM:SS``，可直接字符串比较），而**不是**硬取
+    ``downloads[-1]``：重下旧 m3u8 时列表末位并不一定是最新一次。
+    同一秒内多次下载导致时间戳相同时取列表靠后者（``record_page_downloaded``
+    保证重下条目被移到末尾，故列表顺序即旧→新）。
+
+    Args:
+        record: :func:`list_records` 返回的展示记录 dict（或内部记录 dict）。
+
+    Returns:
+        条目副本 ``{"m3u8_url", "timestamp", "output_path"}``（缺字段降级空串）；
+        没有下载记录或入参非法时返回空 dict ``{}``。
+    """
+    if not isinstance(record, dict):
+        return {}
+    downloads = record.get("downloads")
+    if not isinstance(downloads, list) or not downloads:
+        return {}
+    best: Dict[str, str] = {}
+    best_ts = None
+    for item in downloads:
+        if not isinstance(item, dict):
+            continue
+        if not _clean_text(item.get("m3u8_url")):
+            continue
+        ts = str(item.get("timestamp") or "")
+        # ``>=`` 让时间戳相同时靠后的条目胜出（列表顺序即旧→新）。
+        if best_ts is None or ts >= best_ts:
+            best = item
+            best_ts = ts
+    if not best:
+        return {}
+    return {
+        "m3u8_url": _clean_text(best.get("m3u8_url")),
+        "timestamp": str(best.get("timestamp") or ""),
+        "output_path": _clean_path(best.get("output_path")),
+    }
+
+
 def latest_m3u8_url(record) -> str:
     """取该页**最近一次**下载的 m3u8 直链（展示用，单条）.
 
-    优先取 ``downloads`` 列表最后一项（按时间旧→新排列，即最新一次下载）；
+    基于 :func:`latest_download`（按时间戳判定最近一次，不硬取列表末位）；
     没有 ``downloads`` 时回退取冗余 ``m3u8_url`` 字段的第一行。
 
     Args:
@@ -199,13 +259,11 @@ def latest_m3u8_url(record) -> str:
     Returns:
         最近一次下载的 m3u8 直链；取不到时返回空串。
     """
+    latest = latest_download(record)
+    if latest.get("m3u8_url"):
+        return str(latest["m3u8_url"])
     if not isinstance(record, dict):
         return ""
-    downloads = record.get("downloads") or []
-    if isinstance(downloads, list) and downloads:
-        last = downloads[-1]
-        if isinstance(last, dict):
-            return _clean_text(last.get("m3u8_url"))
     joined = str(record.get("m3u8_url") or "")
     if joined:
         return _clean_text(joined.split("\n")[0])
@@ -272,9 +330,10 @@ def record_page_downloaded(page_url: str, m3u8_url: str, output_path: str = "") 
     Args:
         page_url: 所属网页 URL（可为空串，空则不写）.
         m3u8_url: 本次实际下载的 m3u8 直链.
-        output_path: 本次下载输出文件的完整路径（可选）；仅当非空时更新记录的
-                     ``output_path``（即始终保存最近一次成功下载的位置，供
-                     GUI「打开位置」定位）。空值不覆盖已有路径。
+        output_path: 本次下载输出文件的完整路径（可选）；写入**本次 m3u8 对应的
+                     downloads 条目**（保证「m3u8 ↔ 文件」一一对应），同时更新
+                     记录级 ``output_path`` 作为兜底。仅当非空时更新，空值不覆盖
+                     已有路径。
     """
     key = _clean_text(page_url)
     url = _clean_text(m3u8_url)
@@ -292,18 +351,33 @@ def record_page_downloaded(page_url: str, m3u8_url: str, output_path: str = "") 
             "output_path": new_output_path,
             "downloads": [],
         }
+    now = _now()
     downloads = list(rec.get("downloads") or [])
-    replaced = False
-    for d in downloads:
-        if d.get("m3u8_url") == url:
-            d["timestamp"] = _now()
-            replaced = True
+    existing_index = -1
+    for i, d in enumerate(downloads):
+        if isinstance(d, dict) and d.get("m3u8_url") == url:
+            existing_index = i
             break
-    if not replaced:
-        downloads.append({"m3u8_url": url, "timestamp": _now()})
+    if existing_index >= 0:
+        # 重下同一个 m3u8：更新时间与输出路径，并把条目移到列表末尾，
+        # 保证 downloads 始终维持「旧→新」顺序（否则末位不再是最近一次）。
+        entry = downloads.pop(existing_index)
+        entry["timestamp"] = now
+        if new_output_path:
+            entry["output_path"] = new_output_path
+        elif "output_path" not in entry:
+            # 向后兼容：旧记录条目缺该字段时补空串，空值不抹掉已有路径。
+            entry["output_path"] = ""
+        downloads.append(entry)
+    else:
+        downloads.append({
+            "m3u8_url": url,
+            "timestamp": now,
+            "output_path": new_output_path,
+        })
     rec["downloads"] = downloads
     rec["status"] = STATUS_DOWNLOADED
-    rec["timestamp"] = _now()
+    rec["timestamp"] = now
     # 仅当本次拿到有效输出路径时更新（始终保存最近一次成功下载的位置）。
     if new_output_path:
         rec["output_path"] = new_output_path

@@ -1757,6 +1757,70 @@ class TestPageHistoryPanel:
         with patch("m3u8_downloader.gui.subprocess.Popen", side_effect=OSError("boom")):
             assert page_history_gui._reveal_path_in_file_manager(str(tmp_path)) is False
 
+    def _row_m3u8_and_open_target(self, gui):
+        """渲染面板并返回 (第一行显示的 m3u8, 点「打开位置」实际定位的路径)。"""
+        revealed = []
+        gui._reveal_path_in_file_manager = lambda p: (revealed.append(p), True)[1]
+        factory = _ButtonFactory()
+        with patch("tkinter.ttk.Treeview") as tree_mock, patch(
+            "tkinter.ttk.Button", factory
+        ):
+            gui._show_page_history()
+        values = tree_mock.return_value.insert.call_args.kwargs["values"]
+        tree_mock.return_value.selection.return_value = ("r0",)
+        factory.by_text["打开位置"][0]["command"]()
+        return values[4], (revealed[0] if revealed else "")
+
+    def test_row_m3u8_matches_opened_file_after_redownload(self, page_history_gui):
+        """回归：A → B → 再次 A 后，行内 m3u8 与「打开位置」的文件必须一一对应。
+
+        旧实现下 downloads 末位仍是 B（重下 A 只就地刷时间戳），行显示 B，
+        而记录级 output_path 已是 A 的文件 → 显示与打开的文件错位。
+        """
+        from m3u8_downloader import page_history
+        page_history.record_page_downloaded(
+            "https://x/page", "https://cdn/x/a.m3u8", output_path="D:/out/a.mp4"
+        )
+        page_history.record_page_downloaded(
+            "https://x/page", "https://cdn/x/b.m3u8", output_path="D:/out/b.mp4"
+        )
+        page_history.record_page_downloaded(
+            "https://x/page", "https://cdn/x/a.m3u8", output_path="D:/out/a-2.mp4"
+        )
+        m3u8_display, opened = self._row_m3u8_and_open_target(page_history_gui)
+        assert m3u8_display == "https://cdn/x/a.m3u8"
+        assert opened == "D:/out/a-2.mp4"
+
+    def test_row_m3u8_matches_opened_file_for_distinct_m3u8(self, page_history_gui):
+        """只下载不同 m3u8 时同样对应：最近一次是 B → 打开 B 的文件。"""
+        from m3u8_downloader import page_history
+        page_history.record_page_downloaded(
+            "https://x/page", "https://cdn/x/a.m3u8", output_path="D:/out/a.mp4"
+        )
+        page_history.record_page_downloaded(
+            "https://x/page", "https://cdn/x/b.m3u8", output_path="D:/out/b.mp4"
+        )
+        m3u8_display, opened = self._row_m3u8_and_open_target(page_history_gui)
+        assert m3u8_display == "https://cdn/x/b.m3u8"
+        assert opened == "D:/out/b.mp4"
+
+    def test_legacy_row_falls_back_to_record_output_path(self, page_history_gui, tmp_path):
+        """旧记录条目无 output_path → 回退记录级路径，不崩且仍可定位。"""
+        import json
+        (tmp_path / "page_history.json").write_text(json.dumps({"records": [{
+            "page_url": "https://x/old",
+            "status": "downloaded",
+            "timestamp": "2026-01-01 00:00:00",
+            "output_path": "D:/out/legacy.mp4",
+            "downloads": [
+                {"m3u8_url": "https://cdn/x/a.m3u8",
+                 "timestamp": "2026-01-01 00:00:00"},
+            ],
+        }]}), encoding="utf-8")
+        m3u8_display, opened = self._row_m3u8_and_open_target(page_history_gui)
+        assert m3u8_display == "https://cdn/x/a.m3u8"
+        assert opened == "D:/out/legacy.mp4"
+
 
 class TestPageHistoryRecordWiring:
     """GUI 触发链写入 title / output_path。"""

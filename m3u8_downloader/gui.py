@@ -2065,6 +2065,9 @@ class M3U8DownloaderGUI:
         列：时间 / 网页名（网页标题，取不到回退网页 URL）/ 状态 / 网页 URL /
         最近一次下载的 m3u8。选中一行且该行有输出文件路径时可用「打开位置」
         在系统文件管理器中定位该文件。
+
+        同一行展示的 m3u8 与「打开位置」定位的文件严格来自同一条「最近一次下载」
+        记录（:func:`page_history.latest_download`），保证一一对应。
         """
         from m3u8_downloader import page_history
         try:
@@ -2115,8 +2118,17 @@ class M3U8DownloaderGUI:
                 record.get("page_url", "")
             )
             # 同一页多次下载过的 m3u8 累积在 downloads 里；这里只展示**最近一次**
-            # 下载的 m3u8（取 downloads 末项，无 downloads 时回退 m3u8_url 首行）。
-            m3u8_display = page_history.latest_m3u8_url(record)
+            # 下载的那一条。关键：m3u8 与「打开位置」的文件路径必须取自**同一个**
+            # 条目，否则会出现「显示 m3u8 是 B、打开的却是 A 的文件」的错位。
+            latest = page_history.latest_download(record)
+            m3u8_display = str(latest.get("m3u8_url", "") or "")
+            if not m3u8_display:
+                # 无 downloads 的旧记录：回退冗余 m3u8_url 字段首行。
+                m3u8_display = page_history.latest_m3u8_url(record)
+            # 条目级路径优先；旧记录条目无 output_path 时回退记录级兜底路径。
+            row_output_path = str(latest.get("output_path", "") or "") or str(
+                record.get("output_path", "") or ""
+            )
             item_id = f"r{index}"
             tree.insert(
                 "", tk.END, iid=item_id,
@@ -2128,7 +2140,7 @@ class M3U8DownloaderGUI:
                     m3u8_display,
                 ),
             )
-            path_by_item[item_id] = str(record.get("output_path", "") or "")
+            path_by_item[item_id] = row_output_path
 
         def _selected_output_path() -> str:
             """当前选中行对应的输出文件路径；未选中/无路径时返回空串."""
