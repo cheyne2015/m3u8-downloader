@@ -421,8 +421,13 @@ class MainWindow(QMainWindow):
         self.info_view.setReadOnly(True)
         self.detail_tabs.addTab(self.item_table, "下载项")
         self.detail_tabs.addTab(self.info_view, "详细信息")
+        self.download_selected_button = QPushButton("下载选中项")
+        self.download_selected_button.setObjectName("newTask")
+        self.download_selected_button.setEnabled(False)
+        self.download_selected_button.clicked.connect(self._download_selected_items)
         layout.addWidget(self.detail_title)
         layout.addWidget(self.detail_tabs, 1)
+        layout.addWidget(self.download_selected_button, 0, Qt.AlignmentFlag.AlignRight)
         return panel
 
     def _build_log_area(self) -> QWidget:
@@ -482,8 +487,10 @@ class MainWindow(QMainWindow):
         if current is None:
             return
         task: Task = current.data(Qt.ItemDataRole.UserRole)
+        self._detail_task_id = task.id
         self.detail_title.setText(task.name)
         items = self._service.list_items(task.id)
+        self.download_selected_button.setEnabled(bool(items))
         self.item_table.setRowCount(len(items))
         for row, item in enumerate(items):
             display_name = item.label or f"下载项 {item.output_index:02d}"
@@ -497,6 +504,15 @@ class MainWindow(QMainWindow):
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(value)
                 cell.setToolTip(item.source_url)
+                if column == 0:
+                    cell.setData(Qt.ItemDataRole.UserRole, item.id)
+                    if item.status.value in {"unselected", "waiting"}:
+                        cell.setFlags(cell.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                        cell.setCheckState(
+                            Qt.CheckState.Checked
+                            if item.status.value == "waiting"
+                            else Qt.CheckState.Unchecked
+                        )
                 self.item_table.setItem(row, column, cell)
         self.info_view.setPlainText(
             f"状态：{_task_status(task)}\n"
@@ -505,9 +521,48 @@ class MainWindow(QMainWindow):
             f"创建时间：{task.created_at:%Y-%m-%d %H:%M:%S}"
         )
 
+    def _download_selected_items(self) -> None:
+        task_id = getattr(self, "_detail_task_id", "")
+        if not task_id:
+            return
+        selected = []
+        for row in range(self.item_table.rowCount()):
+            cell = self.item_table.item(row, 0)
+            if cell.checkState() is Qt.CheckState.Checked:
+                selected.append(cell.data(Qt.ItemDataRole.UserRole))
+        self._service.select_items_for_download(task_id, selected)
+        self.refresh_tasks()
+        for row in range(self.task_list.count()):
+            item = self.task_list.item(row)
+            if item.data(Qt.ItemDataRole.UserRole).id == task_id:
+                self.task_list.setCurrentItem(item)
+                break
+        self.log_view.appendPlainText(f"已选择 {len(selected)} 个下载项")
+
 
 def run_gui_v2(service: TaskService) -> int:
+    from .background_v2 import TaskBackgroundController
+    from .downloader_adapter_v2 import ExistingDownloaderAdapter
+    from .extractor_adapter_v2 import ExistingExtractorAdapter
+    from .tasking import DownloadCoordinator, TaskCoordinator
+
     app = QApplication.instance() or QApplication([])
     window = MainWindow(service)
+    controller = TaskBackgroundController(
+        service,
+        extraction_coordinator=TaskCoordinator(
+            service, extractor=ExistingExtractorAdapter()
+        ),
+        download_coordinator=DownloadCoordinator(
+            service, downloader=ExistingDownloaderAdapter()
+        ),
+        parent=window,
+    )
+    controller.changed.connect(window.refresh_tasks)
+    controller.log.connect(
+        lambda task_id, message: window.log_view.appendPlainText(f"[{task_id[:8]}] {message}")
+    )
+    window.background_controller = controller
     window.show()
+    controller.start()
     return app.exec()

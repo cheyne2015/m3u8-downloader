@@ -47,10 +47,16 @@ class SQLiteTaskRepository:
                     queue_position INTEGER NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
+                    original_title TEXT NOT NULL DEFAULT '',
+                    name_edited INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT NOT NULL DEFAULT '',
                     selection_mode TEXT NOT NULL DEFAULT 'auto',
                     settings_json TEXT NOT NULL
                 )
             """)
+            self._ensure_task_column(connection, "original_title", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_task_column(connection, "name_edited", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_task_column(connection, "last_error", "TEXT NOT NULL DEFAULT ''")
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS app_settings (
                     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -67,10 +73,34 @@ class SQLiteTaskRepository:
                     status TEXT NOT NULL,
                     estimated_bytes INTEGER,
                     duration_seconds REAL,
+                    valid INTEGER NOT NULL DEFAULT 1,
+                    output_path TEXT NOT NULL DEFAULT '',
+                    downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+                    total_bytes INTEGER NOT NULL DEFAULT 0,
                     UNIQUE(task_id, source_url),
                     FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
                 )
             """)
+            item_columns = {row[1] for row in connection.execute("PRAGMA table_info(download_items)")}
+            if "valid" not in item_columns:
+                connection.execute(
+                    "ALTER TABLE download_items ADD COLUMN valid INTEGER NOT NULL DEFAULT 1"
+                )
+            self._ensure_item_column(connection, "output_path", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_item_column(connection, "downloaded_bytes", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_item_column(connection, "total_bytes", "INTEGER NOT NULL DEFAULT 0")
+
+    @staticmethod
+    def _ensure_task_column(connection: sqlite3.Connection, name: str, definition: str) -> None:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(tasks)")}
+        if name not in columns:
+            connection.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
+
+    @staticmethod
+    def _ensure_item_column(connection: sqlite3.Connection, name: str, definition: str) -> None:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(download_items)")}
+        if name not in columns:
+            connection.execute(f"ALTER TABLE download_items ADD COLUMN {name} {definition}")
 
     def next_queue_position(self) -> int:
         with self._connect() as connection:
@@ -106,6 +136,9 @@ class SQLiteTaskRepository:
             task.queue_position,
             task.created_at.isoformat(),
             task.updated_at.isoformat(),
+            task.original_title,
+            int(task.name_edited),
+            task.last_error,
             task.selection_mode.value,
             json.dumps(asdict(task.settings), ensure_ascii=False, separators=(",", ":")),
         ) for task in tasks]
@@ -116,8 +149,9 @@ class SQLiteTaskRepository:
                 INSERT INTO tasks (
                     id, source_url, source_kind, name, save_directory,
                     extraction_status, download_status, queue_position,
-                    created_at, updated_at, selection_mode, settings_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at, original_title, name_edited, last_error,
+                    selection_mode, settings_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, rows)
 
     def save_many(self, tasks: Iterable[Task]) -> None:
@@ -132,6 +166,9 @@ class SQLiteTaskRepository:
             task.queue_position,
             task.created_at.isoformat(),
             task.updated_at.isoformat(),
+            task.original_title,
+            int(task.name_edited),
+            task.last_error,
             task.selection_mode.value,
             json.dumps(asdict(task.settings), ensure_ascii=False, separators=(",", ":")),
             task.id,
@@ -143,7 +180,8 @@ class SQLiteTaskRepository:
                 UPDATE tasks SET
                     source_url = ?, source_kind = ?, name = ?, save_directory = ?,
                     extraction_status = ?, download_status = ?, queue_position = ?,
-                    created_at = ?, updated_at = ?, selection_mode = ?, settings_json = ?
+                    created_at = ?, updated_at = ?, original_title = ?, name_edited = ?,
+                    last_error = ?, selection_mode = ?, settings_json = ?
                 WHERE id = ?
             """, rows)
 
@@ -168,6 +206,8 @@ class SQLiteTaskRepository:
             item.id, item.task_id, item.source_url, item.label,
             item.output_index, item.status.value, item.estimated_bytes,
             item.duration_seconds,
+            int(item.valid),
+            item.output_path, item.downloaded_bytes, item.total_bytes,
         ) for item in items]
         if not rows:
             return
@@ -175,8 +215,9 @@ class SQLiteTaskRepository:
             connection.executemany("""
                 INSERT OR IGNORE INTO download_items (
                     id, task_id, source_url, label, output_index, status,
-                    estimated_bytes, duration_seconds
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    estimated_bytes, duration_seconds, valid, output_path,
+                    downloaded_bytes, total_bytes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, rows)
 
     def list_items(self, task_id: str) -> List[DownloadItem]:
@@ -191,12 +232,17 @@ class SQLiteTaskRepository:
             status=ItemStatus(row["status"]),
             estimated_bytes=row["estimated_bytes"],
             duration_seconds=row["duration_seconds"],
+            valid=bool(row["valid"]),
+            output_path=row["output_path"],
+            downloaded_bytes=int(row["downloaded_bytes"]),
+            total_bytes=int(row["total_bytes"]),
         ) for row in rows]
 
     def save_items(self, items: Iterable[DownloadItem]) -> None:
         rows = [(
             item.source_url, item.label, item.output_index, item.status.value,
-            item.estimated_bytes, item.duration_seconds, item.id,
+            item.estimated_bytes, item.duration_seconds, int(item.valid),
+            item.output_path, item.downloaded_bytes, item.total_bytes, item.id,
         ) for item in items]
         if not rows:
             return
@@ -204,7 +250,8 @@ class SQLiteTaskRepository:
             connection.executemany("""
                 UPDATE download_items SET source_url = ?, label = ?,
                     output_index = ?, status = ?, estimated_bytes = ?,
-                    duration_seconds = ? WHERE id = ?
+                    duration_seconds = ?, valid = ?, output_path = ?,
+                    downloaded_bytes = ?, total_bytes = ? WHERE id = ?
             """, rows)
 
     @staticmethod
@@ -221,6 +268,9 @@ class SQLiteTaskRepository:
             queue_position=int(row["queue_position"]),
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
+            original_title=row["original_title"],
+            name_edited=bool(row["name_edited"]),
+            last_error=row["last_error"],
             selection_mode=SelectionMode(row["selection_mode"]),
             settings=settings,
         )

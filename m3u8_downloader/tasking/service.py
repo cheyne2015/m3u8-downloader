@@ -86,6 +86,15 @@ class TaskService:
     def list_items(self, task_id: str) -> List[DownloadItem]:
         return self._repository.list_items(task_id)
 
+    def get_item(self, task_id: str, item_id: str) -> DownloadItem:
+        for item in self._repository.list_items(task_id):
+            if item.id == item_id:
+                return item
+        raise KeyError(item_id)
+
+    def get_task(self, task_id: str) -> Task:
+        return self._repository.get_task(task_id)
+
     def load_app_settings(self) -> AppSettings:
         return self._repository.load_app_settings()
 
@@ -141,6 +150,7 @@ class TaskService:
                 status=ItemStatus.UNSELECTED,
                 estimated_bytes=candidate.estimated_bytes,
                 duration_seconds=candidate.duration_seconds,
+                valid=candidate.valid,
             ))
             next_index += 1
         self._repository.add_items(added)
@@ -153,6 +163,130 @@ class TaskService:
             extraction_status=ExtractionStatus.RUNNING,
             updated_at=self._clock(),
         )
+        self._repository.save_many([task])
+        return task
+
+    def apply_page_title(self, task_id: str, title: str) -> Task:
+        title = title.strip()
+        task = self._repository.get_task(task_id)
+        if not title:
+            return task
+        task = replace(
+            task,
+            original_title=title,
+            name=(task.name if task.name_edited else title),
+            updated_at=self._clock(),
+        )
+        self._repository.save_many([task])
+        return task
+
+    def rename_task(self, task_id: str, name: str) -> Task:
+        name = _INVALID_FILE_CHARS.sub("_", name).strip(" ._")
+        if not name:
+            raise ValueError("任务名称不能为空")
+        task = replace(
+            self._repository.get_task(task_id),
+            name=name,
+            name_edited=True,
+            updated_at=self._clock(),
+        )
+        self._repository.save_many([task])
+        return task
+
+    def fail_extraction(self, task_id: str, error: str) -> Task:
+        task = replace(
+            self._repository.get_task(task_id),
+            extraction_status=ExtractionStatus.FAILED,
+            last_error=str(error),
+            updated_at=self._clock(),
+        )
+        self._repository.save_many([task])
+        return task
+
+    def prepare_output_paths(self, task_id: str, planner) -> List[DownloadItem]:
+        task = self._repository.get_task(task_id)
+        items = self._repository.list_items(task_id)
+        paths = planner.plan(task, items)
+        items = [
+            replace(item, output_path=str(paths[item.id])) if not item.output_path else item
+            for item in items
+        ]
+        self._repository.save_items(items)
+        return items
+
+    def start_item(self, task_id: str, item_id: str) -> DownloadItem:
+        item = replace(self.get_item(task_id, item_id), status=ItemStatus.DOWNLOADING)
+        self._repository.save_items([item])
+        task = replace(
+            self._repository.get_task(task_id),
+            download_status=DownloadStatus.RUNNING,
+            updated_at=self._clock(),
+        )
+        self._repository.save_many([task])
+        return item
+
+    def update_item_progress(self, task_id: str, item_id: str, progress: dict) -> None:
+        item = self.get_item(task_id, item_id)
+        item = replace(
+            item,
+            downloaded_bytes=max(0, int(progress.get("downloaded", item.downloaded_bytes))),
+            total_bytes=max(0, int(progress.get("total", item.total_bytes))),
+        )
+        self._repository.save_items([item])
+
+    def complete_item(self, task_id: str, item_id: str, output_path) -> DownloadItem:
+        size = os.path.getsize(output_path) if os.path.isfile(output_path) else 0
+        item = replace(
+            self.get_item(task_id, item_id),
+            status=ItemStatus.COMPLETED,
+            output_path=str(output_path),
+            downloaded_bytes=size,
+            total_bytes=size,
+        )
+        self._repository.save_items([item])
+        return item
+
+    def fail_item(self, task_id: str, item_id: str, error: str) -> Task:
+        item = replace(self.get_item(task_id, item_id), status=ItemStatus.FAILED)
+        self._repository.save_items([item])
+        task = replace(
+            self._repository.get_task(task_id),
+            download_status=DownloadStatus.PARTIAL_FAILURE,
+            last_error=str(error),
+            updated_at=self._clock(),
+        )
+        self._repository.save_many([task])
+        return task
+
+    def skip_item(self, task_id: str, item_id: str) -> Task:
+        item = self.get_item(task_id, item_id)
+        if item.status is ItemStatus.COMPLETED:
+            raise ValueError("已完成的下载项不能跳过")
+        self._repository.save_items([replace(item, status=ItemStatus.SKIPPED)])
+        return self.finish_parent_if_handled(task_id)
+
+    def finish_parent_if_handled(self, task_id: str) -> Task:
+        task = self._repository.get_task(task_id)
+        selected = [
+            item for item in self._repository.list_items(task_id)
+            if item.status is not ItemStatus.UNSELECTED
+        ]
+        if any(item.status is ItemStatus.FAILED for item in selected):
+            status = DownloadStatus.PARTIAL_FAILURE
+        elif selected and all(
+            item.status in {ItemStatus.COMPLETED, ItemStatus.SKIPPED} for item in selected
+        ):
+            status = (
+                DownloadStatus.COMPLETED
+                if task.extraction_status in {
+                    ExtractionStatus.COMPLETED, ExtractionStatus.NOT_REQUIRED,
+                    ExtractionStatus.FAILED,
+                }
+                else DownloadStatus.RUNNING
+            )
+        else:
+            status = task.download_status
+        task = replace(task, download_status=status, updated_at=self._clock())
         self._repository.save_many([task])
         return task
 
@@ -186,12 +320,17 @@ class TaskService:
         """结束提取，并按任务阈值决定自动下载或等待用户选择。"""
         task = self._repository.get_task(task_id)
         items = self._repository.list_items(task_id)
+        valid_items = [item for item in items if item.valid]
         if (
             task.selection_mode is SelectionMode.AUTO
-            and items
-            and len(items) <= task.settings.auto_download_threshold
+            and valid_items
+            and len(valid_items) <= task.settings.auto_download_threshold
         ):
-            items = [replace(item, status=ItemStatus.WAITING) for item in items]
+            items = [
+                replace(item, status=ItemStatus.WAITING)
+                if item.valid else item
+                for item in items
+            ]
             download_status = DownloadStatus.WAITING
             self._repository.save_items(items)
         elif task.selection_mode is SelectionMode.AUTO:

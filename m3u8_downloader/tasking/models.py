@@ -127,6 +127,9 @@ class Task:
     queue_position: int
     created_at: datetime
     updated_at: datetime
+    original_title: str = ""
+    name_edited: bool = False
+    last_error: str = ""
     selection_mode: SelectionMode = SelectionMode.AUTO
     settings: TaskSettings = field(default_factory=TaskSettings)
 
@@ -144,6 +147,7 @@ class Candidate:
     label: str = ""
     estimated_bytes: int | None = None
     duration_seconds: float | None = None
+    valid: bool = True
 
 
 @dataclass(frozen=True)
@@ -156,3 +160,7 @@ class DownloadItem:
     status: ItemStatus
     estimated_bytes: int | None = None
     duration_seconds: float | None = None
+    valid: bool = True
+    output_path: str = ""
+    downloaded_bytes: int = 0
+    total_bytes: int = 0

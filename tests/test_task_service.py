@@ -120,6 +120,32 @@ def test_finished_extraction_auto_queues_candidates_within_threshold(tmp_path):
     ]
 
 
+def test_unreachable_candidates_do_not_count_toward_auto_download_threshold(tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    service = TaskService(repository, id_factory=lambda: "parent")
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42", save_directory=str(tmp_path)
+    ))[0]
+    service.add_candidates(task.id, [
+        Candidate("https://cdn.example/1.m3u8"),
+        Candidate("https://cdn.example/2.m3u8"),
+        Candidate("https://cdn.example/3.m3u8"),
+        Candidate("https://cdn.example/broken-1.m3u8", valid=False),
+        Candidate("https://cdn.example/broken-2.m3u8", valid=False),
+    ])
+
+    finished = service.finish_extraction(task.id)
+
+    assert finished.download_status is DownloadStatus.WAITING
+    assert [item.status for item in service.list_items(task.id)] == [
+        ItemStatus.WAITING,
+        ItemStatus.WAITING,
+        ItemStatus.WAITING,
+        ItemStatus.UNSELECTED,
+        ItemStatus.UNSELECTED,
+    ]
+
+
 def test_manual_selection_can_download_while_extraction_keeps_running(tmp_path):
     """手动接管后只下载所选项，后续流式候选保持未选择。"""
     repository = SQLiteTaskRepository(tmp_path / "tasks.db")

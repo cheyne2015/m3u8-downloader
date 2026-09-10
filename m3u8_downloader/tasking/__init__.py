@@ -16,20 +16,26 @@ from .models import (
 from .repository import SQLiteTaskRepository
 from .scheduler import SchedulePlan, TaskScheduler
 from .service import TaskService
+from .coordinator import TaskCoordinator
+from .output import OutputPlanner
+from .download_coordinator import DownloadCoordinator
 
 __all__ = [
     "AppSettings",
     "Candidate",
     "CreateTaskRequest",
     "DownloadItem",
+    "DownloadCoordinator",
     "DownloadStatus",
     "ExtractionStatus",
     "ItemStatus",
+    "OutputPlanner",
     "SelectionMode",
     "SourceKind",
     "SQLiteTaskRepository",
     "SchedulePlan",
     "Task",
+    "TaskCoordinator",
     "TaskService",
     "TaskScheduler",
     "TaskSettings",

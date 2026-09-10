@@ -3,7 +3,14 @@
 from PySide6.QtCore import Qt
 
 from m3u8_downloader.gui_v2 import MainWindow
-from m3u8_downloader.tasking import SQLiteTaskRepository, TaskService
+from m3u8_downloader.tasking import (
+    Candidate,
+    CreateTaskRequest,
+    DownloadStatus,
+    ItemStatus,
+    SQLiteTaskRepository,
+    TaskService,
+)
 
 
 def test_new_link_dialog_adds_tasks_to_downloading_view(qtbot, tmp_path):
@@ -59,3 +66,32 @@ def test_settings_page_saves_concurrency_threshold_and_notification(qtbot, tmp_p
     assert saved.download_task_limit == 5
     assert saved.auto_download_threshold == 8
     assert saved.completion_notification is True
+
+
+def test_pending_task_can_queue_checked_download_items(qtbot, tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    service = TaskService(repository, id_factory=lambda: "page")
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42", save_directory=str(tmp_path)
+    ))[0]
+    service.add_candidates(task.id, [
+        Candidate(f"https://cdn.example/{index}.m3u8", label=f"线路 {index}")
+        for index in range(1, 5)
+    ])
+    service.finish_extraction(task.id)
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window.task_list.setCurrentRow(0)
+
+    window.item_table.item(0, 0).setCheckState(Qt.CheckState.Checked)
+    window.item_table.item(2, 0).setCheckState(Qt.CheckState.Checked)
+    qtbot.mouseClick(window.download_selected_button, Qt.MouseButton.LeftButton)
+
+    assert service.get_task(task.id).download_status is DownloadStatus.WAITING
+    assert [item.status for item in service.list_items(task.id)] == [
+        ItemStatus.WAITING,
+        ItemStatus.UNSELECTED,
+        ItemStatus.WAITING,
+        ItemStatus.UNSELECTED,
+    ]
