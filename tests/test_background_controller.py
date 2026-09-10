@@ -8,7 +8,7 @@ class RecordingExtractionCoordinator:
     def __init__(self):
         self.calls = []
 
-    def run_extraction(self, task_id):
+    def run_extraction(self, task_id, stop_event):
         self.calls.append(task_id)
 
 
@@ -16,7 +16,7 @@ class RecordingDownloadCoordinator:
     def __init__(self):
         self.calls = []
 
-    def run_parent(self, task_id, on_log):
+    def run_parent(self, task_id, stop_event, on_log):
         self.calls.append(task_id)
 
 

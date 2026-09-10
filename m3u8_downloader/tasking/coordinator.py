@@ -37,6 +37,8 @@ class TaskCoordinator:
                     stop_event=stop_event,
                 )
                 self._service.add_candidates(task_id, list(candidates or []))
+                if stop_event.is_set():
+                    return self._service.get_task(task_id)
                 self._service.finish_extraction(task_id)
                 return self._service.finish_parent_if_handled(task_id)
             except Exception as exc:

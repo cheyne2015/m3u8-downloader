@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 
 
 class SourceKind(str, Enum):
@@ -164,3 +165,20 @@ class DownloadItem:
     output_path: str = ""
     downloaded_bytes: int = 0
     total_bytes: int = 0
+
+
+@dataclass(frozen=True)
+class LogEntry:
+    id: int
+    task_id: str
+    level: str
+    category: str
+    message: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class DeletionPreview:
+    task_id: str
+    output_files: tuple[Path, ...]
+    total_bytes: int

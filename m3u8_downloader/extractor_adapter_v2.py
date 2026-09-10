@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from . import extractor, utils
 from .tasking import Candidate
+from .secrets_v2 import unprotect_secret
 
 
 def _map_candidate(candidate) -> Candidate:
@@ -30,6 +31,8 @@ class ExistingExtractorAdapter:
             session.headers["Referer"] = settings.referer
         if settings.user_agent:
             session.headers["User-Agent"] = settings.user_agent
+        if settings.protected_cookie:
+            session.headers["Cookie"] = unprotect_secret(settings.protected_cookie)
 
         def report(candidate) -> None:
             on_candidate(_map_candidate(candidate))
@@ -52,4 +55,3 @@ class ExistingExtractorAdapter:
             return [_map_candidate(candidate) for candidate in candidates]
         finally:
             session.close()
-

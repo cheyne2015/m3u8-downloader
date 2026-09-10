@@ -3,10 +3,13 @@
 from dataclasses import replace
 from datetime import datetime
 
+import pytest
+
 from m3u8_downloader.tasking import (
     Candidate,
     CreateTaskRequest,
     DownloadStatus,
+    DuplicateSourceError,
     ExtractionStatus,
     ItemStatus,
     SelectionMode,
@@ -175,3 +178,44 @@ def test_manual_selection_can_download_while_extraction_keeps_running(tmp_path):
         ItemStatus.UNSELECTED,
         ItemStatus.UNSELECTED,
     ]
+
+
+def test_pause_and_resume_parent_release_and_restore_runnable_work(tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    service = TaskService(repository, id_factory=lambda: "parent")
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42", save_directory=str(tmp_path)
+    ))[0]
+    service.start_extraction(task.id)
+    items = service.add_candidates(task.id, [Candidate("https://cdn.example/1.m3u8")])
+    service.select_items_for_download(task.id, [items[0].id])
+    service.start_item(task.id, items[0].id)
+
+    paused = service.pause_task(task.id)
+
+    assert paused.extraction_status is ExtractionStatus.PAUSED
+    assert paused.download_status is DownloadStatus.PAUSED
+    assert service.get_item(task.id, items[0].id).status is ItemStatus.PAUSED
+
+    resumed = service.resume_task(task.id)
+
+    assert resumed.extraction_status is ExtractionStatus.WAITING
+    assert resumed.download_status is DownloadStatus.WAITING
+    assert service.get_item(task.id, items[0].id).status is ItemStatus.WAITING
+
+
+def test_existing_source_requires_explicit_duplicate_creation(tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    service = TaskService(repository)
+    request = CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8", save_directory=str(tmp_path)
+    )
+    original = service.create_tasks(request)[0]
+
+    with pytest.raises(DuplicateSourceError) as raised:
+        service.create_tasks(request)
+
+    assert raised.value.existing_task_ids == (original.id,)
+    duplicate = service.create_tasks(request, allow_duplicates=True)[0]
+    assert duplicate.id != original.id
+    assert duplicate.queue_position == 2

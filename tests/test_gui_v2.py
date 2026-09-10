@@ -42,6 +42,7 @@ def test_new_link_dialog_adds_tasks_to_downloading_view(qtbot, tmp_path):
     assert window.item_table.rowCount() == 1
     assert window.item_table.item(0, 0).text() == "video"
     assert window.item_table.item(0, 2).text() == "等待下载"
+    window._force_exit = True
 
 
 def test_settings_page_saves_concurrency_threshold_and_notification(qtbot, tmp_path):
@@ -66,6 +67,7 @@ def test_settings_page_saves_concurrency_threshold_and_notification(qtbot, tmp_p
     assert saved.download_task_limit == 5
     assert saved.auto_download_threshold == 8
     assert saved.completion_notification is True
+    window._force_exit = True
 
 
 def test_pending_task_can_queue_checked_download_items(qtbot, tmp_path):
@@ -95,3 +97,4 @@ def test_pending_task_can_queue_checked_download_items(qtbot, tmp_path):
         ItemStatus.WAITING,
         ItemStatus.UNSELECTED,
     ]
+    window._force_exit = True

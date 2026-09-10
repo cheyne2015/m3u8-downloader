@@ -47,3 +47,22 @@ def test_download_and_extraction_use_separate_fifo_capacity(tmp_path):
     assert plan.start_extraction == ("extract-wait",)
     assert plan.start_download == ("both", "download-wait-1")
 
+
+def test_move_to_front_persists_and_changes_next_waiting_task(tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    service = TaskService(repository, id_factory=iter(["one", "two", "three"]).__next__)
+    service.create_tasks(CreateTaskRequest(
+        addresses="\n".join([
+            "https://cdn.example/1.m3u8",
+            "https://cdn.example/2.m3u8",
+            "https://cdn.example/3.m3u8",
+        ]),
+        save_directory=str(tmp_path),
+    ))
+
+    service.move_task("three", "front")
+
+    restored = SQLiteTaskRepository(tmp_path / "tasks.db").list_tasks()
+    assert [task.id for task in restored] == ["three", "one", "two"]
+    plan = TaskScheduler().plan(restored, download_limit=1, extraction_limit=3)
+    assert plan.start_download == ("three",)

@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from .downloader import M3U8Downloader
+from .secrets_v2 import unprotect_secret
 
 
 class ExistingDownloaderAdapter:
@@ -22,6 +23,13 @@ class ExistingDownloaderAdapter:
             progress_callback=on_progress,
             log_callback=on_log,
         )
+        session = getattr(downloader, "_session", None)
+        if session is not None:
+            if settings.referer:
+                session.headers["Referer"] = settings.referer
+            if settings.user_agent:
+                session.headers["User-Agent"] = settings.user_agent
+            if settings.protected_cookie:
+                session.headers["Cookie"] = unprotect_secret(settings.protected_cookie)
         result = downloader.download()
         return Path(result)
-

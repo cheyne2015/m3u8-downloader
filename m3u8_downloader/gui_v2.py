@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import os
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QAction, QColor, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -19,18 +20,23 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QInputDialog,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSplitter,
     QStackedWidget,
+    QStyle,
     QSpinBox,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
@@ -38,11 +44,13 @@ from PySide6.QtWidgets import (
 from .tasking import (
     CreateTaskRequest,
     DownloadStatus,
+    DuplicateSourceError,
     ExtractionStatus,
     Task,
     TaskService,
     TaskSettings,
 )
+from .secrets_v2 import protect_secret
 
 
 _STYLE = """
@@ -216,17 +224,31 @@ class NewTaskDialog(QDialog):
             proxy=self.proxy_edit.text().strip(),
             referer=self.referer_edit.text().strip(),
             user_agent=self.user_agent_edit.text().strip(),
+            protected_cookie=protect_secret(self.cookie_edit.text()),
             speed_limit=int(self.speed_limit_edit.text() or 0),
             segment_threads=app_settings.segment_threads,
             request_retries=app_settings.request_retries,
             task_retries=app_settings.task_retries,
             retry_delay_seconds=app_settings.retry_delay_seconds,
         )
-        tasks = self._service.create_tasks(CreateTaskRequest(
+        request = CreateTaskRequest(
             addresses=self.address_edit.toPlainText(),
             save_directory=self.directory_edit.text(),
             settings=task_settings,
-        ))
+        )
+        try:
+            tasks = self._service.create_tasks(request)
+        except DuplicateSourceError:
+            answer = QMessageBox.question(
+                self,
+                "链接已存在",
+                "任务列表中已有相同链接。是否仍创建一个副本？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer is not QMessageBox.StandardButton.Yes:
+                return
+            tasks = self._service.create_tasks(request, allow_duplicates=True)
         if tasks:
             self.tasks_created.emit(tasks)
             self.accept()
@@ -236,6 +258,7 @@ class MainWindow(QMainWindow):
     def __init__(self, service: TaskService, parent=None) -> None:
         super().__init__(parent)
         self._service = service
+        self._force_exit = False
         self.new_task_dialog: NewTaskDialog | None = None
         self.setWindowTitle("m3u8 下载器")
         self.resize(1280, 790)
@@ -244,6 +267,7 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(_STYLE)
         self._build_ui()
         self.refresh_tasks()
+        self._refresh_logs()
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -305,10 +329,16 @@ class MainWindow(QMainWindow):
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("搜索任务、链接或文件")
         self.search_edit.textChanged.connect(self.refresh_tasks)
+        self.pause_task_button = QPushButton("暂停")
+        self.pause_task_button.clicked.connect(self._pause_current_task)
+        self.resume_task_button = QPushButton("继续")
+        self.resume_task_button.clicked.connect(self._resume_current_task)
         self.new_task_button = QPushButton("＋ 新建链接")
         self.new_task_button.setObjectName("newTask")
         self.new_task_button.clicked.connect(self.open_new_task_dialog)
         toolbar.addWidget(self.search_edit, 1)
+        toolbar.addWidget(self.pause_task_button)
+        toolbar.addWidget(self.resume_task_button)
         toolbar.addWidget(self.new_task_button)
         layout.addLayout(toolbar)
         self.page_title = QLabel("下载中")
@@ -317,7 +347,16 @@ class MainWindow(QMainWindow):
         self.pages = QStackedWidget()
         self.task_list = QListWidget()
         self.task_list.currentItemChanged.connect(self._show_task_detail)
+        self.task_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.task_list.customContextMenuRequested.connect(
+            lambda position: self._show_task_menu(self.task_list, position)
+        )
         self.completed_list = QListWidget()
+        self.completed_list.currentItemChanged.connect(self._show_task_detail)
+        self.completed_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.completed_list.customContextMenuRequested.connect(
+            lambda position: self._show_task_menu(self.completed_list, position)
+        )
         settings_page = self._build_settings_page()
         self.pages.addWidget(self.task_list)
         self.pages.addWidget(self.completed_list)
@@ -461,8 +500,10 @@ class MainWindow(QMainWindow):
         self.new_task_dialog.open()
 
     def _tasks_created(self, tasks: list[Task]) -> None:
+        for task in tasks:
+            self._service.add_log(task.id, "信息", "任务", "任务已创建")
         self.refresh_tasks()
-        self.log_view.appendPlainText(f"已创建 {len(tasks)} 个任务")
+        self._refresh_logs()
 
     def refresh_tasks(self) -> None:
         query = self.search_edit.text().strip().lower() if hasattr(self, "search_edit") else ""
@@ -520,6 +561,7 @@ class MainWindow(QMainWindow):
             f"保存位置：{task.save_directory}\n"
             f"创建时间：{task.created_at:%Y-%m-%d %H:%M:%S}"
         )
+        self._refresh_logs(task.id)
 
     def _download_selected_items(self) -> None:
         task_id = getattr(self, "_detail_task_id", "")
@@ -537,7 +579,163 @@ class MainWindow(QMainWindow):
             if item.data(Qt.ItemDataRole.UserRole).id == task_id:
                 self.task_list.setCurrentItem(item)
                 break
-        self.log_view.appendPlainText(f"已选择 {len(selected)} 个下载项")
+        self._service.add_log(task_id, "信息", "任务", f"已选择 {len(selected)} 个下载项")
+        self._refresh_logs(task_id)
+
+    def _pause_current_task(self) -> None:
+        item = self.task_list.currentItem()
+        if item is None:
+            return
+        task_id = item.data(Qt.ItemDataRole.UserRole).id
+        controller = getattr(self, "background_controller", None)
+        if controller is None:
+            self._service.pause_task(task_id)
+        else:
+            controller.pause_task(task_id)
+        self._service.add_log(task_id, "信息", "任务", "任务已暂停")
+        self.refresh_tasks()
+
+    def _resume_current_task(self) -> None:
+        item = self.task_list.currentItem()
+        if item is None:
+            return
+        task_id = item.data(Qt.ItemDataRole.UserRole).id
+        controller = getattr(self, "background_controller", None)
+        if controller is None:
+            self._service.resume_task(task_id)
+        else:
+            controller.resume_task(task_id)
+        self._service.add_log(task_id, "信息", "任务", "任务已继续")
+        self.refresh_tasks()
+
+    def _refresh_logs(self, task_id: str | None = None) -> None:
+        entries = self._service.list_logs(task_id=task_id)
+        self.log_view.setPlainText("\n".join(
+            f"{entry.created_at:%H:%M:%S}  [{entry.level}] "
+            f"[{entry.category}]  {entry.message}"
+            for entry in entries[-500:]
+        ))
+
+    def show_from_tray(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def request_exit(self) -> None:
+        self._force_exit = True
+        controller = getattr(self, "background_controller", None)
+        if controller is not None:
+            controller.stop()
+        QApplication.quit()
+
+    def closeEvent(self, event) -> None:
+        if self._force_exit:
+            event.accept()
+            return
+        settings = self._service.load_app_settings()
+        active = any(
+            task.download_status is not DownloadStatus.COMPLETED
+            for task in self._service.list_tasks()
+        )
+        if settings.close_to_tray:
+            self.hide()
+            event.ignore()
+            return
+        if not active:
+            event.accept()
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("仍有任务未完成")
+        box.setText("请选择关闭方式")
+        tray_button = box.addButton("最小化到托盘", QMessageBox.ButtonRole.AcceptRole)
+        exit_button = box.addButton("暂停全部并退出", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_button = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is tray_button:
+            self.hide()
+            event.ignore()
+        elif clicked is exit_button:
+            controller = getattr(self, "background_controller", None)
+            if controller is not None:
+                controller.pause_all()
+                controller.stop()
+            else:
+                self._service.pause_all()
+            self._force_exit = True
+            event.accept()
+        else:
+            event.ignore()
+
+    def _show_task_menu(self, task_list: QListWidget, position) -> None:
+        item = task_list.itemAt(position)
+        if item is None:
+            return
+        task_list.setCurrentItem(item)
+        task = item.data(Qt.ItemDataRole.UserRole)
+        menu = QMenu(self)
+        if task.download_status is not DownloadStatus.COMPLETED:
+            menu.addAction("继续", self._resume_current_task)
+            menu.addAction("暂停", self._pause_current_task)
+            queue_menu = menu.addMenu("调整队列")
+            queue_menu.addAction("优先下载 / 移到最前", lambda: self._move_task(task.id, "front"))
+            queue_menu.addAction("上移", lambda: self._move_task(task.id, "up"))
+            queue_menu.addAction("下移", lambda: self._move_task(task.id, "down"))
+            queue_menu.addAction("移到最后", lambda: self._move_task(task.id, "back"))
+            menu.addSeparator()
+        menu.addAction("查看详情", lambda: self.detail_tabs.setCurrentIndex(1))
+        menu.addAction("打开保存位置", lambda: self._open_task_directory(task))
+        menu.addAction("重命名任务", lambda: self._rename_task(task))
+        menu.addAction("复制原始链接", lambda: QApplication.clipboard().setText(task.source_url))
+        menu.addSeparator()
+        menu.addAction("删除任务", lambda: self._delete_task(task, False))
+        menu.addAction("彻底删除文件", lambda: self._delete_task(task, True))
+        menu.exec(task_list.mapToGlobal(position))
+
+    @staticmethod
+    def _open_task_directory(task: Task) -> None:
+        directory = Path(task.save_directory)
+        if directory.is_dir():
+            os.startfile(str(directory))
+
+    def _rename_task(self, task: Task) -> None:
+        name, accepted = QInputDialog.getText(
+            self, "重命名任务", "任务名称", text=task.name
+        )
+        if accepted and name.strip():
+            self._service.rename_task(task.id, name)
+            self._service.add_log(task.id, "信息", "任务", f"任务已重命名为 {name.strip()}")
+            self.refresh_tasks()
+
+    def _move_task(self, task_id: str, direction: str) -> None:
+        self._service.move_task(task_id, direction)
+        self.refresh_tasks()
+
+    def _delete_task(self, task: Task, delete_outputs: bool) -> None:
+        preview = self._service.preview_deletion(task.id)
+        if delete_outputs:
+            file_lines = "\n".join(str(path) for path in preview.output_files) or "没有已记录的输出文件"
+            size_mb = preview.total_bytes / 1024 / 1024
+            message = (
+                f"将删除任务记录和以下文件（共 {size_mb:.2f} MB）：\n\n"
+                f"{file_lines}\n\n此操作无法撤销。"
+            )
+            title = "彻底删除文件"
+        else:
+            message = "删除任务记录？已完成的输出文件会保留。"
+            title = "删除任务"
+        if QMessageBox.question(
+            self, title, message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) is not QMessageBox.StandardButton.Yes:
+            return
+        controller = getattr(self, "background_controller", None)
+        if controller is not None:
+            controller.pause_task(task.id)
+        self._service.delete_task(task.id, delete_outputs=delete_outputs)
+        self.refresh_tasks()
+        self._refresh_logs()
 
 
 def run_gui_v2(service: TaskService) -> int:
@@ -545,8 +743,12 @@ def run_gui_v2(service: TaskService) -> int:
     from .downloader_adapter_v2 import ExistingDownloaderAdapter
     from .extractor_adapter_v2 import ExistingExtractorAdapter
     from .tasking import DownloadCoordinator, TaskCoordinator
+    from .windows_v2 import SingleInstanceGuard
 
     app = QApplication.instance() or QApplication([])
+    guard = SingleInstanceGuard("m3u8-downloader-v2-single-instance", app)
+    if not guard.acquire():
+        return 0
     window = MainWindow(service)
     controller = TaskBackgroundController(
         service,
@@ -560,9 +762,30 @@ def run_gui_v2(service: TaskService) -> int:
     )
     controller.changed.connect(window.refresh_tasks)
     controller.log.connect(
-        lambda task_id, message: window.log_view.appendPlainText(f"[{task_id[:8]}] {message}")
+        lambda task_id, _message: window._refresh_logs(task_id)
     )
     window.background_controller = controller
+    tray = QSystemTrayIcon(
+        window.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown), window
+    )
+    tray.setToolTip("m3u8 下载器")
+    tray_menu = QMenu(window)
+    tray_menu.addAction("显示主窗口", window.show_from_tray)
+    tray_menu.addAction("暂停全部", controller.pause_all)
+    tray_menu.addAction("继续全部", controller.resume_all)
+    tray_menu.addSeparator()
+    tray_menu.addAction("退出", window.request_exit)
+    tray.setContextMenu(tray_menu)
+    tray.activated.connect(lambda _reason: window.show_from_tray())
+    controller.parent_completed.connect(
+        lambda _task_id, name: tray.showMessage(
+            "下载完成", f"{name} 已全部完成", QSystemTrayIcon.MessageIcon.Information, 5000
+        ) if service.load_app_settings().completion_notification else None
+    )
+    guard.activate_requested.connect(window.show_from_tray)
+    window.tray_icon = tray
+    window.single_instance_guard = guard
+    tray.show()
     window.show()
     controller.start()
     return app.exec()

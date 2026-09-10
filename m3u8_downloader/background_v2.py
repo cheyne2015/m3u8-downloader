@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 
 from .tasking import TaskScheduler
@@ -32,6 +34,7 @@ class _Worker(QRunnable):
 class TaskBackgroundController(QObject):
     changed = Signal()
     log = Signal(str, str)
+    parent_completed = Signal(str, str)
 
     def __init__(
         self,
@@ -52,6 +55,8 @@ class TaskBackgroundController(QObject):
         self._extracting: set[str] = set()
         self._downloading: set[str] = set()
         self._workers: set[_Worker] = set()
+        self._extract_events: dict[str, threading.Event] = {}
+        self._download_events: dict[str, threading.Event] = {}
         self._timer = QTimer(self)
         self._timer.setInterval(max(10, poll_interval_ms))
         self._timer.timeout.connect(self.dispatch)
@@ -62,6 +67,21 @@ class TaskBackgroundController(QObject):
 
     def stop(self) -> None:
         self._timer.stop()
+        for event in [*self._extract_events.values(), *self._download_events.values()]:
+            event.set()
+
+    def pause_task(self, task_id: str) -> None:
+        if task_id in self._extract_events:
+            self._extract_events[task_id].set()
+        if task_id in self._download_events:
+            self._download_events[task_id].set()
+        self._service.pause_task(task_id)
+        self.changed.emit()
+
+    def resume_task(self, task_id: str) -> None:
+        self._service.resume_task(task_id)
+        self.changed.emit()
+        self.dispatch()
 
     def dispatch(self) -> None:
         settings = self._service.load_app_settings()
@@ -75,21 +95,30 @@ class TaskBackgroundController(QObject):
             if task_id in self._extracting:
                 continue
             self._extracting.add(task_id)
+            event = threading.Event()
+            self._extract_events[task_id] = event
             self._submit(
                 "extract",
                 task_id,
-                lambda task_id=task_id: self._extraction.run_extraction(task_id),
+                lambda task_id=task_id, event=event: self._extraction.run_extraction(
+                    task_id, stop_event=event
+                ),
             )
         for task_id in plan.start_download:
             if task_id in self._downloading:
                 continue
             self._downloading.add(task_id)
+            event = threading.Event()
+            self._download_events[task_id] = event
             self._submit(
                 "download",
                 task_id,
-                lambda task_id=task_id: self._download.run_parent(
+                lambda task_id=task_id, event=event: self._download.run_parent(
                     task_id,
-                    on_log=lambda message: self.log.emit(task_id, message),
+                    stop_event=event,
+                    on_log=lambda message, task_id=task_id: self._record_log(
+                        task_id, "下载", message
+                    ),
                 ),
             )
 
@@ -102,15 +131,34 @@ class TaskBackgroundController(QObject):
     def _finished(self, kind: str, task_id: str, error: str) -> None:
         if kind == "extract":
             self._extracting.discard(task_id)
+            self._extract_events.pop(task_id, None)
         else:
             self._downloading.discard(task_id)
+            self._download_events.pop(task_id, None)
         self._workers = {
             worker for worker in self._workers
             if not (worker.kind == kind and worker.task_id == task_id)
         }
         if error:
+            self._service.add_log(task_id, "错误", kind, error)
             self.log.emit(task_id, f"操作失败：{error}")
+        elif kind == "download":
+            task = self._service.get_task(task_id)
+            if task.download_status.value == "completed":
+                self.parent_completed.emit(task.id, task.name)
         self.changed.emit()
         if self._timer.isActive():
             QTimer.singleShot(0, self.dispatch)
 
+    def _record_log(self, task_id: str, category: str, message: str) -> None:
+        self._service.add_log(task_id, "信息", category, message)
+        self.log.emit(task_id, message)
+
+    def pause_all(self) -> None:
+        for task in self._service.list_tasks():
+            self.pause_task(task.id)
+
+    def resume_all(self) -> None:
+        self._service.resume_all()
+        self.changed.emit()
+        self.dispatch()

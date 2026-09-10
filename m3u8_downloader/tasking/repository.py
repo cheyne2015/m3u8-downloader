@@ -13,6 +13,7 @@ from .models import (
     DownloadItem,
     ExtractionStatus,
     ItemStatus,
+    LogEntry,
     SelectionMode,
     SourceKind,
     Task,
@@ -89,6 +90,20 @@ class SQLiteTaskRepository:
             self._ensure_item_column(connection, "output_path", "TEXT NOT NULL DEFAULT ''")
             self._ensure_item_column(connection, "downloaded_bytes", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_item_column(connection, "total_bytes", "INTEGER NOT NULL DEFAULT 0")
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS task_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    level TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_task_logs_task_time "
+                "ON task_logs(task_id, created_at)"
+            )
 
     @staticmethod
     def _ensure_task_column(connection: sqlite3.Connection, name: str, definition: str) -> None:
@@ -253,6 +268,48 @@ class SQLiteTaskRepository:
                     duration_seconds = ?, valid = ?, output_path = ?,
                     downloaded_bytes = ?, total_bytes = ? WHERE id = ?
             """, rows)
+
+    def append_log(
+        self, task_id: str, level: str, category: str, message: str, created_at: datetime
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute("""
+                INSERT INTO task_logs(task_id, level, category, message, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (task_id, level, category, message, created_at.isoformat()))
+
+    def list_logs(self, *, task_id: str | None = None, level: str | None = None) -> List[LogEntry]:
+        clauses = []
+        values = []
+        if task_id is not None:
+            clauses.append("task_id = ?")
+            values.append(task_id)
+        if level is not None:
+            clauses.append("level = ?")
+            values.append(level)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM task_logs" + where + " ORDER BY id", values
+            ).fetchall()
+        return [LogEntry(
+            id=int(row["id"]), task_id=row["task_id"], level=row["level"],
+            category=row["category"], message=row["message"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+        ) for row in rows]
+
+    def delete_task(self, task_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM task_logs WHERE task_id = ?", (task_id,))
+            connection.execute("DELETE FROM download_items WHERE task_id = ?", (task_id,))
+            connection.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+
+    def purge_logs_before(self, cutoff: datetime) -> int:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM task_logs WHERE created_at < ?", (cutoff.isoformat(),)
+            )
+            return int(cursor.rowcount)
 
     @staticmethod
     def _from_row(row: sqlite3.Row) -> Task:

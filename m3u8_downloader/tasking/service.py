@@ -2,10 +2,11 @@
 
 import os
 import re
+import shutil
 import uuid
 from dataclasses import replace
-from datetime import datetime
-from pathlib import PurePosixPath
+from datetime import datetime, timedelta
+from pathlib import Path, PurePosixPath
 from typing import Callable, List
 from urllib.parse import unquote, urlsplit, urlunsplit
 
@@ -13,6 +14,7 @@ from .models import (
     AppSettings,
     Candidate,
     CreateTaskRequest,
+    DeletionPreview,
     DownloadItem,
     DownloadStatus,
     ExtractionStatus,
@@ -26,6 +28,12 @@ from .repository import SQLiteTaskRepository
 
 _GENERIC_PLAYLIST_NAMES = {"index", "playlist", "master", "media"}
 _INVALID_FILE_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+class DuplicateSourceError(ValueError):
+    def __init__(self, existing_task_ids) -> None:
+        self.existing_task_ids = tuple(existing_task_ids)
+        super().__init__("链接已存在")
 
 
 class TaskService:
@@ -44,8 +52,18 @@ class TaskService:
         self._id_factory = id_factory
         self._item_id_factory = item_id_factory
 
-    def create_tasks(self, request: CreateTaskRequest) -> List[Task]:
+    def create_tasks(
+        self, request: CreateTaskRequest, *, allow_duplicates: bool = False
+    ) -> List[Task]:
         addresses = self._normalize_addresses(request.addresses)
+        if not allow_duplicates:
+            wanted = set(addresses)
+            duplicates = [
+                task.id for task in self._repository.list_tasks()
+                if task.source_url in wanted
+            ]
+            if duplicates:
+                raise DuplicateSourceError(duplicates)
         save_directory = os.path.abspath(os.path.expanduser(request.save_directory))
         position = self._repository.next_queue_position()
         now = self._clock()
@@ -100,6 +118,18 @@ class TaskService:
 
     def save_app_settings(self, settings: AppSettings) -> None:
         self._repository.save_app_settings(settings)
+
+    def add_log(self, task_id: str, level: str, category: str, message: str) -> None:
+        self._repository.append_log(
+            task_id, level, category, str(message), self._clock()
+        )
+
+    def list_logs(self, *, task_id: str | None = None, level: str | None = None):
+        return self._repository.list_logs(task_id=task_id, level=level)
+
+    def purge_expired_logs(self) -> int:
+        days = self.load_app_settings().log_retention_days
+        return self._repository.purge_logs_before(self._clock() - timedelta(days=days))
 
     def restore_tasks_after_restart(self) -> List[Task]:
         """将中断时仍在执行的状态落盘为暂停，并返回恢复后的任务。"""
@@ -264,6 +294,127 @@ class TaskService:
             raise ValueError("已完成的下载项不能跳过")
         self._repository.save_items([replace(item, status=ItemStatus.SKIPPED)])
         return self.finish_parent_if_handled(task_id)
+
+    def pause_task(self, task_id: str) -> Task:
+        task = self._repository.get_task(task_id)
+        items = self._repository.list_items(task_id)
+        pausable = {ItemStatus.WAITING, ItemStatus.DOWNLOADING, ItemStatus.RETRY_WAIT}
+        items = [
+            replace(item, status=ItemStatus.PAUSED) if item.status in pausable else item
+            for item in items
+        ]
+        self._repository.save_items(items)
+        extraction_status = (
+            ExtractionStatus.PAUSED
+            if task.extraction_status in {ExtractionStatus.WAITING, ExtractionStatus.RUNNING}
+            else task.extraction_status
+        )
+        has_unfinished_download = any(item.status is ItemStatus.PAUSED for item in items)
+        task = replace(
+            task,
+            extraction_status=extraction_status,
+            download_status=(DownloadStatus.PAUSED if has_unfinished_download else task.download_status),
+            updated_at=self._clock(),
+        )
+        self._repository.save_many([task])
+        return task
+
+    def resume_task(self, task_id: str) -> Task:
+        task = self._repository.get_task(task_id)
+        items = self._repository.list_items(task_id)
+        items = [
+            replace(item, status=ItemStatus.WAITING)
+            if item.status is ItemStatus.PAUSED else item
+            for item in items
+        ]
+        self._repository.save_items(items)
+        extraction_status = (
+            ExtractionStatus.WAITING
+            if task.extraction_status is ExtractionStatus.PAUSED
+            else task.extraction_status
+        )
+        has_waiting = any(item.status is ItemStatus.WAITING for item in items)
+        download_status = DownloadStatus.WAITING if has_waiting else task.download_status
+        task = replace(
+            task,
+            extraction_status=extraction_status,
+            download_status=download_status,
+            updated_at=self._clock(),
+        )
+        self._repository.save_many([task])
+        return task
+
+    def delete_task(self, task_id: str, *, delete_outputs: bool) -> DeletionPreview:
+        preview = self.preview_deletion(task_id)
+        task = self._repository.get_task(task_id)
+        for path in preview.output_files:
+            partial = Path(str(path) + ".part")
+            if partial.is_file():
+                partial.unlink()
+            if delete_outputs and path.is_file():
+                path.unlink()
+        cache = Path(task.save_directory) / ".m3u8-cache" / task.id
+        if cache.is_dir() and cache.parent.name == ".m3u8-cache":
+            shutil.rmtree(cache)
+        self._repository.delete_task(task_id)
+        return preview
+
+    def preview_deletion(self, task_id: str) -> DeletionPreview:
+        output_files = tuple(
+            Path(item.output_path)
+            for item in self._repository.list_items(task_id)
+            if item.output_path
+        )
+        total_bytes = sum(path.stat().st_size for path in output_files if path.is_file())
+        return DeletionPreview(task_id, output_files, total_bytes)
+
+    def pause_all(self) -> None:
+        for task in self._repository.list_tasks():
+            if task.download_status is not DownloadStatus.COMPLETED:
+                self.pause_task(task.id)
+
+    def resume_all(self) -> None:
+        for task in self._repository.list_tasks():
+            if (
+                task.extraction_status is ExtractionStatus.PAUSED
+                or task.download_status is DownloadStatus.PAUSED
+            ):
+                self.resume_task(task.id)
+
+    def block_for_space(self, task_id: str, free_bytes: int, required_bytes: int) -> Task:
+        self.pause_task(task_id)
+        task = replace(
+            self._repository.get_task(task_id),
+            last_error=f"磁盘空间不足：可用 {free_bytes} 字节，需要 {required_bytes} 字节",
+            updated_at=self._clock(),
+        )
+        self._repository.save_many([task])
+        return task
+
+    def move_task(self, task_id: str, direction: str) -> List[Task]:
+        tasks = self._repository.list_tasks()
+        index = next((i for i, task in enumerate(tasks) if task.id == task_id), None)
+        if index is None:
+            raise KeyError(task_id)
+        task = tasks.pop(index)
+        if direction == "front":
+            target = 0
+        elif direction == "back":
+            target = len(tasks)
+        elif direction == "up":
+            target = max(0, index - 1)
+        elif direction == "down":
+            target = min(len(tasks), index + 1)
+        else:
+            raise ValueError("未知队列移动方式")
+        tasks.insert(target, task)
+        now = self._clock()
+        tasks = [
+            replace(item, queue_position=position, updated_at=now)
+            for position, item in enumerate(tasks, start=1)
+        ]
+        self._repository.save_many(tasks)
+        return tasks
 
     def finish_parent_if_handled(self, task_id: str) -> Task:
         task = self._repository.get_task(task_id)

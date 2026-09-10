@@ -32,5 +32,5 @@ def build_task_service() -> TaskService:
     database = current_data_directory() / "tasks-v2.db"
     service = TaskService(SQLiteTaskRepository(database))
     service.restore_tasks_after_restart()
+    service.purge_expired_logs()
     return service
-
