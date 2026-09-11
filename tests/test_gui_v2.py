@@ -226,6 +226,37 @@ def test_new_task_dialog_explains_missing_required_fields(qtbot, tmp_path):
     dialog.reject()
 
 
+def test_reopened_window_loads_persisted_logs_and_scrolls_to_the_latest(
+    qtbot, tmp_path,
+):
+    database = tmp_path / "tasks.db"
+    service = TaskService(SQLiteTaskRepository(database))
+    for index in range(80):
+        service.add_log("previous-task", "信息", "下载", f"上次运行日志 {index:02d}")
+
+    reopened = MainWindow(TaskService(SQLiteTaskRepository(database)))
+    qtbot.addWidget(reopened)
+    reopened.show()
+    reopened._force_exit = True
+    QApplication.processEvents()
+
+    text = reopened.log_view.toPlainText()
+    scroll_bar = reopened.log_view.verticalScrollBar()
+    assert reopened.log_scope_combo.currentData() == "all"
+    assert "上次运行日志 00" in text
+    assert text.endswith("上次运行日志 79")
+    assert scroll_bar.maximum() > 0
+    assert scroll_bar.value() == scroll_bar.maximum()
+
+    scroll_bar.setValue(0)
+    reopened._service.add_log("current-task", "信息", "下载", "本次最新日志")
+    reopened._refresh_logs()
+    QApplication.processEvents()
+
+    assert reopened.log_view.toPlainText().endswith("本次最新日志")
+    assert scroll_bar.value() == scroll_bar.maximum()
+
+
 def test_task_detail_is_empty_until_a_parent_task_is_selected(qtbot, tmp_path):
     service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "parent")
     task = service.create_tasks(CreateTaskRequest(

@@ -9,7 +9,7 @@ import sys
 from urllib.parse import urlsplit
 
 from PySide6.QtCore import QSignalBlocker, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QIcon, QIntValidator
+from PySide6.QtGui import QFont, QIcon, QIntValidator, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -979,6 +979,7 @@ class MainWindow(QMainWindow):
         self.log_scope_combo = QComboBox()
         self.log_scope_combo.addItem("当前任务", "current")
         self.log_scope_combo.addItem("全部任务", "all")
+        self.log_scope_combo.setCurrentIndex(1)
         self.log_level_combo = QComboBox()
         self.log_level_combo.addItem("全部级别", "all")
         for level in ["信息", "警告", "错误"]:
@@ -1514,6 +1515,14 @@ class MainWindow(QMainWindow):
             f"{entry.message}"
             for entry in entries[-500:]
         ))
+        self.log_view.moveCursor(QTextCursor.MoveOperation.End)
+        self.log_view.ensureCursorVisible()
+        self._scroll_logs_to_latest()
+        QTimer.singleShot(0, self._scroll_logs_to_latest)
+
+    def _scroll_logs_to_latest(self) -> None:
+        scroll_bar = self.log_view.verticalScrollBar()
+        scroll_bar.setValue(scroll_bar.maximum())
 
     def show_from_tray(self) -> None:
         self.showNormal()
