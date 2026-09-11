@@ -26,7 +26,10 @@ a = Analysis(
     ["m3u8_downloader/gui_launcher.py"],
     pathex=[],
     binaries=[(ffmpeg, ".")],
-    datas=[("m3u8_downloader/deep_worker.py", "m3u8_downloader")],
+    datas=[
+        ("m3u8_downloader/deep_worker.py", "m3u8_downloader"),
+        ("m3u8_downloader/assets", "m3u8_downloader/assets"),
+    ],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -54,6 +57,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
+    icon="m3u8_downloader/assets/m3u8-downloader.ico",
 )
 app = COLLECT(
     exe,

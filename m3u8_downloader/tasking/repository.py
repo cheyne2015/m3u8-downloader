@@ -336,6 +336,11 @@ class SQLiteTaskRepository:
                     speed_bps = ?, eta_seconds = ? WHERE id = ?
             """, rows)
 
+    def delete_items(self, task_id: str) -> None:
+        """删除父任务的旧候选，供用户重新提取网页内容。"""
+        with self._connect() as connection:
+            connection.execute("DELETE FROM download_items WHERE task_id = ?", (task_id,))
+
     def update_item_progress(self, item: DownloadItem) -> None:
         """只更新进度列，避免覆盖并发发生的暂停或跳过状态。"""
         with self._connect() as connection:

@@ -59,6 +59,7 @@ class TaskBackgroundController(QObject):
         self._download_events: dict[str, threading.Event] = {}
         self._completion_emitted: set[str] = set()
         self._pending_deletions: dict[str, bool] = {}
+        self._pending_extraction_restarts: set[str] = set()
         self._timer = QTimer(self)
         self._timer.setInterval(max(10, poll_interval_ms))
         self._timer.timeout.connect(self.dispatch)
@@ -99,6 +100,7 @@ class TaskBackgroundController(QObject):
         self.dispatch()
 
     def delete_task(self, task_id: str, *, delete_outputs: bool) -> None:
+        self._pending_extraction_restarts.discard(task_id)
         extract_event = self._extract_events.get(task_id)
         download_event = self._download_events.get(task_id)
         if extract_event is not None:
@@ -126,6 +128,19 @@ class TaskBackgroundController(QObject):
             self.parent_completed.emit(task.id, task.name)
         self.changed.emit()
         self.dispatch()
+
+    def retry_extraction(self, task_id: str) -> bool:
+        if task_id in self._extracting:
+            self._pending_extraction_restarts.add(task_id)
+            event = self._extract_events.get(task_id)
+            if event is not None:
+                event.set()
+            self.changed.emit()
+            return False
+        self._service.retry_extraction(task_id)
+        self.changed.emit()
+        self.dispatch()
+        return True
 
     def dispatch(self) -> None:
         if self._extracting or self._downloading:
@@ -194,8 +209,13 @@ class TaskBackgroundController(QObject):
         ):
             delete_outputs = self._pending_deletions.pop(task_id)
             self._service.delete_task(task_id, delete_outputs=delete_outputs)
+            self._pending_extraction_restarts.discard(task_id)
             self.changed.emit()
             return
+        if kind == "extract" and task_id in self._pending_extraction_restarts:
+            self._pending_extraction_restarts.discard(task_id)
+            self._service.retry_extraction(task_id)
+            error = ""
         if error:
             self._service.add_log(task_id, "错误", kind, error)
             self.log.emit(task_id, f"操作失败：{error}")

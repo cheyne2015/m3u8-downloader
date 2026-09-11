@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import replace
 import os
 from pathlib import Path
+import sys
+from urllib.parse import urlsplit
 
-from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QFont, QIntValidator
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QFont, QIcon, QIntValidator
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -30,9 +32,10 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
-    QStyle,
     QSpinBox,
     QTabWidget,
     QTableWidget,
@@ -62,11 +65,20 @@ QMainWindow { background: #0d1014; }
 #sidebarTitle { color: #8c96a3; font-size: 12px; padding: 8px 10px; }
 QPushButton { border: 0; border-radius: 7px; padding: 9px 12px; text-align: left; }
 QPushButton:hover { background: #272d35; }
+QPushButton:pressed { background: #1e242b; padding-top: 10px; padding-bottom: 8px; }
+QPushButton:disabled { background: #171b20; color: #59616c; }
 QPushButton:checked { background: #29323e; color: #65a6ff; }
 #newTask { background: #3478f6; color: white; font-weight: 600; text-align: center; padding: 9px 18px; }
 #newTask:hover { background: #4385fa; }
+#newTask:pressed { background: #2868db; }
+#newTask:disabled { background: #263852; color: #76869b; }
 QLineEdit, QTextEdit, QPlainTextEdit, QComboBox { background: #1b2026; border: 1px solid #303740; border-radius: 7px; padding: 7px; }
 QLineEdit:focus, QTextEdit:focus { border-color: #4b8cf7; }
+QSpinBox { background: #1b2026; color: #e8ebef; border: 1px solid #303740; border-radius: 6px; padding: 5px 28px 5px 7px; min-height: 18px; }
+QSpinBox::up-button, QSpinBox::down-button { subcontrol-origin: border; width: 22px; background: #252b33; border-left: 1px solid #3a424d; }
+QSpinBox::up-button { subcontrol-position: top right; border-top-right-radius: 6px; }
+QSpinBox::down-button { subcontrol-position: bottom right; border-bottom-right-radius: 6px; }
+QSpinBox::up-button:hover, QSpinBox::down-button:hover { background: #313945; }
 QListWidget { border: 0; background: transparent; outline: none; }
 QListWidget::item { border-bottom: 1px solid #242a31; }
 QListWidget::item:selected { background: #222a34; }
@@ -83,6 +95,7 @@ QProgressBar::chunk { background: #3d8bfd; border-radius: 3px; }
 #logHeader { background: #181c21; border-top: 1px solid #2a3038; padding: 5px 10px; }
 QDialog { background: #15191e; }
 #detailPanel { background: #171b20; border-left: 1px solid #292e35; }
+#feedback { background: #26313d; border: 1px solid #405164; border-radius: 6px; padding: 5px 10px; }
 """
 
 _LIGHT_STYLE = """
@@ -92,11 +105,21 @@ QMainWindow { background: #eef1f5; }
 #sidebarTitle, #muted { color: #687383; }
 QPushButton { border: 0; border-radius: 7px; padding: 9px 12px; text-align: left; }
 QPushButton:hover { background: #e8edf4; }
+QPushButton:pressed { background: #d9e1eb; padding-top: 10px; padding-bottom: 8px; }
+QPushButton:disabled { background: #eef1f5; color: #a1a9b4; }
 QPushButton:checked { background: #e1ebfa; color: #216bd6; }
 #newTask { background: #3478f6; color: white; font-weight: 600; text-align: center; }
+#newTask:hover { background: #4385fa; }
+#newTask:pressed { background: #2868db; }
+#newTask:disabled { background: #b8c9e5; color: #eef3fa; }
 QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QTableWidget {
   background: #ffffff; border: 1px solid #cfd6df; border-radius: 7px; padding: 7px;
 }
+QSpinBox { color: #20242a; padding: 5px 28px 5px 7px; min-height: 18px; }
+QSpinBox::up-button, QSpinBox::down-button { subcontrol-origin: border; width: 22px; background: #edf1f6; border-left: 1px solid #c5cdd8; }
+QSpinBox::up-button { subcontrol-position: top right; border-top-right-radius: 6px; }
+QSpinBox::down-button { subcontrol-position: bottom right; border-bottom-right-radius: 6px; }
+QSpinBox::up-button:hover, QSpinBox::down-button:hover { background: #dfe7f1; }
 QListWidget { border: 0; background: transparent; outline: none; }
 QListWidget::item { border-bottom: 1px solid #dde2e9; }
 QListWidget::item:selected { background: #e7eef8; }
@@ -110,6 +133,25 @@ QDialog { background: #f5f7fa; }
 #taskCard, #taskCard QLabel { background: transparent; }
 QProgressBar { background: #dce2ea; border: 0; border-radius: 3px; }
 QProgressBar::chunk { background: #3478f6; border-radius: 3px; }
+#feedback { background: #e7eef8; border: 1px solid #b8c8dc; border-radius: 6px; padding: 5px 10px; }
+"""
+
+
+def _asset_path(name: str) -> Path:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+    if getattr(sys, "frozen", False):
+        return base / "m3u8_downloader" / "assets" / name
+    return Path(__file__).resolve().parent / "assets" / name
+
+
+def _theme_style(theme: str) -> str:
+    light = theme == "light"
+    suffix = "light" if light else "dark"
+    up = _asset_path(f"spin-up-{suffix}.png").as_posix()
+    down = _asset_path(f"spin-down-{suffix}.png").as_posix()
+    return (_LIGHT_STYLE if light else _STYLE) + f"""
+QSpinBox::up-arrow {{ image: url(\"{up}\"); width: 12px; height: 8px; }}
+QSpinBox::down-arrow {{ image: url(\"{down}\"); width: 12px; height: 8px; }}
 """
 
 
@@ -164,6 +206,18 @@ def _format_duration(seconds: float) -> str:
     hours, remainder = divmod(seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     return f"{hours:d}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes:d}:{seconds:02d}"
+
+
+def _set_button_enabled(button: QPushButton, enabled: bool) -> None:
+    button.setEnabled(enabled)
+    button.setCursor(
+        Qt.CursorShape.PointingHandCursor if enabled else Qt.CursorShape.ArrowCursor
+    )
+
+
+def _install_button_cursors(root: QWidget) -> None:
+    for button in root.findChildren(QPushButton):
+        _set_button_enabled(button, button.isEnabled())
 
 
 class TaskCard(QWidget):
@@ -298,6 +352,7 @@ class NewTaskDialog(QDialog):
         actions.addWidget(cancel)
         actions.addWidget(self.start_button)
         root.addLayout(actions)
+        _install_button_cursors(self)
 
     def _toggle_advanced(self, visible: bool) -> None:
         self.advanced_panel.setVisible(visible)
@@ -401,6 +456,7 @@ class TaskSettingsDialog(QDialog):
         cancel = QPushButton("取消"); cancel.clicked.connect(self.reject)
         save = QPushButton("保存"); save.setObjectName("newTask"); save.clicked.connect(self.accept)
         actions.addWidget(cancel); actions.addWidget(save); root.addLayout(actions)
+        _install_button_cursors(self)
 
     def settings(self) -> TaskSettings:
         protected_cookie = self._original.protected_cookie
@@ -429,11 +485,16 @@ class MainWindow(QMainWindow):
         self._updating_item_table = False
         self.new_task_dialog: NewTaskDialog | None = None
         self.setWindowTitle("m3u8 下载器")
+        icon = QIcon(str(_asset_path("m3u8-downloader.ico")))
+        self.setWindowIcon(icon)
+        QApplication.instance().setWindowIcon(icon)
         self.resize(1280, 790)
         self.setMinimumSize(980, 640)
         QApplication.instance().setFont(QFont("Microsoft YaHei UI", 10))
         self.setStyleSheet(_STYLE)
         self._build_ui()
+        self._build_feedback_area()
+        _install_button_cursors(self)
         self._apply_theme(self._service.load_app_settings().theme)
         self.refresh_tasks()
         self._refresh_logs()
@@ -472,6 +533,7 @@ class MainWindow(QMainWindow):
         outer.addWidget(sidebar)
 
         vertical = QSplitter(Qt.Orientation.Vertical)
+        self.main_vertical_splitter = vertical
         horizontal = QSplitter(Qt.Orientation.Horizontal)
         horizontal.addWidget(self._build_task_area())
         horizontal.addWidget(self._build_detail_area())
@@ -479,7 +541,9 @@ class MainWindow(QMainWindow):
         horizontal.setCollapsible(0, False)
         vertical.addWidget(horizontal)
         vertical.addWidget(self._build_log_area())
-        vertical.setSizes([610, 150])
+        vertical.setSizes([530, 230])
+        vertical.setStretchFactor(0, 1)
+        vertical.setStretchFactor(1, 0)
         vertical.setCollapsible(1, False)
         outer.addWidget(vertical, 1)
 
@@ -489,6 +553,20 @@ class MainWindow(QMainWindow):
         button.setCheckable(True)
         button.setChecked(checked)
         return button
+
+    def _build_feedback_area(self) -> None:
+        self.feedback_label = QLabel()
+        self.feedback_label.setObjectName("feedback")
+        self.feedback_label.hide()
+        self.statusBar().addPermanentWidget(self.feedback_label)
+        self._feedback_timer = QTimer(self)
+        self._feedback_timer.setSingleShot(True)
+        self._feedback_timer.timeout.connect(self.feedback_label.hide)
+
+    def _show_feedback(self, message: str, duration_ms: int = 2400) -> None:
+        self.feedback_label.setText(message)
+        self.feedback_label.show()
+        self._feedback_timer.start(duration_ms)
 
     def _build_task_area(self) -> QWidget:
         panel = QWidget()
@@ -503,8 +581,8 @@ class MainWindow(QMainWindow):
         self.resume_task_button = QPushButton("继续")
         self.resume_task_button.clicked.connect(self._resume_current_task)
         self.stop_extraction_button = QPushButton("停止提取")
-        self.stop_extraction_button.setEnabled(False)
-        self.stop_extraction_button.clicked.connect(self._stop_current_extraction)
+        _set_button_enabled(self.stop_extraction_button, False)
+        self.stop_extraction_button.clicked.connect(self._toggle_current_extraction)
         self.new_task_button = QPushButton("＋ 新建链接")
         self.new_task_button.setObjectName("newTask")
         self.new_task_button.clicked.connect(self.open_new_task_dialog)
@@ -514,6 +592,21 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.stop_extraction_button)
         toolbar.addWidget(self.new_task_button)
         layout.addLayout(toolbar)
+        self.quick_download_panel = QFrame()
+        self.quick_download_panel.setObjectName("quickDownloadPanel")
+        quick_layout = QHBoxLayout(self.quick_download_panel)
+        quick_layout.setContentsMargins(10, 8, 10, 8)
+        quick_layout.setSpacing(8)
+        quick_layout.addWidget(QLabel("快速下载"))
+        self.quick_address_edit = QLineEdit()
+        self.quick_address_edit.setPlaceholderText("粘贴网页链接或 m3u8 链接，按回车快速创建任务")
+        self.quick_address_edit.returnPressed.connect(self._quick_start)
+        self.quick_start_button = QPushButton("快速开始")
+        self.quick_start_button.setObjectName("newTask")
+        self.quick_start_button.clicked.connect(self._quick_start)
+        quick_layout.addWidget(self.quick_address_edit, 1)
+        quick_layout.addWidget(self.quick_start_button)
+        layout.addWidget(self.quick_download_panel)
         filter_row = QHBoxLayout()
         self.status_filter_combo = QComboBox()
         for text, value in [
@@ -536,6 +629,10 @@ class MainWindow(QMainWindow):
         self.page_title.setStyleSheet("font-size: 22px; font-weight: 600; padding: 12px 2px 6px;")
         layout.addWidget(self.page_title)
         self.pages = QStackedWidget()
+        self.pages.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored
+        )
+        self.pages.setMinimumHeight(0)
         self.task_list = QListWidget()
         self.task_list.currentItemChanged.connect(self._show_task_detail)
         self.task_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -556,6 +653,9 @@ class MainWindow(QMainWindow):
         return panel
 
     def _build_settings_page(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
         page = QWidget()
         root = QVBoxLayout(page)
         root.setContentsMargins(8, 8, 24, 24)
@@ -618,7 +718,9 @@ class MainWindow(QMainWindow):
         root.addStretch()
         root.addWidget(self.save_settings_button, 0, Qt.AlignmentFlag.AlignRight)
         self._load_settings_controls()
-        return page
+        scroll.setWidget(page)
+        self.settings_scroll = scroll
+        return scroll
 
     def _load_settings_controls(self) -> None:
         settings = self._service.load_app_settings()
@@ -658,6 +760,7 @@ class MainWindow(QMainWindow):
             speed_callback(settings.global_speed_limit)
         self._apply_theme(settings.theme)
         self.log_view.appendPlainText("设置已保存")
+        self._show_feedback("设置已保存")
 
     def _apply_theme(self, theme: str) -> None:
         if theme == "system":
@@ -665,7 +768,7 @@ class MainWindow(QMainWindow):
                 "dark" if QApplication.styleHints().colorScheme() is Qt.ColorScheme.Dark
                 else "light"
             )
-        self.setStyleSheet(_STYLE if theme == "dark" else _LIGHT_STYLE)
+        self.setStyleSheet(_theme_style(theme))
 
     def _build_detail_area(self) -> QWidget:
         panel = QFrame()
@@ -695,7 +798,7 @@ class MainWindow(QMainWindow):
         self.detail_tabs.addTab(self.info_view, "详细信息")
         self.download_selected_button = QPushButton("下载选中项")
         self.download_selected_button.setObjectName("newTask")
-        self.download_selected_button.setEnabled(False)
+        _set_button_enabled(self.download_selected_button, False)
         self.download_selected_button.clicked.connect(self._download_selected_items)
         layout.addWidget(self.detail_title)
         layout.addWidget(self.detail_tabs, 1)
@@ -738,17 +841,65 @@ class MainWindow(QMainWindow):
             button.setChecked(button_index == index)
         self.pages.setCurrentIndex(index)
         self.page_title.setText(["下载中", "已完成", "设置"][index])
+        self.quick_download_panel.setVisible(index != 2)
         self.status_filter_combo.setVisible(index == 0)
         self.completed_sort_combo.setVisible(index == 1)
         self.refresh_tasks()
 
     def open_new_task_dialog(self) -> None:
-        tasks = self._service.list_tasks()
-        last_directory = tasks[-1].save_directory if tasks else str(Path.home() / "Downloads")
+        last_directory = self._last_save_directory()
         self.new_task_dialog = NewTaskDialog(self._service, last_directory, self)
         self.new_task_dialog.tasks_created.connect(self._tasks_created)
         self.new_task_dialog.existing_task_requested.connect(self._locate_existing_task)
         self.new_task_dialog.open()
+
+    def _last_save_directory(self) -> str:
+        tasks = self._service.list_tasks()
+        return tasks[-1].save_directory if tasks else str(Path.home() / "Downloads")
+
+    def _quick_start(self) -> None:
+        address = self.quick_address_edit.text().strip()
+        if not address:
+            self.quick_address_edit.setFocus()
+            self._show_feedback("请输入网页链接或 m3u8 链接")
+            return
+        normalized = address if "://" in address else "https://" + address
+        parts = urlsplit(normalized)
+        host = parts.hostname or ""
+        if (
+            parts.scheme.lower() not in {"http", "https"}
+            or not parts.netloc
+            or any(character.isspace() for character in parts.netloc)
+            or (host != "localhost" and "." not in host)
+        ):
+            self.quick_address_edit.setFocus()
+            self._show_feedback("请输入有效的网页链接或 m3u8 链接")
+            return
+        app_settings = self._service.load_app_settings()
+        settings = TaskSettings(
+            auto_download_threshold=app_settings.auto_download_threshold,
+            segment_threads=app_settings.segment_threads,
+            request_retries=app_settings.request_retries,
+            task_retries=app_settings.task_retries,
+            retry_delay_seconds=app_settings.retry_delay_seconds,
+        )
+        try:
+            tasks = self._service.create_tasks(CreateTaskRequest(
+                addresses=address,
+                save_directory=self._last_save_directory(),
+                settings=settings,
+            ))
+        except DuplicateSourceError:
+            self._show_feedback("链接已存在，可在任务列表中查看")
+            return
+        if not tasks:
+            self._show_feedback("没有可创建的链接")
+            return
+        self.quick_address_edit.clear()
+        self._tasks_created(tasks)
+        self._switch_view(0)
+        self._show_task_by_id(tasks[-1].id)
+        self._show_feedback("任务已添加，正在开始处理")
 
     def _locate_existing_task(self, task_id: str) -> None:
         task = self._service.get_task(task_id)
@@ -760,6 +911,8 @@ class MainWindow(QMainWindow):
             self._service.add_log(task.id, "信息", "任务", "任务已创建")
         self.refresh_tasks()
         self._refresh_logs()
+        if tasks:
+            self._show_feedback(f"已创建 {len(tasks)} 个任务")
 
     def refresh_tasks(self) -> None:
         selected_id = ""
@@ -823,8 +976,21 @@ class MainWindow(QMainWindow):
             return
         task: Task = current.data(Qt.ItemDataRole.UserRole)
         self._detail_task_id = task.id
-        self.stop_extraction_button.setEnabled(
-            task.extraction_status in {ExtractionStatus.WAITING, ExtractionStatus.RUNNING}
+        extraction_active = task.extraction_status in {
+            ExtractionStatus.WAITING, ExtractionStatus.RUNNING,
+        }
+        extraction_restartable = (
+            task.source_kind.value == "web_page"
+            and task.download_status is not DownloadStatus.COMPLETED
+            and task.extraction_status in {
+                ExtractionStatus.PAUSED, ExtractionStatus.FAILED, ExtractionStatus.COMPLETED,
+            }
+        )
+        self.stop_extraction_button.setText(
+            "停止提取" if extraction_active else "重新提取"
+        )
+        _set_button_enabled(
+            self.stop_extraction_button, extraction_active or extraction_restartable
         )
         self.detail_title.setText(task.name)
         items = self._service.list_items(task.id)
@@ -837,7 +1003,15 @@ class MainWindow(QMainWindow):
                 item.id for item in items if item.status.value == "waiting"
             )
         pending_checks = self._pending_item_checks[task.id]
-        self.download_selected_button.setEnabled(bool(items))
+        _set_button_enabled(self.download_selected_button, bool(items))
+        best_size_by_duration = {}
+        for candidate in items:
+            if candidate.valid and candidate.duration_seconds and candidate.duration_seconds > 0:
+                second = int(candidate.duration_seconds)
+                best_size_by_duration[second] = max(
+                    best_size_by_duration.get(second, 0),
+                    candidate.estimated_bytes or 0,
+                )
         self._updating_item_table = True
         self.item_table.setRowCount(len(items))
         for row, item in enumerate(items):
@@ -856,6 +1030,13 @@ class MainWindow(QMainWindow):
                 progress_value = int(item.downloaded_bytes * 100 / total)
             if item.status.value == "completed":
                 progress_value = 100
+            duplicate_duration = (
+                not item.valid
+                and item.duration_seconds is not None
+                and item.duration_seconds > 0
+                and int(item.duration_seconds) in best_size_by_duration
+                and best_size_by_duration[int(item.duration_seconds)] >= (item.estimated_bytes or 0)
+            )
             values = [
                 display_name,
                 estimate,
@@ -863,6 +1044,8 @@ class MainWindow(QMainWindow):
                     "文件缺失"
                     if item.status.value == "completed" and item.output_path
                     and not Path(item.output_path).is_file()
+                    else "同时间已保留更大项"
+                    if duplicate_duration
                     else _ITEM_STATUS_TEXT[item.status.value]
                 ),
                 (
@@ -927,12 +1110,16 @@ class MainWindow(QMainWindow):
     def _download_selected_items(self) -> None:
         task_id = getattr(self, "_detail_task_id", "")
         if not task_id:
+            self._show_feedback("请先选择一个下载任务")
             return
         selected = []
         for row in range(self.item_table.rowCount()):
             cell = self.item_table.item(row, 0)
             if cell.checkState() is Qt.CheckState.Checked:
                 selected.append(cell.data(Qt.ItemDataRole.UserRole))
+        if not selected:
+            self._show_feedback("请先勾选要下载的项目")
+            return
         self._service.select_items_for_download(task_id, selected)
         self._pending_item_checks[task_id] = set(selected)
         self.refresh_tasks()
@@ -943,10 +1130,12 @@ class MainWindow(QMainWindow):
                 break
         self._service.add_log(task_id, "信息", "任务", f"已选择 {len(selected)} 个下载项")
         self._refresh_logs(task_id)
+        self._show_feedback(f"已添加 {len(selected)} 个下载项")
 
     def _pause_current_task(self) -> None:
         item = self.task_list.currentItem()
         if item is None:
+            self._show_feedback("请先选择一个下载任务")
             return
         task_id = item.data(Qt.ItemDataRole.UserRole).id
         controller = getattr(self, "background_controller", None)
@@ -954,12 +1143,12 @@ class MainWindow(QMainWindow):
             self._service.pause_task(task_id)
         else:
             controller.pause_task(task_id)
-        self._service.add_log(task_id, "信息", "任务", "任务已暂停")
-        self.refresh_tasks()
+        self._after_task_action(task_id, "任务已暂停")
 
     def _resume_current_task(self) -> None:
         item = self.task_list.currentItem()
         if item is None:
+            self._show_feedback("请先选择一个下载任务")
             return
         task_id = item.data(Qt.ItemDataRole.UserRole).id
         controller = getattr(self, "background_controller", None)
@@ -967,12 +1156,23 @@ class MainWindow(QMainWindow):
             self._service.resume_task(task_id)
         else:
             controller.resume_task(task_id)
-        self._service.add_log(task_id, "信息", "任务", "任务已继续")
-        self.refresh_tasks()
+        self._after_task_action(task_id, "任务已继续")
+
+    def _toggle_current_extraction(self) -> None:
+        item = self.task_list.currentItem()
+        if item is None:
+            self._show_feedback("请先选择一个下载任务")
+            return
+        task = self._service.get_task(item.data(Qt.ItemDataRole.UserRole).id)
+        if task.extraction_status in {ExtractionStatus.WAITING, ExtractionStatus.RUNNING}:
+            self._stop_current_extraction()
+        else:
+            self._restart_current_extraction(task.id)
 
     def _stop_current_extraction(self) -> None:
         item = self.task_list.currentItem()
         if item is None:
+            self._show_feedback("请先选择一个下载任务")
             return
         task_id = item.data(Qt.ItemDataRole.UserRole).id
         controller = getattr(self, "background_controller", None)
@@ -983,6 +1183,32 @@ class MainWindow(QMainWindow):
         self._service.add_log(task_id, "信息", "提取", "用户停止提取，已应用当前候选")
         self.refresh_tasks()
         self._refresh_logs(task_id)
+        self._show_feedback("提取已停止，可随时重新提取")
+
+    def _restart_current_extraction(self, task_id: str) -> None:
+        self.stop_extraction_button.setText("正在启动…")
+        _set_button_enabled(self.stop_extraction_button, False)
+        controller = getattr(self, "background_controller", None)
+        if controller is None:
+            self._service.retry_extraction(task_id)
+            started = True
+        else:
+            started = controller.retry_extraction(task_id)
+        if not started:
+            self.stop_extraction_button.setText("等待重新提取…")
+            _set_button_enabled(self.stop_extraction_button, False)
+            self._service.add_log(
+                task_id, "信息", "提取", "正在等待旧提取线程结束，随后自动重新提取"
+            )
+            self._refresh_logs(task_id)
+            self._show_feedback("正在结束旧提取，随后自动重新开始")
+            return
+        self._pending_item_checks.pop(task_id, None)
+        self._service.add_log(task_id, "信息", "提取", "用户重新开始网页提取")
+        self.refresh_tasks()
+        self._show_task_by_id(task_id)
+        self._refresh_logs(task_id)
+        self._show_feedback("网页提取已重新开始")
 
     def _refresh_logs(self, task_id: str | None = None) -> None:
         selected_task_id = task_id or getattr(self, "_detail_task_id", "")
@@ -1190,8 +1416,7 @@ class MainWindow(QMainWindow):
         self._after_task_action(task_id, "失败项已重新加入队列")
 
     def _retry_extraction(self, task_id: str) -> None:
-        self._service.retry_extraction(task_id)
-        self._after_task_action(task_id, "网页已重新加入提取队列")
+        self._restart_current_extraction(task_id)
 
     def _redownload_item(self, task_id: str, item_id: str) -> None:
         copied = self._service.redownload_item(task_id, item_id)
@@ -1247,6 +1472,7 @@ class MainWindow(QMainWindow):
             except KeyError:
                 pass
         self._refresh_logs(task_id)
+        self._show_feedback(message)
 
     def _show_task_by_id(self, task_id: str) -> None:
         for task_list in (self.task_list, self.completed_list):
@@ -1275,6 +1501,7 @@ class MainWindow(QMainWindow):
     def _move_task(self, task_id: str, direction: str) -> None:
         self._service.move_task(task_id, direction)
         self.refresh_tasks()
+        self._show_feedback("任务顺序已调整")
 
     def _delete_task(self, task: Task, delete_outputs: bool) -> None:
         preview = self._service.preview_deletion(task.id)
@@ -1334,9 +1561,7 @@ def run_gui_v2(service: TaskService) -> int:
     controller.log.connect(lambda _task_id, _message: window._refresh_logs())
     window.background_controller = controller
     window.global_speed_limit_changed = downloader_adapter.set_global_speed_limit
-    tray = QSystemTrayIcon(
-        window.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown), window
-    )
+    tray = QSystemTrayIcon(window.windowIcon(), window)
     tray.setToolTip("m3u8 下载器")
     tray_menu = QMenu(window)
     tray_menu.addAction("显示主窗口", window.show_from_tray)

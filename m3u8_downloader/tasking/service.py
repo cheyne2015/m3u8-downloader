@@ -293,15 +293,15 @@ class TaskService:
         task = self._repository.get_task(task_id)
         if task.source_kind is SourceKind.DIRECT_M3U8:
             raise ValueError("直接 m3u8 任务不需要提取")
+        self._repository.delete_items(task_id)
         task = replace(
             task,
             extraction_status=ExtractionStatus.WAITING,
-            download_status=(
-                task.download_status
-                if any(item.status is not ItemStatus.UNSELECTED for item in self.list_items(task_id))
-                else DownloadStatus.NOT_READY
-            ),
+            download_status=DownloadStatus.NOT_READY,
             last_error="",
+            retry_count=0,
+            retry_at=None,
+            completed_at=None,
             updated_at=self._clock(),
         )
         self._repository.save_many([task])
@@ -800,7 +800,10 @@ class TaskService:
         task = self._repository.get_task(task_id)
         selected = set(item_ids)
         selectable = {ItemStatus.UNSELECTED, ItemStatus.WAITING}
-        items = self._repository.list_items(task_id)
+        items = self._keep_largest_candidate_per_duration(
+            self._repository.list_items(task_id)
+        )
+        selected.intersection_update(item.id for item in items if item.valid)
         updated_items = [
             replace(
                 item,
@@ -829,6 +832,7 @@ class TaskService:
     def _finish_extraction_locked(self, task_id: str) -> Task:
         task = self._repository.get_task(task_id)
         items = self._repository.list_items(task_id)
+        items = self._keep_largest_candidate_per_duration(items)
         valid_items = [item for item in items if item.valid]
         if (
             task.selection_mode is SelectionMode.AUTO
@@ -856,6 +860,34 @@ class TaskService:
         )
         self._repository.save_many([task])
         return task
+
+    def _keep_largest_candidate_per_duration(self, items: List[DownloadItem]) -> List[DownloadItem]:
+        """相同显示时长只保留体积最大的候选参与选择和阈值计算。"""
+        best_by_second: dict[int, DownloadItem] = {}
+        for item in items:
+            if not item.valid or not item.duration_seconds or item.duration_seconds <= 0:
+                continue
+            displayed_second = max(0, int(item.duration_seconds))
+            current = best_by_second.get(displayed_second)
+            if current is None or (item.estimated_bytes or 0) > (current.estimated_bytes or 0):
+                best_by_second[displayed_second] = item
+        retained_ids = {item.id for item in best_by_second.values()}
+        grouped_seconds = set(best_by_second)
+        filtered = [
+            replace(item, valid=False, status=ItemStatus.UNSELECTED)
+            if (
+                item.valid
+                and item.status in {ItemStatus.UNSELECTED, ItemStatus.WAITING}
+                and item.duration_seconds is not None
+                and item.duration_seconds > 0
+                and max(0, int(item.duration_seconds)) in grouped_seconds
+                and item.id not in retained_ids
+            )
+            else item
+            for item in items
+        ]
+        self._repository.save_items(filtered)
+        return filtered
 
     @staticmethod
     def _normalize_addresses(raw: str) -> List[str]:

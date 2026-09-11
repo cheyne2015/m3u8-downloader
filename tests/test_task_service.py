@@ -151,6 +151,69 @@ def test_unreachable_candidates_do_not_count_toward_auto_download_threshold(tmp_
     ]
 
 
+def test_same_displayed_duration_keeps_only_largest_candidate_for_threshold(tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    service = TaskService(repository, id_factory=lambda: "parent")
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42", save_directory=str(tmp_path)
+    ))[0]
+    service.add_candidates(task.id, [
+        Candidate("https://cdn.example/small.m3u8", estimated_bytes=100, duration_seconds=120.1),
+        Candidate("https://cdn.example/largest.m3u8", estimated_bytes=500, duration_seconds=120.8),
+        Candidate("https://cdn.example/medium.m3u8", estimated_bytes=300, duration_seconds=120.2),
+        Candidate("https://cdn.example/other.m3u8", estimated_bytes=200, duration_seconds=240.0),
+    ])
+
+    finished = service.finish_extraction(task.id)
+    items = {item.source_url.rsplit("/", 1)[-1]: item for item in service.list_items(task.id)}
+
+    assert finished.download_status is DownloadStatus.WAITING
+    assert items["largest.m3u8"].status is ItemStatus.WAITING
+    assert items["other.m3u8"].status is ItemStatus.WAITING
+    assert items["small.m3u8"].status is ItemStatus.UNSELECTED
+    assert items["medium.m3u8"].status is ItemStatus.UNSELECTED
+    assert items["small.m3u8"].valid is False
+    assert items["medium.m3u8"].valid is False
+
+
+def test_manual_selection_keeps_only_largest_same_duration_candidate(tmp_path):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "parent")
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42", save_directory=str(tmp_path)
+    ))[0]
+    service.start_extraction(task.id)
+    added = service.add_candidates(task.id, [
+        Candidate("https://cdn.example/small.m3u8", estimated_bytes=100, duration_seconds=60.1),
+        Candidate("https://cdn.example/large.m3u8", estimated_bytes=900, duration_seconds=60.9),
+    ])
+
+    service.select_items_for_download(task.id, [item.id for item in added])
+    items = {item.source_url.rsplit("/", 1)[-1]: item for item in service.list_items(task.id)}
+
+    assert items["large.m3u8"].status is ItemStatus.WAITING
+    assert items["small.m3u8"].status is ItemStatus.UNSELECTED
+    assert items["small.m3u8"].valid is False
+
+
+def test_unknown_duration_candidates_are_not_merged_for_auto_threshold(tmp_path):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "parent")
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42", save_directory=str(tmp_path)
+    ))[0]
+    service.add_candidates(task.id, [
+        Candidate("https://cdn.example/unknown-1.m3u8", estimated_bytes=100),
+        Candidate("https://cdn.example/unknown-2.m3u8", estimated_bytes=900),
+        Candidate("https://cdn.example/zero.m3u8", estimated_bytes=500, duration_seconds=0),
+    ])
+
+    finished = service.finish_extraction(task.id)
+    items = service.list_items(task.id)
+
+    assert finished.download_status is DownloadStatus.WAITING
+    assert all(item.valid for item in items)
+    assert all(item.status is ItemStatus.WAITING for item in items)
+
+
 def test_manual_selection_can_download_while_extraction_keeps_running(tmp_path):
     """手动接管后只下载所选项，后续流式候选保持未选择。"""
     repository = SQLiteTaskRepository(tmp_path / "tasks.db")
