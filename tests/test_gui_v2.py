@@ -99,6 +99,60 @@ def test_task_detail_is_empty_until_a_parent_task_is_selected(qtbot, tmp_path):
     assert window._detail_task_id == ""
 
 
+def test_task_detail_width_stays_equal_when_switching_between_task_names(qtbot, tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    service = TaskService(
+        repository, id_factory=iter(["short", "long"]).__next__,
+    )
+    tasks = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/short.m3u8\nhttps://cdn.example/long.m3u8",
+        save_directory=str(tmp_path),
+    ))
+    service.rename_task(tasks[0].id, "短标题")
+    service.rename_task(tasks[1].id, "很长的任务标题" * 80)
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.resize(1280, 790)
+    window.show()
+    window._force_exit = True
+    qtbot.waitUntil(lambda: sum(window.main_horizontal_splitter.sizes()) > 1000)
+
+    initial_sizes = window.main_horizontal_splitter.sizes()
+    assert abs(initial_sizes[0] - initial_sizes[1]) <= 1
+
+    window.task_list.setCurrentRow(0)
+    short_sizes = window.main_horizontal_splitter.sizes()
+    window.task_list.setCurrentRow(1)
+    long_sizes = window.main_horizontal_splitter.sizes()
+
+    assert short_sizes == initial_sizes
+    assert long_sizes == initial_sizes
+
+
+def test_task_detail_width_is_restored_after_user_moves_splitter(qtbot, tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    service = TaskService(repository)
+    first_window = MainWindow(service)
+    qtbot.addWidget(first_window)
+    first_window.resize(1280, 790)
+    first_window.show()
+    first_window._force_exit = True
+    qtbot.waitUntil(lambda: sum(first_window.main_horizontal_splitter.sizes()) > 1000)
+
+    first_window.main_horizontal_splitter.moveSplitter(700, 1)
+    saved_sizes = first_window.main_horizontal_splitter.sizes()
+    first_window.close()
+
+    restored_window = MainWindow(TaskService(SQLiteTaskRepository(tmp_path / "tasks.db")))
+    qtbot.addWidget(restored_window)
+    restored_window.resize(1280, 790)
+    restored_window.show()
+    restored_window._force_exit = True
+    qtbot.waitUntil(lambda: sum(restored_window.main_horizontal_splitter.sizes()) > 1000)
+
+    assert restored_window.main_horizontal_splitter.sizes() == saved_sizes
+
+
 def test_detail_clears_when_selected_task_moves_to_completed_view(qtbot, tmp_path):
     service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "parent")
     task = service.create_tasks(CreateTaskRequest(

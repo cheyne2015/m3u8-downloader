@@ -607,10 +607,26 @@ class MainWindow(QMainWindow):
         vertical = QSplitter(Qt.Orientation.Vertical)
         self.main_vertical_splitter = vertical
         horizontal = QSplitter(Qt.Orientation.Horizontal)
+        self.main_horizontal_splitter = horizontal
         horizontal.addWidget(self._build_task_area())
         horizontal.addWidget(self._build_detail_area())
-        horizontal.setSizes([620, 530])
+        app_settings = self._service.load_app_settings()
+        if app_settings.task_panel_width and app_settings.detail_panel_width:
+            horizontal.setSizes([
+                app_settings.task_panel_width,
+                app_settings.detail_panel_width,
+            ])
+        else:
+            horizontal.setSizes([1000, 1000])
+        horizontal.setStretchFactor(0, 1)
+        horizontal.setStretchFactor(1, 1)
         horizontal.setCollapsible(0, False)
+        horizontal.setCollapsible(1, False)
+        self._splitter_save_timer = QTimer(self)
+        self._splitter_save_timer.setSingleShot(True)
+        self._splitter_save_timer.timeout.connect(self._persist_horizontal_splitter_sizes)
+        self._pending_horizontal_splitter_sizes: tuple[int, int] | None = None
+        horizontal.splitterMoved.connect(self._schedule_horizontal_splitter_save)
         vertical.addWidget(horizontal)
         vertical.addWidget(self._build_log_area())
         vertical.setSizes([530, 230])
@@ -634,6 +650,30 @@ class MainWindow(QMainWindow):
         self._feedback_timer = QTimer(self)
         self._feedback_timer.setSingleShot(True)
         self._feedback_timer.timeout.connect(self.feedback_label.hide)
+
+    def _schedule_horizontal_splitter_save(self, _position: int, _index: int) -> None:
+        task_width, detail_width = self.main_horizontal_splitter.sizes()
+        if task_width <= 0 or detail_width <= 0:
+            return
+        self._pending_horizontal_splitter_sizes = (task_width, detail_width)
+        self._splitter_save_timer.start(250)
+
+    def _persist_horizontal_splitter_sizes(self) -> None:
+        if self._pending_horizontal_splitter_sizes is None:
+            return
+        task_width, detail_width = self._pending_horizontal_splitter_sizes
+        self._pending_horizontal_splitter_sizes = None
+        settings = self._service.load_app_settings()
+        if (
+            settings.task_panel_width == task_width
+            and settings.detail_panel_width == detail_width
+        ):
+            return
+        self._service.save_app_settings(replace(
+            settings,
+            task_panel_width=task_width,
+            detail_panel_width=detail_width,
+        ))
 
     def _show_feedback(self, message: str, duration_ms: int = 2400) -> None:
         self.feedback_label.setText(message)
@@ -855,6 +895,10 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 16, 16, 12)
         self.detail_title = QLabel("任务详情")
         self.detail_title.setStyleSheet("font-size: 18px; font-weight: 600;")
+        self.detail_title.setMinimumWidth(0)
+        self.detail_title.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
+        )
         self.detail_tabs = QTabWidget()
         self.item_table = DeselectableTableWidget(0, 4)
         self.item_table.setHorizontalHeaderLabels(["名称", "大小/时长", "状态", "进度"])
@@ -1447,6 +1491,7 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     def request_exit(self) -> None:
+        self._persist_horizontal_splitter_sizes()
         self._force_exit = True
         controller = getattr(self, "background_controller", None)
         if controller is not None:
@@ -1454,6 +1499,7 @@ class MainWindow(QMainWindow):
         QApplication.quit()
 
     def closeEvent(self, event) -> None:
+        self._persist_horizontal_splitter_sizes()
         if self._force_exit:
             event.accept()
             return

@@ -62,6 +62,8 @@ class AppSettings:
     log_retention_days: int = 30
     completion_notification: bool = False
     close_to_tray: bool = False
+    task_panel_width: int = 0
+    detail_panel_width: int = 0
 
     def __post_init__(self) -> None:
         ranges = {
@@ -74,6 +76,8 @@ class AppSettings:
             "retry_delay_seconds": (1, 3600),
             "global_speed_limit": (0, 10**12),
             "log_retention_days": (1, 3650),
+            "task_panel_width": (0, 100000),
+            "detail_panel_width": (0, 100000),
         }
         for name, (minimum, maximum) in ranges.items():
             value = getattr(self, name)
