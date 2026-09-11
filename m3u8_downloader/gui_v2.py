@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 from urllib.parse import urlsplit
 
-from PySide6.QtCore import QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QSignalBlocker, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QIcon, QIntValidator
 from PySide6.QtWidgets import (
     QApplication,
@@ -81,7 +81,10 @@ QSpinBox::down-button { subcontrol-position: bottom right; border-bottom-right-r
 QSpinBox::up-button:hover, QSpinBox::down-button:hover { background: #313945; }
 QListWidget { border: 0; background: transparent; outline: none; }
 QListWidget::item { border-bottom: 1px solid #242a31; }
+QListWidget::item:hover { background: #1c2229; }
 QListWidget::item:selected { background: #222a34; }
+QTableWidget::item:hover { background: #202832; }
+QTableWidget::item:selected { background: #29466b; color: #ffffff; }
 QTabWidget::pane { border: 0; border-top: 1px solid #2a3038; }
 QTabBar::tab { padding: 10px 16px; color: #aeb6c1; }
 QTabBar::tab:selected { color: #67a7ff; border-bottom: 2px solid #4b8cf7; }
@@ -96,6 +99,7 @@ QProgressBar::chunk { background: #3d8bfd; border-radius: 3px; }
 QDialog { background: #15191e; }
 #detailPanel { background: #171b20; border-left: 1px solid #292e35; }
 #feedback { background: #26313d; border: 1px solid #405164; border-radius: 6px; padding: 5px 10px; }
+#validation { color: #ff8585; padding: 3px 2px; }
 """
 
 _LIGHT_STYLE = """
@@ -122,7 +126,10 @@ QSpinBox::down-button { subcontrol-position: bottom right; border-bottom-right-r
 QSpinBox::up-button:hover, QSpinBox::down-button:hover { background: #dfe7f1; }
 QListWidget { border: 0; background: transparent; outline: none; }
 QListWidget::item { border-bottom: 1px solid #dde2e9; }
+QListWidget::item:hover { background: #f0f4f9; }
 QListWidget::item:selected { background: #e7eef8; }
+QTableWidget::item:hover { background: #eef4fc; }
+QTableWidget::item:selected { background: #d7e7fb; color: #173f73; }
 QTabWidget::pane { border: 0; border-top: 1px solid #d5dbe3; }
 QTabBar::tab { padding: 10px 16px; color: #56616f; }
 QTabBar::tab:selected { color: #216bd6; border-bottom: 2px solid #3478f6; }
@@ -134,6 +141,7 @@ QDialog { background: #f5f7fa; }
 QProgressBar { background: #dce2ea; border: 0; border-radius: 3px; }
 QProgressBar::chunk { background: #3478f6; border-radius: 3px; }
 #feedback { background: #e7eef8; border: 1px solid #b8c8dc; border-radius: 6px; padding: 5px 10px; }
+#validation { color: #c62828; padding: 3px 2px; }
 """
 
 
@@ -208,8 +216,10 @@ def _format_duration(seconds: float) -> str:
     return f"{hours:d}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes:d}:{seconds:02d}"
 
 
-def _set_button_enabled(button: QPushButton, enabled: bool) -> None:
+def _set_button_enabled(button: QPushButton, enabled: bool, tooltip: str = "") -> None:
     button.setEnabled(enabled)
+    button.setToolTip(tooltip)
+    button.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips, True)
     button.setCursor(
         Qt.CursorShape.PointingHandCursor if enabled else Qt.CursorShape.ArrowCursor
     )
@@ -218,6 +228,58 @@ def _set_button_enabled(button: QPushButton, enabled: bool) -> None:
 def _install_button_cursors(root: QWidget) -> None:
     for button in root.findChildren(QPushButton):
         _set_button_enabled(button, button.isEnabled())
+    for checkbox in root.findChildren(QCheckBox):
+        checkbox.setCursor(
+            Qt.CursorShape.PointingHandCursor
+            if checkbox.isEnabled() else Qt.CursorShape.ArrowCursor
+        )
+
+
+class DeselectableListWidget(QListWidget):
+    """空白点击或 Esc 取消主任务选择。"""
+
+    def mousePressEvent(self, event) -> None:
+        blank = self.itemAt(event.position().toPoint()) is None
+        super().mousePressEvent(event)
+        if blank:
+            self.clearSelection()
+            self.setCurrentItem(None)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.clearSelection()
+            self.setCurrentItem(None)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class DeselectableTableWidget(QTableWidget):
+    """只取消下载项行高亮，不改变复选框。"""
+
+    def mousePressEvent(self, event) -> None:
+        blank = self.itemAt(event.position().toPoint()) is None
+        super().mousePressEvent(event)
+        if blank:
+            self.clearSelection()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.clearSelection()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class MasterCheckBox(QCheckBox):
+    """部分选中时点击会补齐全选，已全选时点击会全部取消。"""
+
+    def nextCheckState(self) -> None:
+        self.setCheckState(
+            Qt.CheckState.Unchecked
+            if self.checkState() is Qt.CheckState.Checked
+            else Qt.CheckState.Checked
+        )
 
 
 class TaskCard(QWidget):
@@ -342,6 +404,11 @@ class NewTaskDialog(QDialog):
         self.advanced_panel.hide()
         root.addWidget(self.advanced_panel)
 
+        self.validation_label = QLabel()
+        self.validation_label.setObjectName("validation")
+        self.validation_label.hide()
+        root.addWidget(self.validation_label)
+
         actions = QHBoxLayout()
         actions.addStretch()
         cancel = QPushButton("取消")
@@ -366,10 +433,15 @@ class NewTaskDialog(QDialog):
             self.directory_edit.setText(selected)
 
     def _create(self) -> None:
+        self.validation_label.hide()
         if not self.address_edit.toPlainText().strip():
+            self.validation_label.setText("请输入网页链接或 m3u8 链接")
+            self.validation_label.show()
             self.address_edit.setFocus()
             return
         if not self.directory_edit.text().strip():
+            self.validation_label.setText("请选择保存目录")
+            self.validation_label.show()
             self.directory_edit.setFocus()
             return
         app_settings = self._service.load_app_settings()
@@ -577,11 +649,13 @@ class MainWindow(QMainWindow):
         self.search_edit.setPlaceholderText("搜索任务、链接或文件")
         self.search_edit.textChanged.connect(self.refresh_tasks)
         self.pause_task_button = QPushButton("暂停")
+        _set_button_enabled(self.pause_task_button, False, "请先选择一个主任务")
         self.pause_task_button.clicked.connect(self._pause_current_task)
         self.resume_task_button = QPushButton("继续")
+        _set_button_enabled(self.resume_task_button, False, "请先选择一个主任务")
         self.resume_task_button.clicked.connect(self._resume_current_task)
         self.stop_extraction_button = QPushButton("停止提取")
-        _set_button_enabled(self.stop_extraction_button, False)
+        _set_button_enabled(self.stop_extraction_button, False, "请先选择一个主任务")
         self.stop_extraction_button.clicked.connect(self._toggle_current_extraction)
         self.new_task_button = QPushButton("＋ 新建链接")
         self.new_task_button.setObjectName("newTask")
@@ -633,7 +707,7 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored
         )
         self.pages.setMinimumHeight(0)
-        self.task_list = QListWidget()
+        self.task_list = DeselectableListWidget()
         self.task_list.itemSelectionChanged.connect(
             lambda: self._sync_task_detail_from_selection(self.task_list)
         )
@@ -641,7 +715,7 @@ class MainWindow(QMainWindow):
         self.task_list.customContextMenuRequested.connect(
             lambda position: self._show_task_menu(self.task_list, position)
         )
-        self.completed_list = QListWidget()
+        self.completed_list = DeselectableListWidget()
         self.completed_list.itemSelectionChanged.connect(
             lambda: self._sync_task_detail_from_selection(self.completed_list)
         )
@@ -782,7 +856,7 @@ class MainWindow(QMainWindow):
         self.detail_title = QLabel("任务详情")
         self.detail_title.setStyleSheet("font-size: 18px; font-weight: 600;")
         self.detail_tabs = QTabWidget()
-        self.item_table = QTableWidget(0, 4)
+        self.item_table = DeselectableTableWidget(0, 4)
         self.item_table.setHorizontalHeaderLabels(["名称", "大小/时长", "状态", "进度"])
         self.item_table.verticalHeader().hide()
         self.item_table.horizontalHeader().setStretchLastSection(False)
@@ -802,11 +876,20 @@ class MainWindow(QMainWindow):
         self.detail_tabs.addTab(self.info_view, "详细信息")
         self.download_selected_button = QPushButton("下载选中项")
         self.download_selected_button.setObjectName("newTask")
-        _set_button_enabled(self.download_selected_button, False)
+        _set_button_enabled(self.download_selected_button, False, "请先选择一个主任务")
         self.download_selected_button.clicked.connect(self._download_selected_items)
+        self.select_all_checkbox = MasterCheckBox("全选")
+        self.select_all_checkbox.setTristate(True)
+        self.select_all_checkbox.setEnabled(False)
+        self.select_all_checkbox.setToolTip("请先选择一个主任务")
+        self.select_all_checkbox.stateChanged.connect(self._toggle_all_candidate_checks)
+        action_row = QHBoxLayout()
+        action_row.addWidget(self.select_all_checkbox)
+        action_row.addStretch()
+        action_row.addWidget(self.download_selected_button)
         layout.addWidget(self.detail_title)
         layout.addWidget(self.detail_tabs, 1)
-        layout.addWidget(self.download_selected_button, 0, Qt.AlignmentFlag.AlignRight)
+        layout.addLayout(action_row)
         return panel
 
     def _build_log_area(self) -> QWidget:
@@ -840,6 +923,12 @@ class MainWindow(QMainWindow):
         return panel
 
     def _switch_view(self, index: int) -> None:
+        if self.pages.currentIndex() != index:
+            for task_list in (self.task_list, self.completed_list):
+                task_list.clearSelection()
+                task_list.setCurrentItem(None)
+            self.item_table.clearSelection()
+            self._clear_task_detail()
         buttons = [self.downloading_button, self.completed_button, self.settings_button]
         for button_index, button in enumerate(buttons):
             button.setChecked(button_index == index)
@@ -1000,9 +1089,17 @@ class MainWindow(QMainWindow):
         self.item_table.setRowCount(0)
         self._updating_item_table = False
         self.info_view.clear()
+        with QSignalBlocker(self.select_all_checkbox):
+            self.select_all_checkbox.setCheckState(Qt.CheckState.Unchecked)
+        self.select_all_checkbox.setEnabled(False)
+        self.select_all_checkbox.setCursor(Qt.CursorShape.ArrowCursor)
+        self.select_all_checkbox.setToolTip("请先选择一个主任务")
         self.stop_extraction_button.setText("停止提取")
-        _set_button_enabled(self.stop_extraction_button, False)
-        _set_button_enabled(self.download_selected_button, False)
+        reason = "请先选择一个主任务"
+        _set_button_enabled(self.pause_task_button, False, reason)
+        _set_button_enabled(self.resume_task_button, False, reason)
+        _set_button_enabled(self.stop_extraction_button, False, reason)
+        _set_button_enabled(self.download_selected_button, False, reason)
 
     def _show_task_detail(self, current: QListWidgetItem | None, _previous) -> None:
         if current is None:
@@ -1010,6 +1107,23 @@ class MainWindow(QMainWindow):
             return
         task: Task = current.data(Qt.ItemDataRole.UserRole)
         self._detail_task_id = task.id
+        items = self._service.list_items(task.id)
+        can_pause = (
+            task.extraction_status in {ExtractionStatus.WAITING, ExtractionStatus.RUNNING}
+            or any(item.status.value in {"waiting", "downloading", "retry_wait"} for item in items)
+        )
+        can_resume = (
+            task.extraction_status is ExtractionStatus.PAUSED
+            or any(item.status.value == "paused" for item in items)
+        )
+        _set_button_enabled(
+            self.pause_task_button, can_pause,
+            "暂停当前任务" if can_pause else "当前任务没有可暂停的工作",
+        )
+        _set_button_enabled(
+            self.resume_task_button, can_resume,
+            "继续当前任务" if can_resume else "当前任务没有已暂停的工作",
+        )
         extraction_active = task.extraction_status in {
             ExtractionStatus.WAITING, ExtractionStatus.RUNNING,
         }
@@ -1024,10 +1138,14 @@ class MainWindow(QMainWindow):
             "停止提取" if extraction_active else "重新提取"
         )
         _set_button_enabled(
-            self.stop_extraction_button, extraction_active or extraction_restartable
+            self.stop_extraction_button, extraction_active or extraction_restartable,
+            (
+                "停止当前网页提取" if extraction_active
+                else "重新提取网页" if extraction_restartable
+                else "当前任务不支持停止或重新提取"
+            ),
         )
         self.detail_title.setText(task.name)
-        items = self._service.list_items(task.id)
         if task.id not in self._pending_item_checks:
             self._pending_item_checks[task.id] = {
                 item.id for item in items if item.status.value == "waiting"
@@ -1037,7 +1155,6 @@ class MainWindow(QMainWindow):
                 item.id for item in items if item.status.value == "waiting"
             )
         pending_checks = self._pending_item_checks[task.id]
-        _set_button_enabled(self.download_selected_button, bool(items))
         best_size_by_duration = {}
         for candidate in items:
             if candidate.valid and candidate.duration_seconds and candidate.duration_seconds > 0:
@@ -1104,6 +1221,7 @@ class MainWindow(QMainWindow):
                         cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
                 self.item_table.setItem(row, column, cell)
         self._updating_item_table = False
+        self._refresh_selection_controls()
         self.info_view.setPlainText(
             f"状态：{_task_status(task)}\n"
             f"来源：{task.source_url}\n"
@@ -1124,6 +1242,64 @@ class MainWindow(QMainWindow):
             checked.add(item_id)
         else:
             checked.discard(item_id)
+        self._refresh_selection_controls()
+
+    def _selectable_cells(self) -> list[QTableWidgetItem]:
+        return [
+            cell for row in range(self.item_table.rowCount())
+            if (cell := self.item_table.item(row, 0)) is not None
+            and bool(cell.flags() & Qt.ItemFlag.ItemIsUserCheckable)
+        ]
+
+    def _refresh_selection_controls(self) -> None:
+        selectable = self._selectable_cells()
+        checked_count = sum(
+            cell.checkState() is Qt.CheckState.Checked for cell in selectable
+        )
+        if selectable and checked_count == len(selectable):
+            master_state = Qt.CheckState.Checked
+        elif checked_count:
+            master_state = Qt.CheckState.PartiallyChecked
+        else:
+            master_state = Qt.CheckState.Unchecked
+        with QSignalBlocker(self.select_all_checkbox):
+            self.select_all_checkbox.setCheckState(master_state)
+        task_selected = bool(getattr(self, "_detail_task_id", ""))
+        can_select = task_selected and bool(selectable)
+        self.select_all_checkbox.setEnabled(can_select)
+        self.select_all_checkbox.setCursor(
+            Qt.CursorShape.PointingHandCursor if can_select else Qt.CursorShape.ArrowCursor
+        )
+        self.select_all_checkbox.setToolTip(
+            "选择或取消全部可下载项目"
+            if can_select else "当前任务没有可选择的下载项"
+            if task_selected else "请先选择一个主任务"
+        )
+        has_checked = checked_count > 0
+        if not task_selected:
+            tooltip = "请先选择一个主任务"
+        elif not has_checked:
+            tooltip = "请先勾选要下载的项目"
+        else:
+            tooltip = "下载当前勾选的项目"
+        _set_button_enabled(self.download_selected_button, task_selected and has_checked, tooltip)
+
+    def _toggle_all_candidate_checks(self, state: int) -> None:
+        checked = Qt.CheckState(state) is Qt.CheckState.Checked
+        task_id = getattr(self, "_detail_task_id", "")
+        pending = self._pending_item_checks.setdefault(task_id, set()) if task_id else set()
+        self._updating_item_table = True
+        for cell in self._selectable_cells():
+            cell.setCheckState(
+                Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+            )
+            item_id = cell.data(Qt.ItemDataRole.UserRole)
+            if checked:
+                pending.add(item_id)
+            else:
+                pending.discard(item_id)
+        self._updating_item_table = False
+        self._refresh_selection_controls()
 
     def _matches_status_filter(self, task: Task) -> bool:
         if not hasattr(self, "status_filter_combo"):
@@ -1360,7 +1536,10 @@ class MainWindow(QMainWindow):
         menu.addAction("查看详情", lambda: self.detail_tabs.setCurrentIndex(1))
         menu.addAction("打开保存位置", lambda: self._open_task_directory(task))
         menu.addAction("重命名任务", lambda: self._rename_task(task))
-        menu.addAction("复制原始链接", lambda: QApplication.clipboard().setText(task.source_url))
+        menu.addAction(
+            "复制原始链接",
+            lambda: self._copy_text(task.source_url, "原始链接已复制"),
+        )
         menu.addSeparator()
         menu.addAction("删除任务", lambda: self._delete_task(task, False))
         menu.addAction("彻底删除文件", lambda: self._delete_task(task, True))
@@ -1396,7 +1575,10 @@ class MainWindow(QMainWindow):
                 menu.addAction("重新关联文件", lambda: self._relink_item_file(task_id, item))
             menu.addAction("重命名文件", lambda: self._rename_item_file(task_id, item))
             menu.addAction("重新下载", lambda: self._redownload_item(task_id, item.id))
-        menu.addAction("复制 m3u8 链接", lambda: QApplication.clipboard().setText(item.source_url))
+        menu.addAction(
+            "复制 m3u8 链接",
+            lambda: self._copy_text(item.source_url, "m3u8 链接已复制"),
+        )
         menu.exec(self.item_table.viewport().mapToGlobal(position))
 
     def _queue_item(self, task_id: str, item_id: str) -> None:
@@ -1484,18 +1666,26 @@ class MainWindow(QMainWindow):
             self._service.relink_output_file(task_id, item.id, selected)
             self._after_task_action(task_id, "已重新关联磁盘文件")
 
-    @staticmethod
-    def _open_item_file(item) -> None:
+    def _copy_text(self, value: str, message: str) -> None:
+        QApplication.clipboard().setText(value)
+        self._show_feedback(message)
+
+    def _open_item_file(self, item) -> None:
         path = Path(item.output_path)
         if path.is_file():
             os.startfile(str(path))
+            self._show_feedback("已打开文件")
+        else:
+            self._show_feedback("文件不存在，请重新关联文件")
 
-    @staticmethod
-    def _locate_item_file(item) -> None:
+    def _locate_item_file(self, item) -> None:
         path = Path(item.output_path)
         if path.is_file():
             os.spawnl(os.P_NOWAIT, os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "explorer.exe"),
                       "explorer.exe", "/select,", str(path))
+            self._show_feedback("已在文件管理器中定位")
+        else:
+            self._show_feedback("文件不存在，请重新关联文件")
 
     def _after_task_action(self, task_id: str, message: str) -> None:
         self._service.add_log(task_id, "信息", "任务", message)
@@ -1517,11 +1707,13 @@ class MainWindow(QMainWindow):
                     return
         raise KeyError(task_id)
 
-    @staticmethod
-    def _open_task_directory(task: Task) -> None:
+    def _open_task_directory(self, task: Task) -> None:
         directory = Path(task.save_directory)
         if directory.is_dir():
             os.startfile(str(directory))
+            self._show_feedback("已打开保存位置")
+        else:
+            self._show_feedback("保存目录不存在")
 
     def _rename_task(self, task: Task) -> None:
         name, accepted = QInputDialog.getText(
@@ -1529,8 +1721,7 @@ class MainWindow(QMainWindow):
         )
         if accepted and name.strip():
             self._service.rename_task(task.id, name)
-            self._service.add_log(task.id, "信息", "任务", f"任务已重命名为 {name.strip()}")
-            self.refresh_tasks()
+            self._after_task_action(task.id, f"任务已重命名为 {name.strip()}")
 
     def _move_task(self, task_id: str, direction: str) -> None:
         self._service.move_task(task_id, direction)
@@ -1563,6 +1754,7 @@ class MainWindow(QMainWindow):
             self._service.delete_task(task.id, delete_outputs=delete_outputs)
         self.refresh_tasks()
         self._refresh_logs()
+        self._show_feedback("任务和文件已彻底删除" if delete_outputs else "任务已删除，文件已保留")
 
 
 def run_gui_v2(service: TaskService) -> int:

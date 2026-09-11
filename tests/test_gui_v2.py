@@ -2,7 +2,7 @@
 
 from dataclasses import replace
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QPalette
 
 from m3u8_downloader.gui_v2 import MainWindow
@@ -49,6 +49,27 @@ def test_new_link_dialog_adds_tasks_to_downloading_view(qtbot, tmp_path):
     window._force_exit = True
 
 
+def test_new_task_dialog_explains_missing_required_fields(qtbot, tmp_path):
+    window = MainWindow(TaskService(SQLiteTaskRepository(tmp_path / "tasks.db")))
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+    window.open_new_task_dialog()
+    dialog = window.new_task_dialog
+
+    qtbot.mouseClick(dialog.start_button, Qt.MouseButton.LeftButton)
+    assert dialog.validation_label.isVisible()
+    assert "链接" in dialog.validation_label.text()
+
+    dialog.address_edit.setPlainText("https://site.example/watch/42")
+    dialog.directory_edit.clear()
+    qtbot.mouseClick(dialog.start_button, Qt.MouseButton.LeftButton)
+    assert dialog.validation_label.isVisible()
+    assert "保存目录" in dialog.validation_label.text()
+
+    dialog.reject()
+
+
 def test_task_detail_is_empty_until_a_parent_task_is_selected(qtbot, tmp_path):
     service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "parent")
     task = service.create_tasks(CreateTaskRequest(
@@ -65,7 +86,8 @@ def test_task_detail_is_empty_until_a_parent_task_is_selected(qtbot, tmp_path):
     assert window.item_table.rowCount() == 0
     assert window.info_view.toPlainText() == ""
 
-    window.task_list.setCurrentRow(0)
+    card = window.task_list.itemWidget(window.task_list.item(0))
+    qtbot.mouseClick(card, Qt.MouseButton.LeftButton, pos=card.rect().center())
     assert window.detail_title.text() == task.name
     assert window.item_table.rowCount() == 1
     assert task.source_url in window.info_view.toPlainText()
@@ -103,6 +125,126 @@ def test_detail_clears_when_selected_task_moves_to_completed_view(qtbot, tmp_pat
     assert window.item_table.rowCount() == 0
     assert window.info_view.toPlainText() == ""
     assert window._detail_task_id == ""
+
+
+def test_blank_click_and_escape_cancel_highlight_at_the_right_scope(qtbot, tmp_path):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "parent")
+    service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8",
+        save_directory=str(tmp_path),
+    ))
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.resize(1280, 790)
+    window.show()
+    window._force_exit = True
+    window.task_list.setCurrentRow(0)
+
+    checked = window.item_table.item(0, 0)
+    assert checked.checkState() is Qt.CheckState.Checked
+    window.item_table.selectRow(0)
+    qtbot.mouseClick(
+        window.item_table.viewport(), Qt.MouseButton.LeftButton,
+        pos=QPoint(window.item_table.viewport().width() - 3,
+                   window.item_table.viewport().height() - 3),
+    )
+    assert window.item_table.selectedItems() == []
+    assert checked.checkState() is Qt.CheckState.Checked
+    assert window.detail_title.text() != ""
+
+    window.item_table.selectRow(0)
+    window.item_table.setFocus()
+    qtbot.keyPress(window.item_table, Qt.Key.Key_Escape)
+    assert window.item_table.selectedItems() == []
+    assert checked.checkState() is Qt.CheckState.Checked
+
+    window.task_list.setFocus()
+    qtbot.keyPress(window.task_list, Qt.Key.Key_Escape)
+    assert window.task_list.selectedItems() == []
+    assert window.detail_title.text() == ""
+
+    window.task_list.setCurrentRow(0)
+    qtbot.mouseClick(window.settings_button, Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(window.downloading_button, Qt.MouseButton.LeftButton)
+    assert window.task_list.currentItem() is None
+    assert window.task_list.selectedItems() == []
+    assert window.detail_title.text() == ""
+
+
+def test_action_buttons_follow_parent_and_child_selection_state(qtbot, tmp_path):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "parent")
+    service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8",
+        save_directory=str(tmp_path),
+    ))
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+
+    for button in [
+        window.pause_task_button,
+        window.resume_task_button,
+        window.stop_extraction_button,
+        window.download_selected_button,
+    ]:
+        assert not button.isEnabled()
+        assert "选择" in button.toolTip()
+
+    window.task_list.setCurrentRow(0)
+    assert window.pause_task_button.isEnabled()
+    assert not window.resume_task_button.isEnabled()
+    assert not window.stop_extraction_button.isEnabled()
+    assert window.download_selected_button.isEnabled()
+
+    window.item_table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+    assert not window.download_selected_button.isEnabled()
+    assert "勾选" in window.download_selected_button.toolTip()
+
+    qtbot.mouseClick(window.pause_task_button, Qt.MouseButton.LeftButton)
+    assert not window.pause_task_button.isEnabled()
+    assert window.resume_task_button.isEnabled()
+
+
+def test_select_all_tracks_none_partial_and_all_candidate_checks(qtbot, tmp_path):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "parent")
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42",
+        save_directory=str(tmp_path),
+    ))[0]
+    service.add_candidates(task.id, [
+        Candidate(f"https://cdn.example/{index}.m3u8") for index in range(4)
+    ])
+    service.finish_extraction(task.id)
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+    window.task_list.setCurrentRow(0)
+
+    assert window.select_all_checkbox.isEnabled()
+    assert window.select_all_checkbox.checkState() is Qt.CheckState.Unchecked
+
+    qtbot.mouseClick(window.select_all_checkbox, Qt.MouseButton.LeftButton)
+    assert all(
+        window.item_table.item(row, 0).checkState() is Qt.CheckState.Checked
+        for row in range(window.item_table.rowCount())
+    )
+    assert window.select_all_checkbox.checkState() is Qt.CheckState.Checked
+    assert window.download_selected_button.isEnabled()
+
+    window.item_table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+    assert window.select_all_checkbox.checkState() is Qt.CheckState.PartiallyChecked
+
+    qtbot.mouseClick(window.select_all_checkbox, Qt.MouseButton.LeftButton)
+    assert window.select_all_checkbox.checkState() is Qt.CheckState.Checked
+    qtbot.mouseClick(window.select_all_checkbox, Qt.MouseButton.LeftButton)
+    assert window.select_all_checkbox.checkState() is Qt.CheckState.Unchecked
+    assert all(
+        window.item_table.item(row, 0).checkState() is Qt.CheckState.Unchecked
+        for row in range(window.item_table.rowCount())
+    )
+    assert not window.download_selected_button.isEnabled()
 
 
 def test_quick_start_from_completed_view_creates_and_selects_task(qtbot, tmp_path):
@@ -235,9 +377,8 @@ def test_buttons_expose_pointer_disabled_and_action_feedback(qtbot, tmp_path):
 
     assert window.new_task_button.cursor().shape() is Qt.CursorShape.PointingHandCursor
     assert window.stop_extraction_button.cursor().shape() is Qt.CursorShape.ArrowCursor
-
-    qtbot.mouseClick(window.pause_task_button, Qt.MouseButton.LeftButton)
-    assert window.feedback_label.text() == "请先选择一个下载任务"
+    assert not window.pause_task_button.isEnabled()
+    assert "选择" in window.pause_task_button.toolTip()
 
     qtbot.mouseClick(window.settings_button, Qt.MouseButton.LeftButton)
     qtbot.mouseClick(window.save_settings_button, Qt.MouseButton.LeftButton)
