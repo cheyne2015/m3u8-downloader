@@ -28,6 +28,10 @@ class TaskCoordinator:
         attempts = [True, False] if mode == "smart" else [mode == "deep"]
         last_error = None
         for deep in attempts:
+            attempt_name = "深度模式" if deep else "普通模式"
+            self._service.add_log(
+                task_id, "信息", "提取", f"正在使用{attempt_name}提取网页",
+            )
             try:
                 candidates = self._extractor.extract(
                     task,
@@ -43,9 +47,17 @@ class TaskCoordinator:
                     item.valid for item in self._service.list_items(task_id)
                 )
                 if deep and mode == "smart" and not has_valid:
+                    self._service.add_log(
+                        task_id, "警告", "提取",
+                        "深度模式未找到可下载的 m3u8 链接，自动尝试普通模式",
+                    )
                     continue
                 if not has_valid:
-                    return self._service.fail_extraction(task_id, "未找到可下载的 m3u8 链接")
+                    message = (
+                        "智能模式未找到可下载的 m3u8 链接（已依次尝试深度模式和普通模式）"
+                        if mode == "smart" else "未找到可下载的 m3u8 链接"
+                    )
+                    return self._service.fail_extraction(task_id, message)
                 self._service.finish_extraction(task_id)
                 return self._service.finish_parent_if_handled(task_id)
             except Exception as exc:
@@ -53,8 +65,21 @@ class TaskCoordinator:
                 if stop_event.is_set():
                     return self._service.get_task(task_id)
                 if deep and mode == "smart":
+                    self._service.add_log(
+                        task_id, "警告", "提取",
+                        f"深度模式未完成：{exc}；自动尝试普通模式",
+                    )
                     continue
-                self._service.fail_extraction(task_id, str(exc))
-                raise
-        self._service.fail_extraction(task_id, str(last_error or "提取失败"))
-        raise RuntimeError(str(last_error or "提取失败"))
+                message = str(exc)
+                if mode == "smart":
+                    message = (
+                        "智能模式提取失败（已依次尝试深度模式和普通模式）。"
+                        "该网页可能不使用 m3u8，或需要登录、Referer、Cookie。"
+                    )
+                self._service.fail_extraction(task_id, message)
+                raise RuntimeError(message) from exc
+        message = str(last_error or "提取失败")
+        if mode == "smart":
+            message = "智能模式提取失败（已依次尝试深度模式和普通模式）"
+        self._service.fail_extraction(task_id, message)
+        raise RuntimeError(message)

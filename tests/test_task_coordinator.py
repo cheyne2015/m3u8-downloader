@@ -1,5 +1,7 @@
 """提取协调器的端到端状态转换测试。"""
 
+import pytest
+
 from m3u8_downloader.tasking import (
     Candidate,
     CreateTaskRequest,
@@ -37,11 +39,40 @@ def test_smart_extraction_falls_back_streams_results_and_applies_threshold(tmp_p
     finished = TaskCoordinator(service, extractor=extractor).run_extraction(task.id)
 
     assert extractor.calls == [True, False]
-    assert finished.name == "示例视频 - 网站"
+    assert finished.name == "示例视频"
     assert finished.original_title == "示例视频 - 网站"
     assert finished.extraction_status is ExtractionStatus.COMPLETED
     assert finished.download_status is DownloadStatus.WAITING
     assert [item.label for item in service.list_items(task.id)] == ["720P", "1080P"]
+    messages = [entry.message for entry in service.list_logs(task_id=task.id)]
+    assert any("正在使用深度模式" in message for message in messages)
+    assert any("自动尝试普通模式" in message for message in messages)
+
+
+def test_smart_extraction_failure_reports_that_both_modes_were_attempted(tmp_path):
+    class NoM3u8Extractor:
+        def extract(self, task, *, deep, on_candidate, on_title, stop_event):
+            if deep:
+                raise RuntimeError("深度模式仍未找到任何 m3u8")
+            raise RuntimeError("未找到任何 m3u8，可尝试 --deep 深度模式")
+
+    service = TaskService(
+        SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "parent",
+    )
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42", save_directory=str(tmp_path),
+    ))[0]
+
+    with pytest.raises(RuntimeError, match="已依次尝试深度模式和普通模式"):
+        TaskCoordinator(service, extractor=NoM3u8Extractor()).run_extraction(task.id)
+
+    failed = service.get_task(task.id)
+    assert failed.extraction_status is ExtractionStatus.FAILED
+    assert "已依次尝试深度模式和普通模式" in failed.last_error
+    assert "--deep" not in failed.last_error
+    messages = [entry.message for entry in service.list_logs(task_id=task.id)]
+    assert any("正在使用深度模式" in message for message in messages)
+    assert any("自动尝试普通模式" in message for message in messages)
 
 
 def test_smart_extraction_falls_back_when_deep_finds_nothing(tmp_path):

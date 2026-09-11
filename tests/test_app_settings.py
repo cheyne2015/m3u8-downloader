@@ -16,12 +16,14 @@ def test_app_settings_have_confirmed_defaults_and_persist(tmp_path):
     assert defaults.extraction_task_limit == 3
     assert defaults.auto_download_threshold == 3
     assert defaults.segment_threads == 8
+    assert defaults.extraction_mode == "smart"
     assert defaults.completion_notification is False
 
     changed = replace(
         defaults,
         download_task_limit=6,
         auto_download_threshold=10,
+        extraction_mode="deep",
         theme="system",
         completion_notification=True,
     )
@@ -35,6 +37,7 @@ def test_app_settings_have_confirmed_defaults_and_persist(tmp_path):
     ("auto_download_threshold", 21),
     ("segment_threads", 33),
     ("task_retries", 6),
+    ("extraction_mode", "automatic"),
 ])
 def test_app_settings_reject_values_outside_confirmed_ranges(field, value):
     with pytest.raises(ValueError):

@@ -386,7 +386,13 @@ class NewTaskDialog(QDialog):
         self.advanced_panel = QWidget()
         form = QFormLayout(self.advanced_panel)
         self.extraction_mode = QComboBox()
-        self.extraction_mode.addItems(["智能模式（深度优先）", "仅深度模式", "普通模式"])
+        self.extraction_mode.addItem("智能模式（深度优先，失败后普通）", "smart")
+        self.extraction_mode.addItem("仅深度模式", "deep")
+        self.extraction_mode.addItem("仅普通模式", "normal")
+        default_mode = self._service.load_app_settings().extraction_mode
+        self.extraction_mode.setCurrentIndex(
+            max(0, self.extraction_mode.findData(default_mode))
+        )
         self.proxy_edit = QLineEdit()
         self.referer_edit = QLineEdit()
         self.user_agent_edit = QLineEdit()
@@ -445,10 +451,9 @@ class NewTaskDialog(QDialog):
             self.directory_edit.setFocus()
             return
         app_settings = self._service.load_app_settings()
-        extraction_modes = ["smart", "deep", "normal"]
         task_settings = TaskSettings(
             auto_download_threshold=app_settings.auto_download_threshold,
-            extraction_mode=extraction_modes[self.extraction_mode.currentIndex()],
+            extraction_mode=self.extraction_mode.currentData(),
             proxy=self.proxy_edit.text().strip(),
             referer=self.referer_edit.text().strip(),
             user_agent=self.user_agent_edit.text().strip(),
@@ -560,8 +565,20 @@ class MainWindow(QMainWindow):
         icon = QIcon(str(_asset_path("m3u8-downloader.ico")))
         self.setWindowIcon(icon)
         QApplication.instance().setWindowIcon(icon)
-        self.resize(1280, 790)
         self.setMinimumSize(980, 640)
+        self._window_size_save_timer = QTimer(self)
+        self._window_size_save_timer.setSingleShot(True)
+        self._window_size_save_timer.timeout.connect(self._persist_window_size)
+        self._pending_window_size: tuple[int, int] | None = None
+        app_settings = self._service.load_app_settings()
+        if app_settings.window_width and app_settings.window_height:
+            self.resize(app_settings.window_width, app_settings.window_height)
+        else:
+            screen = QApplication.primaryScreen()
+            available = screen.availableGeometry() if screen is not None else None
+            width = min(1440, int(available.width() * 0.9)) if available else 1440
+            height = min(900, int(available.height() * 0.9)) if available else 900
+            self.resize(max(980, width), max(640, height))
         QApplication.instance().setFont(QFont("Microsoft YaHei UI", 10))
         self.setStyleSheet(_STYLE)
         self._build_ui()
@@ -797,6 +814,12 @@ class MainWindow(QMainWindow):
 
         behavior = QGroupBox("自动处理")
         behavior_form = QFormLayout(behavior)
+        self.extraction_mode_combo = QComboBox()
+        self.extraction_mode_combo.addItem(
+            "智能模式（深度优先，失败后普通）", "smart",
+        )
+        self.extraction_mode_combo.addItem("仅深度模式", "deep")
+        self.extraction_mode_combo.addItem("仅普通模式", "normal")
         self.threshold_spin = QSpinBox()
         self.threshold_spin.setRange(1, 20)
         self.notification_check = QCheckBox("父任务全部完成时显示 Windows 通知")
@@ -808,6 +831,7 @@ class MainWindow(QMainWindow):
         self.retry_delay_spin = QSpinBox()
         self.retry_delay_spin.setRange(1, 3600)
         self.retry_delay_spin.setSuffix(" 秒")
+        behavior_form.addRow("网页提取模式", self.extraction_mode_combo)
         behavior_form.addRow("自动下载候选阈值", self.threshold_spin)
         behavior_form.addRow("单次网络请求重试", self.request_retries_spin)
         behavior_form.addRow("任务级自动重试", self.task_retries_spin)
@@ -850,6 +874,8 @@ class MainWindow(QMainWindow):
         self.request_retries_spin.setValue(settings.request_retries)
         self.task_retries_spin.setValue(settings.task_retries)
         self.retry_delay_spin.setValue(settings.retry_delay_seconds)
+        mode_index = self.extraction_mode_combo.findData(settings.extraction_mode)
+        self.extraction_mode_combo.setCurrentIndex(max(0, mode_index))
         self.notification_check.setChecked(settings.completion_notification)
         self.close_to_tray_check.setChecked(settings.close_to_tray)
         self.log_days_spin.setValue(settings.log_retention_days)
@@ -862,6 +888,7 @@ class MainWindow(QMainWindow):
             download_task_limit=self.download_limit_spin.value(),
             extraction_task_limit=self.extraction_limit_spin.value(),
             auto_download_threshold=self.threshold_spin.value(),
+            extraction_mode=self.extraction_mode_combo.currentData(),
             segment_threads=self.segment_threads_spin.value(),
             global_speed_limit=self.global_speed_spin.value() * 1024 * 1024,
             request_retries=self.request_retries_spin.value(),
@@ -1017,6 +1044,7 @@ class MainWindow(QMainWindow):
         app_settings = self._service.load_app_settings()
         settings = TaskSettings(
             auto_download_threshold=app_settings.auto_download_threshold,
+            extraction_mode=app_settings.extraction_mode,
             segment_threads=app_settings.segment_threads,
             request_retries=app_settings.request_retries,
             task_retries=app_settings.task_retries,
@@ -1491,6 +1519,7 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     def request_exit(self) -> None:
+        self._persist_window_size()
         self._persist_horizontal_splitter_sizes()
         self._force_exit = True
         controller = getattr(self, "background_controller", None)
@@ -1499,6 +1528,7 @@ class MainWindow(QMainWindow):
         QApplication.quit()
 
     def closeEvent(self, event) -> None:
+        self._persist_window_size()
         self._persist_horizontal_splitter_sizes()
         if self._force_exit:
             event.accept()
@@ -1537,6 +1567,28 @@ class MainWindow(QMainWindow):
             event.accept()
         else:
             event.ignore()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self.isMaximized() or self.isFullScreen():
+            return
+        if not hasattr(self, "_window_size_save_timer"):
+            return
+        size = event.size()
+        self._pending_window_size = (size.width(), size.height())
+        self._window_size_save_timer.start(250)
+
+    def _persist_window_size(self) -> None:
+        if self._pending_window_size is None:
+            return
+        width, height = self._pending_window_size
+        self._pending_window_size = None
+        settings = self._service.load_app_settings()
+        if settings.window_width == width and settings.window_height == height:
+            return
+        self._service.save_app_settings(replace(
+            settings, window_width=width, window_height=height,
+        ))
 
     def _show_task_menu(self, task_list: QListWidget, position) -> None:
         item = task_list.itemAt(position)

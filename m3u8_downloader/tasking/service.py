@@ -30,6 +30,12 @@ from .repository import SQLiteTaskRepository
 
 _GENERIC_PLAYLIST_NAMES = {"index", "playlist", "master", "media"}
 _INVALID_FILE_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_PAGE_TITLE_SEPARATOR = re.compile(r"[-|｜]")
+
+
+def _automatic_task_name(page_title: str) -> str:
+    prefix = _PAGE_TITLE_SEPARATOR.split(page_title, maxsplit=1)[0].strip()
+    return prefix or page_title
 
 
 class DuplicateSourceError(ValueError):
@@ -238,7 +244,7 @@ class TaskService:
         task = replace(
             task,
             original_title=title,
-            name=(task.name if task.name_edited else title),
+            name=(task.name if task.name_edited else _automatic_task_name(title)),
             updated_at=self._clock(),
         )
         self._repository.save_many([task])

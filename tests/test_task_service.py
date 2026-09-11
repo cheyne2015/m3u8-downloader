@@ -63,6 +63,56 @@ def test_user_can_create_and_restore_page_and_m3u8_tasks(tmp_path):
     assert restored == created
 
 
+def test_page_title_before_site_separator_becomes_automatic_task_name(tmp_path):
+    service = TaskService(
+        SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "page",
+    )
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42",
+        save_directory=str(tmp_path),
+    ))[0]
+
+    updated = service.apply_page_title(
+        task.id, "欢迎来龙餐馆 (2026) 在线观看 - 冷映",
+    )
+
+    assert updated.name == "欢迎来龙餐馆 (2026) 在线观看"
+    assert updated.original_title == "欢迎来龙餐馆 (2026) 在线观看 - 冷映"
+
+
+@pytest.mark.parametrize("separator", ["|", "｜"])
+def test_pipe_separators_also_remove_the_site_name_from_automatic_task_name(
+    tmp_path, separator,
+):
+    service = TaskService(
+        SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "page",
+    )
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42",
+        save_directory=str(tmp_path),
+    ))[0]
+
+    updated = service.apply_page_title(task.id, f"影片名称 {separator} 视频网站")
+
+    assert updated.name == "影片名称"
+
+
+def test_manual_task_name_is_not_replaced_by_shortened_page_title(tmp_path):
+    service = TaskService(
+        SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "page",
+    )
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42",
+        save_directory=str(tmp_path),
+    ))[0]
+    service.rename_task(task.id, "用户名称")
+
+    updated = service.apply_page_title(task.id, "网页名称 - 视频网站")
+
+    assert updated.name == "用户名称"
+    assert updated.original_title == "网页名称 - 视频网站"
+
+
 def test_restart_pauses_interrupted_work_without_starting_network(tmp_path):
     """重启恢复只改变运行态，已完成和等待中的任务保持原状态。"""
     repository = SQLiteTaskRepository(tmp_path / "tasks.db")

@@ -53,6 +53,7 @@ class AppSettings:
     download_task_limit: int = 3
     extraction_task_limit: int = 3
     auto_download_threshold: int = 3
+    extraction_mode: str = "smart"
     segment_threads: int = 8
     request_retries: int = 3
     task_retries: int = 1
@@ -64,6 +65,8 @@ class AppSettings:
     close_to_tray: bool = False
     task_panel_width: int = 0
     detail_panel_width: int = 0
+    window_width: int = 0
+    window_height: int = 0
 
     def __post_init__(self) -> None:
         ranges = {
@@ -78,6 +81,8 @@ class AppSettings:
             "log_retention_days": (1, 3650),
             "task_panel_width": (0, 100000),
             "detail_panel_width": (0, 100000),
+            "window_width": (0, 100000),
+            "window_height": (0, 100000),
         }
         for name, (minimum, maximum) in ranges.items():
             value = getattr(self, name)
@@ -85,6 +90,8 @@ class AppSettings:
                 raise ValueError(f"{name} 必须在 {minimum}～{maximum} 之间")
         if self.theme not in {"dark", "light", "system"}:
             raise ValueError("theme 必须是 dark、light 或 system")
+        if self.extraction_mode not in {"smart", "deep", "normal"}:
+            raise ValueError("extraction_mode 必须是 smart、deep 或 normal")
 
 
 @dataclass(frozen=True)

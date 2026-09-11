@@ -4,6 +4,7 @@ from dataclasses import replace
 
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QPalette
+from PySide6.QtWidgets import QApplication
 
 from m3u8_downloader.gui_v2 import MainWindow
 from m3u8_downloader.tasking import (
@@ -15,6 +16,37 @@ from m3u8_downloader.tasking import (
     SQLiteTaskRepository,
     TaskService,
 )
+
+
+def test_main_window_first_size_fits_screen_and_uses_desktop_upper_bound(qtbot, tmp_path):
+    window = MainWindow(TaskService(SQLiteTaskRepository(tmp_path / "tasks.db")))
+    qtbot.addWidget(window)
+    window._force_exit = True
+
+    available = QApplication.primaryScreen().availableGeometry()
+    assert 980 <= window.width() <= 1440
+    assert 640 <= window.height() <= 900
+    if available.width() >= 980:
+        assert window.width() <= int(available.width() * 0.9)
+    if available.height() >= 640:
+        assert window.height() <= int(available.height() * 0.9)
+
+
+def test_main_window_restores_the_last_user_size(qtbot, tmp_path):
+    database = tmp_path / "tasks.db"
+    first = MainWindow(TaskService(SQLiteTaskRepository(database)))
+    qtbot.addWidget(first)
+    first.show()
+    first.resize(1320, 820)
+    first._force_exit = True
+    first.close()
+
+    restored = MainWindow(TaskService(SQLiteTaskRepository(database)))
+    qtbot.addWidget(restored)
+    restored._force_exit = True
+
+    assert restored.size().width() == 1320
+    assert restored.size().height() == 820
 
 
 def test_new_link_dialog_adds_tasks_to_downloading_view(qtbot, tmp_path):
@@ -486,18 +518,44 @@ def test_settings_page_saves_concurrency_threshold_and_notification(qtbot, tmp_p
     assert window.extraction_limit_spin.value() == 3
     assert window.threshold_spin.value() == 3
     assert window.segment_threads_spin.value() == 8
+    assert window.extraction_mode_combo.currentData() == "smart"
     assert window.notification_check.isChecked() is False
 
     window.download_limit_spin.setValue(5)
     window.threshold_spin.setValue(8)
+    window.extraction_mode_combo.setCurrentIndex(
+        window.extraction_mode_combo.findData("deep")
+    )
     window.notification_check.setChecked(True)
     qtbot.mouseClick(window.save_settings_button, Qt.MouseButton.LeftButton)
 
     saved = repository.load_app_settings()
     assert saved.download_task_limit == 5
     assert saved.auto_download_threshold == 8
+    assert saved.extraction_mode == "deep"
     assert saved.completion_notification is True
     window._force_exit = True
+
+
+def test_global_extraction_mode_is_used_by_quick_start_and_new_task_dialog(qtbot, tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    service = TaskService(repository, id_factory=lambda: "quick")
+    service.save_app_settings(replace(
+        service.load_app_settings(), extraction_mode="normal",
+    ))
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+
+    window.open_new_task_dialog()
+    assert window.new_task_dialog.extraction_mode.currentData() == "normal"
+    window.new_task_dialog.reject()
+
+    window.quick_address_edit.setText("https://site.example/watch/quick")
+    qtbot.mouseClick(window.quick_start_button, Qt.MouseButton.LeftButton)
+
+    assert service.get_task("quick").settings.extraction_mode == "normal"
 
 
 def test_pending_task_can_queue_checked_download_items(qtbot, tmp_path):
