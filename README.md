@@ -1,279 +1,192 @@
-# m3u8-downloader
+# M3U8 下载器 v2
 
-本地 m3u8 下载工具，支持 TS 片段并发下载与 MP4 转换。
+面向 Windows 的图形化网页视频与 M3U8 下载工具。v2 使用 PySide6 重建任务界面，把一个网页或一条 M3U8 直链作为父任务管理，并把网页中提取到的每条 M3U8 作为独立下载项处理。
 
-## 功能特性
+它适合需要批量提取网页视频、选择清晰度、稳定续传以及长期管理下载记录的场景。
 
-- 解析 m3u8 播放列表（master/media playlist）
-- 多码率自动选择（默认选最高码率）
-- 多线程并发下载 TS 片段（默认 8 并发）
-- AES-128 加密流解密支持
-- 安全断点续传（`.part` 原子片段 + HTTP Range，播放列表变化时自动隔离旧缓存）
-- HTTP 重试机制（播放列表、密钥和片段均支持指数退避；停止时立即中断等待）
-- 实时进度显示（进度条 + 速度 + ETA）
-- 优先使用 ffmpeg 合并转码为 MP4
-- ffmpeg 不可用时自动降级为 TS 二进制拼接
-- 中文友好提示信息
+## 下载
 
-## 安装
+从 [GitHub Releases](https://github.com/cheyne2015/m3u8-downloader/releases/latest) 下载 Windows x64 压缩包，解压后运行：
 
-### 方式一：一键安装（Windows）
-
-双击运行 `install.bat`，脚本将自动：
-1. 检查 Python 环境
-2. 安装 Python 依赖
-3. 将 `m3u8-dl` 命令添加到 PATH
-4. 检查 ffmpeg 是否可用
-
-### 方式二：手动安装
-
-```bash
-# 安装依赖
-pip install -r requirements.txt
-
-# 以开发模式安装（添加 m3u8-dl 到 PATH）
-pip install -e .
+```text
+m3u8-downloader-v2\m3u8-dl-v2.exe
 ```
 
-### ffmpeg（可选但推荐）
+发布版是文件夹程序，`_internal` 中包含 Qt 运行库、程序资源和 ffmpeg。请保留整个文件夹，不要只复制 EXE。
 
-安装 ffmpeg 可获得更好的转码质量：
-1. 下载：https://ffmpeg.org/download.html
-2. 解压到任意目录
-3. 将 `bin` 目录添加到系统 PATH
+## 主要功能
 
-## 使用方法
+- 支持网页链接和 M3U8 直链。
+- 智能提取默认深度模式优先，失败或没有结果时自动回退普通解析。
+- 提取结果流式出现，无需等待整个网页扫描结束。
+- 可以在网页仍在提取时选择已有候选并开始下载，提取继续在后台完成。
+- 多个父任务并发下载，每个父任务内部按顺序下载子项。
+- M3U8 分片并发、AES-128 解密、断点续传、HTTP Range 和失败重试。
+- 优先使用发布包内的 ffmpeg 合并为 MP4。
+- 下载中、已完成、任务详情、搜索、状态筛选和完整右键菜单。
+- 深色、浅色和跟随 Windows 三种主题。
+- SQLite 持久化任务、下载项、队列顺序、设置和日志。
+- Windows 单实例、系统托盘及可选的下载完成通知。
 
-### 基本用法
+## 使用流程
 
-```bash
-m3u8-dl https://example.com/index.m3u8
+### 快速创建任务
+
+在主界面的“快速下载”栏粘贴网页或 M3U8 地址，按回车或点击“快速开始”。程序使用上一次保存目录和当前默认设置创建任务。
+
+需要批量链接、指定保存目录或单独设置代理时，点击“新建链接”：
+
+1. 每行粘贴一个网页或 M3U8 地址。
+2. 选择保存目录。
+3. 根据需要展开高级选项。
+4. 点击“开始”。
+
+M3U8 直链会直接进入下载队列；网页链接会先进入提取队列。
+
+### 网页候选处理
+
+提取自然结束或用户主动停止提取后，程序按照任务自己的自动下载阈值处理候选：
+
+- 有效候选数量不超过阈值：全部自动进入下载队列。
+- 有效候选数量超过阈值：任务进入“待选择”，由用户勾选。
+- 默认阈值为 3，可在设置中调整为 1～20。
+- 预估时长显示为相同整秒的候选只保留预估体积最大的一个；其余项不下载，也不计入阈值。
+- 时长未知的候选不会被错误合并。
+
+“停止提取”只结束网页扫描，并立即应用当前候选；停止后可以点击“重新提取”，旧候选会安全清理后重新扫描。
+
+### 选择与操作
+
+- 主任务列表点击空白处或按 `Esc` 可取消选择。
+- 右侧下载项表格点击空白处或按 `Esc` 只取消行高亮，不改变下载勾选。
+- “全选”支持未选、部分选中和全部选中三种状态，只影响尚未开始且可选择的项目。
+- 暂停、继续、停止提取和下载选中项会根据任务状态自动启用或禁用。
+- 任务完成并移入“已完成”后，旧选择和右侧详情会自动清空。
+
+## 下载调度
+
+默认设置：
+
+| 设置 | 默认值 | 可选范围 |
+|---|---:|---:|
+| 同时下载父任务 | 3 | 1～6 |
+| 同时提取网页 | 3 | 1～6 |
+| 自动下载候选阈值 | 3 | 1～20 |
+| 每个 M3U8 分片线程 | 8 | 1～32 |
+| 单次网络请求重试 | 3 | 0～10 |
+| 任务级自动重试 | 1 | 0～5 |
+| 任务重试等待 | 30 秒 | 1～3600 秒 |
+
+父任务并发、网页提取并发和分片线程相互独立。任务级重试等待、待选择和暂停任务不会占用下载槽位。
+
+下载过程中会显示总体进度、当前速度、已下载大小、总大小和剩余时间。磁盘空间不足时，程序会阻止新任务启动或安全暂停当前任务。
+
+## 文件命名
+
+- 单个 M3U8：`任务名称.mp4`
+- 多个 M3U8：创建网页标题文件夹，子文件为 `任务名称_01.mp4`、`任务名称_02.mp4`……
+- 文件重名时自动追加 `(1)`、`(2)`……
+- 下载前重命名父任务会更新尚未开始项的规划文件名。
+- 下载后重命名父任务只改变界面名称；“重命名文件”才会修改磁盘文件。
+
+## 深度网页提取
+
+普通解析会扫描 HTML、媒体标签和页面脚本。SPA 或运行时生成地址的网站需要 Playwright 浏览器监听网络请求。
+
+当前发布包为了控制体积，不内置 Playwright 和 Chromium。需要深度提取的电脑请安装 Python 3.13，然后执行：
+
+```powershell
+py -3.13 -m pip install playwright
+py -3.13 -m playwright install chromium
 ```
 
-### 指定输出文件
+程序会自动调用系统 Python 执行发布包内的 `deep_worker.py`。不可用时，界面会区分缺少 Python、Playwright 或浏览器内核，并在智能模式下尝试普通解析。
 
-```bash
-m3u8-dl https://example.com/index.m3u8 -o video.mp4
+## 数据目录
+
+默认数据目录：
+
+```text
+%LOCALAPPDATA%\m3u8-downloader\
 ```
 
-### 调整并发数
+其中 `tasks-v2.db` 保存任务、下载项、队列、设置和日志。v2 不迁移也不修改旧版 JSON 数据。
 
-```bash
-m3u8-dl https://example.com/index.m3u8 -o video.mp4 -w 16
+需要便携模式时，在 `m3u8-dl-v2.exe` 同级目录创建空文件：
+
+```text
+portable.flag
 ```
 
-### 指定临时目录
+程序随后把数据写入程序目录下的 `data` 文件夹。
 
-```bash
-m3u8-dl https://example.com/index.m3u8 -o video.mp4 --tmp-dir ./temp
+程序异常退出或系统断电后，未完成任务下次启动统一恢复为“已暂停”，不会自动联网。
+
+## 从源码运行
+
+环境要求：Windows 10/11、Python 3.13。
+
+```powershell
+git clone https://github.com/cheyne2015/m3u8-downloader.git
+cd m3u8-downloader
+py -3.13 -m pip install -r requirements.txt
+py -3.13 -m m3u8_downloader.gui_launcher
 ```
 
-### 不使用 ffmpeg
+启用深度模式：
 
-```bash
-m3u8-dl https://example.com/index.m3u8 -o video.mp4 --no-ffmpeg
+```powershell
+py -3.13 -m pip install -r requirements-deep.txt
+py -3.13 -m playwright install chromium
 ```
 
-### 查看帮助
+## 测试
 
-```bash
-m3u8-dl --help
+```powershell
+py -3.13 -m pytest -q
 ```
 
-## 命令行参数
+v2.0.0 发布前验证结果为 `607 passed`，覆盖任务服务、SQLite、调度、网页提取、下载与续传、文件处理、Windows 集成和 PySide6 界面交互。
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `url` | m3u8 播放列表 URL | - |
-| `-o, --output` | 输出文件路径 | output.mp4 |
-| `-w, --workers` | 并发下载线程数 | 8 |
-| `--tmp-dir` | 临时文件目录 | 输出目录/.tmp |
-| `--no-ffmpeg` | 不使用 ffmpeg 合并转码 | false |
-| `--retries` | 下载失败重试次数 | 3 |
-| `--timeout` | HTTP 请求超时（秒） | 30 |
-| `-v, --version` | 显示版本号 | - |
-| `--gui` | 启动图形界面 | false |
-| `--from-page` | 把位置参数当作网页地址，先抽取页内 m3u8 再下载 | false |
-| `--deep` | 使用无头浏览器深度抽取（隐含 --from-page，需 playwright） | false |
-| `--pick` | 非交互选择序号：1,3 / 1-3 / 1,3-5 / all | 空（交互输入） |
-| `--list-only` | 只列出候选与估计大小，不下载 | false |
-| `--no-estimate` | 跳过大小估计（秒出列表） | false |
-| `--extract-workers` | 抽取/估算并发数（1-16） | 8 |
+## 打包 Windows 程序
 
-## 从网页抽取 m3u8（CLI）
+确保系统可以找到 ffmpeg，然后执行：
 
-除了直接传 m3u8 直链，还可以**粘贴一个包含 m3u8 的网页 URL**，工具会列出页内所有 m3u8 链接（含估计大小/时长/码率），由你选择下载。
-
-```bash
-# 抽取并进入交互式选择
-m3u8-dl https://site.com/play/123 --from-page
-
-# 只看列表，不下载
-m3u8-dl https://site.com/play/123 --from-page --list-only
-
-# 非交互：直接选 1 和 3 下载
-m3u8-dl https://site.com/play/123 --from-page --pick 1,3 -o video.mp4
-
-# 全选
-m3u8-dl https://site.com/play/123 --from-page --pick all
-
-# 无头浏览器深度模式（SPA / 运行时拼 URL 的站点）
-m3u8-dl https://site.com/play/123 --deep --pick all
+```powershell
+py -3.13 -m PyInstaller build-v2.spec --clean --noconfirm
 ```
 
-选择序号语法（`--pick`）：
+输出位置：
 
-- `1,3` 选中第 1、3 个
-- `1-3` 选中第 1 到第 3 个
-- `1,3-5` 混合
-- `all` 全选
-- 不带 `--pick` 且为终端（TTY）时进入交互式输入；非交互环境（管道/CI）会提示用 `--pick` 并退出码 2
-
-列表输出示例：
-
-```
-序号  估计大小      时长      码率        类型    来源  标题/URL
-[1]   ≈ 1.21 GB   01:32:10  2.5 Mbps    master  html  1080P
-      https://cdn.x/hls/1080/index.m3u8
-[2]   ≈ 620.4 MB  01:32:08  1.2 Mbps    media   js    -
-      https://cdn.x/hls/720/index.m3u8
-[3]   未知         -         -           -       js    (不可达)
-      https://cdn.x/hls/dead.m3u8
-共 3 个候选（大小为估计值）
+```text
+dist\m3u8-downloader-v2\m3u8-dl-v2.exe
 ```
 
-> ⚠️ 大小为**估计值**（基于码率×时长或抽样片段大小），实际文件可能偏差；不可达链接（403/超时）显示「未知」。
-
-### 深度模式（可选，需 playwright）
-
-默认是**静态解析**（拉 HTML + 扫描 `<source>/<video>/<a>` 标签与内外链 JS）。若页面是 SPA、m3u8 由播放器运行时生成，可开启深度模式（无头浏览器监听网络请求中的 .m3u8）：
-
-```bash
-pip install -r requirements-deep.txt
-playwright install chromium
-m3u8-dl https://site.com/play/123 --deep
-```
-
-深度模式**不进主依赖、不进 EXE**，缺失时给出明确的安装提示而不会崩溃。
-
-> **EXE 的深度模式怎么跑通？** 两条路线自动择优，无需额外配置：
->
-> 1. **进程内**：源码运行时当前 Python 装了 playwright，直接跑（最快）；
-> 2. **子进程**：冻结 EXE 内无法 import 外部 site-packages，改为调用系统 Python
->    （`py -3.13` / `python`）执行随包分发几 KB 的 `deep_worker.py`，复用本机
->    playwright 与 Chromium 浏览器，因此 EXE 体积不受影响。
->
-> 两者都不可用时，提示会区分具体原因（缺解释器 / 缺 playwright / 缺浏览器内核）。
-
-## 依赖
-
-- `requests` - HTTP 请求
-- `pycryptodome` - AES-128 解密
-- `tqdm` - 进度条显示
-- `beautifulsoup4` - 网页 HTML 解析（静态抽取，仅主依赖，用内置 html.parser）
-- `pyinstaller` - EXE 打包（仅打包时需要）
-
-> 深度模式（无头浏览器）为**可选**依赖，见 `requirements-deep.txt`：
-> `pip install -r requirements-deep.txt && playwright install chromium`
-
-## GUI 图形界面
-
-### 启动方式
-
-```bash
-# 方式一：双击 m3u8-dl.exe（GUI 版，无黑窗口，文件名固定）
-m3u8-dl.exe
-
-# 方式二：Python 模块方式（需 pip install -e .）
-python -m m3u8_downloader --gui
-```
-
-### 界面功能
-
-- **URL 输入**：地址框支持「m3u8 直链」或「网页地址」，支持一键粘贴
-- **提取网页**：粘贴网页地址后点击「提取网页」，工具列出页内所有 m3u8（含估计大小），抽取在后台线程进行不卡界面
-- **网页提取结果**：Treeview 展示序号 / 估计大小 / 时长 / 码率 / 类型 / 标题 / 链接；单击即可切换多选，并提供全选、取消选择、复制链接和数量统计
-- **下载选中**：选中一行或多行后点击「下载选中」，多选时**串行**下载，文件名自动加 `_序号`
-- **深度模式**：参数区可勾选「深度模式（需 playwright）」，未安装时该选项自动禁用
-- **输出设置**：选择保存目录和文件名
-- **打开目录**：点击「打开」按钮，在系统文件管理器中打开当前保存目录
-- **记住保存位置**：勾选后记住当前保存目录，下次启动 GUI 自动填充（配置保存在 `~/.m3u8-downloader/gui_config.json`）
-- **参数配置**：并发线程数、重试次数、超时时间、ffmpeg 选项、临时目录
-- **预载状态**：下载期间可提取下一网页，链接和标题会在当前下载结束后一起显示
-- **进度显示**：实时进度条、下载速度、剩余时间、当前完整标题和实际保存文件名
-- **日志输出**：下载过程的详细日志始终显示
-- **操作控制**：下载与网页提取分别停止；已经完整写入的片段可安全续传复用
-
-### 注意事项
-
-- 下载在子线程执行，不会阻塞界面
-- 停止下载会中断当前任务
-- 错误信息在日志区显示，不会弹出报错框
-
-### 从网页提取 m3u8（GUI）
-
-1. 在「地址（m3u8 / 网页）」框粘贴网页 URL；
-2. 点击「提取网页」，稍候在「网页提取结果」列表中看到候选（大小均为估计值）；
-3. 单击一行切换选择，可连续选择多行；双击可把该链接填回地址框直接下载，也可点「下载选中」批量下载；
-4. 需要时可先勾选「深度模式」再点「提取网页」（需先安装 playwright，见上方 CLI 深度模式说明）。
-
-## EXE 打包
-
-### 一键打包（Windows）
-
-双击运行 `build.bat`，脚本将自动：
-1. 检查并安装 PyInstaller
-2. 安装项目依赖
-3. 执行打包生成 `dist/m3u8-dl.exe`（GUI）与 `dist/m3u8-dl-cli.exe`（CLI）
-
-### 手动打包
-
-```bash
-# 安装 PyInstaller
-pip install pyinstaller
-
-# 执行打包
-pyinstaller build.spec --clean --noconfirm
-```
-
-打包完成后，`dist/` 目录下生成 `m3u8-dl.exe`（图形界面版，无控制台窗口）与 `m3u8-dl-cli.exe`（命令行版，保留控制台进度输出）。
-
-### EXE 使用
-
-打包后 `dist/` 目录会生成两个 EXE：
-
-- **`m3u8-dl.exe`** —— 图形界面版，**双击即可运行且不会弹出黑色终端窗口**（文件名固定为 m3u8-dl.exe，推荐日常 GUI 使用）。
-- **`m3u8-dl-cli.exe`** —— 命令行版，保留控制台窗口用于实时进度输出（适合在终端/批处理中调用）。
-
-```bash
-# GUI 模式（双击 m3u8-dl.exe，无黑窗口）
-m3u8-dl.exe
-
-# 命令行模式（保留进度输出）
-m3u8-dl-cli.exe https://example.com/index.m3u8 -o video.mp4
-```
+构建配置会收集 PySide6、ffmpeg、深度提取脚本和应用图标。发布前应从最终目录启动 EXE，并验证 SQLite 初始化、ffmpeg、Playwright 浏览器和实际网页提取。
 
 ## 项目结构
 
+```text
+m3u8_downloader/
+├── gui_v2.py                   # PySide6 主界面与交互
+├── background_v2.py            # 提取与下载后台调度
+├── runtime_v2.py               # 数据目录和服务装配
+├── extractor.py                # 普通/深度网页提取入口
+├── deep_worker.py              # 冻结程序使用的深度提取进程
+├── downloader.py               # 分片下载、续传和重试
+├── downloader_adapter_v2.py    # v2 下载任务适配
+├── ffmpeg_v2.py                # 随包 ffmpeg 定位
+├── windows_v2.py               # Windows 单实例
+└── tasking/
+    ├── models.py               # 父任务与子下载项模型
+    ├── repository.py           # SQLite 仓库
+    ├── service.py              # 任务操作与状态转换
+    ├── coordinator.py          # 智能提取和回退
+    └── download_coordinator.py # 下载队列、重试与空间保护
 ```
-m3u8-downloader/
-├── m3u8_downloader/        # 核心包
-│   ├── __init__.py         # 包初始化
-│   ├── __main__.py         # 模块运行入口（CLI）
-│   ├── gui_launcher.py      # GUI 专用启动入口（无控制台 EXE）
-│   ├── cli.py              # CLI 入口
-│   ├── gui.py              # GUI 图形界面
-│   ├── extractor.py        # 网页 m3u8 抽取（HTML/JS 扫描 + 深度模式接口）
-│   ├── estimator.py        # m3u8 大小/时长/码率估算（并发）
-│   ├── downloader.py       # 核心下载逻辑
-│   ├── parser.py           # m3u8 解析器
-│   ├── merger.py           # TS 合并 + MP4 转换
-│   └── utils.py            # 工具函数
-├── tests/                  # 测试目录
-├── setup.py                # 安装配置
-├── requirements.txt        # 依赖
-├── build.spec              # PyInstaller 打包配置
-├── build.bat               # Windows 一键打包脚本
-├── install.bat             # Windows 一键安装脚本
-└── README.md               # 使用说明
-```
+
+更完整的行为约束见 [v2 产品规格](docs/v2_product_spec.md)，架构说明见 [v2 架构](docs/v2_architecture.md)。
+
+## 使用说明
+
+请只下载你有权访问和保存的内容，并遵守内容来源网站的服务条款及所在地法律。
