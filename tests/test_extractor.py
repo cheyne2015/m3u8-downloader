@@ -243,7 +243,11 @@ def test_inject_system_playwright_finds_installed(monkeypatch):
     if py:
         try:
             out = _sp.run(
-                [py, "-3.13", "-c", "import site; print(site.getsitepackages()[0])"],
+                [
+                    py, "-3.13", "-c",
+                    "import pathlib,playwright; "
+                    "print(pathlib.Path(playwright.__file__).resolve().parent.parent)",
+                ],
                 capture_output=True, text=True, timeout=15,
             ).stdout.strip()
             have_system = bool(out) and os.path.isdir(os.path.join(out, "playwright"))
@@ -254,14 +258,24 @@ def test_inject_system_playwright_finds_installed(monkeypatch):
 
     monkeypatch.setattr(extractor, "_SYSTEM_PLAYWRIGHT_INJECTED", False)
     saved = list(_sys.path)
+    saved_playwright_modules = {
+        name: module for name, module in _sys.modules.items()
+        if name == "playwright" or name.startswith("playwright.")
+    }
     # 模拟冻结：移除所有含 playwright 包的站点目录
     _sys.path[:] = [p for p in _sys.path if not os.path.isdir(os.path.join(p, "playwright"))]
+    for name in saved_playwright_modules:
+        _sys.modules.pop(name, None)
     try:
         assert extractor._playwright_importable() is False
         assert extractor._inject_system_playwright() is True
         assert extractor._playwright_importable() is True
     finally:
         _sys.path[:] = saved
+        for name in list(_sys.modules):
+            if name == "playwright" or name.startswith("playwright."):
+                _sys.modules.pop(name, None)
+        _sys.modules.update(saved_playwright_modules)
 
 
 # ===== bs4 缺失时降级仍能抽到 =====

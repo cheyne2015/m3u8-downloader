@@ -93,7 +93,9 @@ def _inject_system_playwright() -> bool:
         try:
             out = subprocess.run(
                 [py, "-3.13", "-c",
-                 "import site; sp=site.getsitepackages(); print(sp[0] if sp else '')"],
+                 "import os,site; "
+                 "sp=[*site.getsitepackages(),site.getusersitepackages()]; "
+                 "print(next((p for p in sp if os.path.isdir(os.path.join(p,'playwright'))),''))"],
                 capture_output=True, text=True, timeout=15,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             ).stdout.strip()
