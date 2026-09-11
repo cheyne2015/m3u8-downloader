@@ -49,6 +49,62 @@ def test_new_link_dialog_adds_tasks_to_downloading_view(qtbot, tmp_path):
     window._force_exit = True
 
 
+def test_task_detail_is_empty_until_a_parent_task_is_selected(qtbot, tmp_path):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "parent")
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8",
+        save_directory=str(tmp_path),
+    ))[0]
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+
+    assert window.task_list.currentItem() is None
+    assert window.detail_title.text() == ""
+    assert window.item_table.rowCount() == 0
+    assert window.info_view.toPlainText() == ""
+
+    window.task_list.setCurrentRow(0)
+    assert window.detail_title.text() == task.name
+    assert window.item_table.rowCount() == 1
+    assert task.source_url in window.info_view.toPlainText()
+
+    window.task_list.clearSelection()
+    assert window.detail_title.text() == ""
+    assert window.item_table.rowCount() == 0
+    assert window.info_view.toPlainText() == ""
+    assert window._detail_task_id == ""
+
+
+def test_detail_clears_when_selected_task_moves_to_completed_view(qtbot, tmp_path):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "parent")
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8",
+        save_directory=str(tmp_path),
+    ))[0]
+    item = service.list_items(task.id)[0]
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+    window.task_list.setCurrentRow(0)
+
+    output = tmp_path / "video.mp4"
+    output.write_bytes(b"video")
+    service.complete_item(task.id, item.id, output)
+    service.finish_parent_if_handled(task.id)
+    window.refresh_tasks()
+
+    assert window.task_list.currentItem() is None
+    assert window.completed_list.currentItem() is None
+    assert window.completed_list.count() == 1
+    assert window.detail_title.text() == ""
+    assert window.item_table.rowCount() == 0
+    assert window.info_view.toPlainText() == ""
+    assert window._detail_task_id == ""
+
+
 def test_quick_start_from_completed_view_creates_and_selects_task(qtbot, tmp_path):
     repository = SQLiteTaskRepository(tmp_path / "tasks.db")
     identifiers = iter(["seed", "quick"])

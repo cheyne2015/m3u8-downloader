@@ -634,13 +634,17 @@ class MainWindow(QMainWindow):
         )
         self.pages.setMinimumHeight(0)
         self.task_list = QListWidget()
-        self.task_list.currentItemChanged.connect(self._show_task_detail)
+        self.task_list.itemSelectionChanged.connect(
+            lambda: self._sync_task_detail_from_selection(self.task_list)
+        )
         self.task_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.task_list.customContextMenuRequested.connect(
             lambda position: self._show_task_menu(self.task_list, position)
         )
         self.completed_list = QListWidget()
-        self.completed_list.currentItemChanged.connect(self._show_task_detail)
+        self.completed_list.itemSelectionChanged.connect(
+            lambda: self._sync_task_detail_from_selection(self.completed_list)
+        )
         self.completed_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.completed_list.customContextMenuRequested.connect(
             lambda position: self._show_task_menu(self.completed_list, position)
@@ -845,6 +849,8 @@ class MainWindow(QMainWindow):
         self.status_filter_combo.setVisible(index == 0)
         self.completed_sort_combo.setVisible(index == 1)
         self.refresh_tasks()
+        if index == 2:
+            self._clear_task_detail()
 
     def open_new_task_dialog(self) -> None:
         last_directory = self._last_save_directory()
@@ -968,11 +974,39 @@ class MainWindow(QMainWindow):
             item.setSizeHint(QSize(0, card_height))
             target.addItem(item)
             target.setItemWidget(item, TaskCard(task, task_items))
-            if task.id == selected_id:
+            if task.id == selected_id and target is current_list:
                 target.setCurrentItem(item)
+
+        if self.pages.currentIndex() == 2:
+            self._clear_task_detail()
+        else:
+            active_list = self.completed_list if self.pages.currentIndex() == 1 else self.task_list
+            self._sync_task_detail_from_selection(active_list)
+
+    def _sync_task_detail_from_selection(self, task_list: QListWidget) -> None:
+        active_list = self.completed_list if self.pages.currentIndex() == 1 else self.task_list
+        if self.pages.currentIndex() == 2 or task_list is not active_list:
+            return
+        selected = task_list.selectedItems()
+        if selected:
+            self._show_task_detail(selected[0], None)
+        else:
+            self._clear_task_detail()
+
+    def _clear_task_detail(self) -> None:
+        self._detail_task_id = ""
+        self.detail_title.clear()
+        self._updating_item_table = True
+        self.item_table.setRowCount(0)
+        self._updating_item_table = False
+        self.info_view.clear()
+        self.stop_extraction_button.setText("停止提取")
+        _set_button_enabled(self.stop_extraction_button, False)
+        _set_button_enabled(self.download_selected_button, False)
 
     def _show_task_detail(self, current: QListWidgetItem | None, _previous) -> None:
         if current is None:
+            self._clear_task_detail()
             return
         task: Task = current.data(Qt.ItemDataRole.UserRole)
         self._detail_task_id = task.id
