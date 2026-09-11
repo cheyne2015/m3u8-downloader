@@ -2,9 +2,9 @@
 
 from dataclasses import replace
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QPalette
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from m3u8_downloader.gui_v2 import MainWindow
 from m3u8_downloader.tasking import (
@@ -79,6 +79,130 @@ def test_new_link_dialog_adds_tasks_to_downloading_view(qtbot, tmp_path):
     assert window.item_table.item(0, 0).text() == "video"
     assert window.item_table.item(0, 2).text() == "等待下载"
     window._force_exit = True
+
+
+def test_delete_task_accepts_the_integer_result_returned_by_pyside(
+    qtbot, tmp_path,
+):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "task")
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8",
+        save_directory=str(tmp_path),
+    ))[0]
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window._force_exit = True
+    shown = []
+
+    def confirm_real_dialog():
+        box = QApplication.activeModalWidget()
+        shown.append(box)
+        box.button(QMessageBox.StandardButton.Yes).click()
+
+    QTimer.singleShot(0, confirm_real_dialog)
+
+    window._delete_task(task, delete_outputs=False)
+
+    assert isinstance(shown[0], QMessageBox)
+    assert service.list_tasks() == []
+
+
+def test_delete_task_confirmation_can_be_suppressed_for_only_one_window_session(
+    qtbot, tmp_path, monkeypatch,
+):
+    ids = iter(["first", "second", "after-reopen"])
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=ids.__next__)
+    first, second = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/first.m3u8\nhttps://cdn.example/second.m3u8",
+        save_directory=str(tmp_path),
+    ))
+    prompts = []
+
+    def accept_and_disable(box):
+        prompts.append(box.windowTitle())
+        assert box.checkBox() is not None
+        assert box.checkBox().text() == "本次运行不再确认"
+        box.checkBox().setChecked(True)
+        return QMessageBox.StandardButton.Yes.value
+
+    monkeypatch.setattr(QMessageBox, "exec", accept_and_disable)
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("删除确认必须提供“不再确认”复选框")
+        ),
+    )
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window._force_exit = True
+
+    window._delete_task(first, delete_outputs=False)
+    window._delete_task(second, delete_outputs=False)
+
+    assert prompts == ["删除任务"]
+    after_reopen = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/after-reopen.m3u8",
+        save_directory=str(tmp_path),
+    ))[0]
+    reopened = MainWindow(service)
+    qtbot.addWidget(reopened)
+    reopened._force_exit = True
+    reopened._delete_task(after_reopen, delete_outputs=False)
+    assert prompts == ["删除任务", "删除任务"]
+
+
+def test_permanent_delete_has_independent_session_confirmation_and_removes_files(
+    qtbot, tmp_path, monkeypatch,
+):
+    ids = iter(["record", "file-one", "file-two", "file-after-reopen"])
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=ids.__next__)
+
+    def create_completed(name):
+        task = service.create_tasks(CreateTaskRequest(
+            addresses=f"https://cdn.example/{name}.m3u8",
+            save_directory=str(tmp_path),
+        ))[0]
+        item = service.list_items(task.id)[0]
+        output = tmp_path / f"{name}.mp4"
+        output.write_bytes(name.encode("utf-8"))
+        service.complete_item(task.id, item.id, output)
+        service.finish_parent_if_handled(task.id)
+        return service.get_task(task.id), output
+
+    record_only = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/record.m3u8",
+        save_directory=str(tmp_path),
+    ))[0]
+    file_one, output_one = create_completed("file-one")
+    file_two, output_two = create_completed("file-two")
+    prompts = []
+
+    def accept_and_disable(box):
+        prompts.append(box.windowTitle())
+        box.checkBox().setChecked(True)
+        return QMessageBox.StandardButton.Yes.value
+
+    monkeypatch.setattr(QMessageBox, "exec", accept_and_disable)
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window._force_exit = True
+
+    window._delete_task(record_only, delete_outputs=False)
+    window._delete_task(file_one, delete_outputs=True)
+    window._delete_task(file_two, delete_outputs=True)
+
+    assert prompts == ["删除任务", "彻底删除文件"]
+    assert not output_one.exists()
+    assert not output_two.exists()
+
+    after_reopen, output_after_reopen = create_completed("file-after-reopen")
+    reopened = MainWindow(service)
+    qtbot.addWidget(reopened)
+    reopened._force_exit = True
+    reopened._delete_task(after_reopen, delete_outputs=True)
+    assert prompts == ["删除任务", "彻底删除文件", "彻底删除文件"]
+    assert not output_after_reopen.exists()
 
 
 def test_new_task_dialog_explains_missing_required_fields(qtbot, tmp_path):

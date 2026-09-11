@@ -558,6 +558,8 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self._service = service
         self._force_exit = False
+        self._skip_delete_task_confirmation = False
+        self._skip_permanent_delete_confirmation = False
         self._pending_item_checks: dict[str, set[str]] = {}
         self._updating_item_table = False
         self.new_task_dialog: NewTaskDialog | None = None
@@ -1839,11 +1841,7 @@ class MainWindow(QMainWindow):
         else:
             message = "删除任务记录？已完成的输出文件会保留。"
             title = "删除任务"
-        if QMessageBox.question(
-            self, title, message,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        ) is not QMessageBox.StandardButton.Yes:
+        if not self._confirm_task_deletion(title, message, delete_outputs):
             return
         controller = getattr(self, "background_controller", None)
         if controller is not None:
@@ -1853,6 +1851,37 @@ class MainWindow(QMainWindow):
         self.refresh_tasks()
         self._refresh_logs()
         self._show_feedback("任务和文件已彻底删除" if delete_outputs else "任务已删除，文件已保留")
+
+    def _confirm_task_deletion(
+        self, title: str, message: str, delete_outputs: bool,
+    ) -> bool:
+        skip_attribute = (
+            "_skip_permanent_delete_confirmation"
+            if delete_outputs else "_skip_delete_task_confirmation"
+        )
+        if getattr(self, skip_attribute):
+            return True
+        box = QMessageBox(self)
+        box.setIcon(
+            QMessageBox.Icon.Critical if delete_outputs else QMessageBox.Icon.Warning
+        )
+        box.setWindowTitle(title)
+        box.setText(message)
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        )
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.button(QMessageBox.StandardButton.Yes).setText(
+            "彻底删除" if delete_outputs else "删除任务"
+        )
+        box.button(QMessageBox.StandardButton.Cancel).setText("取消")
+        skip_confirmation = QCheckBox("本次运行不再确认", box)
+        box.setCheckBox(skip_confirmation)
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return False
+        if skip_confirmation.isChecked():
+            setattr(self, skip_attribute, True)
+        return True
 
 
 def run_gui_v2(service: TaskService) -> int:
