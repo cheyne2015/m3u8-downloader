@@ -27,6 +27,7 @@ a = Analysis(
     pathex=[],
     binaries=[(ffmpeg, ".")],
     datas=[
+        ("README.md", "."),
         ("m3u8_downloader/deep_worker.py", "m3u8_downloader"),
         ("m3u8_downloader/assets", "m3u8_downloader/assets"),
     ],
