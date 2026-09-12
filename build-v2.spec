@@ -27,7 +27,6 @@ a = Analysis(
     pathex=[],
     binaries=[(ffmpeg, ".")],
     datas=[
-        ("README.md", "."),
         ("m3u8_downloader/deep_worker.py", "m3u8_downloader"),
         ("m3u8_downloader/assets", "m3u8_downloader/assets"),
     ],
@@ -68,3 +67,4 @@ app = COLLECT(
     upx=False,
     name="m3u8-downloader",
 )
+shutil.copy2("README.md", Path(DISTPATH) / "m3u8-downloader" / "README.md")
