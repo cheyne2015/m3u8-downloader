@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""m3u8 下载器 v2 文件夹式候选包。"""
+"""m3u8 下载器文件夹式正式包。"""
 
 import shutil
 from pathlib import Path
@@ -7,7 +7,7 @@ from PyInstaller.utils.hooks import collect_submodules
 
 ffmpeg = shutil.which("ffmpeg")
 if not ffmpeg:
-    raise SystemExit("未找到 ffmpeg.exe，不能构建正式候选包")
+    raise SystemExit("未找到 ffmpeg.exe，不能构建正式包")
 
 hiddenimports = [
     "m3u8_downloader.background_v2",
@@ -51,7 +51,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="m3u8-dl-v2",
+    name="m3u8-dl",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -65,5 +65,5 @@ app = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    name="m3u8-downloader-v2",
+    name="m3u8-downloader",
 )

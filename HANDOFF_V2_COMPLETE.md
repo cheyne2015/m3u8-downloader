@@ -1,4 +1,4 @@
-# m3u8 下载器 v2 完整交接
+# m3u8 下载器完整交接
 
 ## 交付位置
 
@@ -69,7 +69,7 @@ py -3.13 -m pytest -p no:pytest-qt tests/test_page_history.py tests/test_gui.py 
 py -3.13 -m PyInstaller -y --distpath dist-v2 --workpath build-v2 build-v2.spec
 ```
 
-成品目录是 `dist-v2\m3u8-downloader-v2`，入口是 `m3u8-dl-v2.exe`。打包配置会把
+成品目录是 `dist-v2\m3u8-downloader`，入口是 `m3u8-dl.exe`。打包配置会把
 `ffmpeg.exe`、`deep_worker.py` 和 Qt 运行库收入目录。深度模式通过系统 Python 调用
 Playwright，因此目标电脑仍需安装 Playwright 及与其版本匹配的 Chromium 浏览器资源。
 

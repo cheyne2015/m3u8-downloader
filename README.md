@@ -1,6 +1,6 @@
-# M3U8 下载器 v2
+# M3U8 下载器
 
-面向 Windows 的图形化网页视频与 M3U8 下载工具。v2 使用 PySide6 重建任务界面，把一个网页或一条 M3U8 直链作为父任务管理，并把网页中提取到的每条 M3U8 作为独立下载项处理。
+面向 Windows 的图形化网页视频与 M3U8 下载工具。程序使用 PySide6 构建任务界面，把一个网页或一条 M3U8 直链作为父任务管理，并把网页中提取到的每条 M3U8 作为独立下载项处理。
 
 它适合需要批量提取网页视频、选择清晰度、稳定续传以及长期管理下载记录的场景。
 
@@ -9,7 +9,7 @@
 从 [GitHub Releases](https://github.com/cheyne2015/m3u8-downloader/releases/latest) 下载 Windows x64 压缩包，解压后运行：
 
 ```text
-m3u8-downloader-v2\m3u8-dl-v2.exe
+m3u8-downloader\m3u8-dl.exe
 ```
 
 发布版是文件夹程序，`_internal` 中包含 Qt 运行库、程序资源和 ffmpeg。请保留整个文件夹，不要只复制 EXE。
@@ -112,9 +112,9 @@ py -3.13 -m playwright install chromium
 %LOCALAPPDATA%\m3u8-downloader\
 ```
 
-其中 `tasks-v2.db` 保存任务、下载项、队列、设置和日志。v2 不迁移也不修改旧版 JSON 数据。
+其中 `tasks-v2.db` 保存任务、下载项、队列、设置和日志。程序不迁移也不修改旧版 JSON 数据。
 
-需要便携模式时，在 `m3u8-dl-v2.exe` 同级目录创建空文件：
+需要便携模式时，在 `m3u8-dl.exe` 同级目录创建空文件：
 
 ```text
 portable.flag
@@ -161,7 +161,7 @@ py -3.13 -m PyInstaller build-v2.spec --clean --noconfirm
 输出位置：
 
 ```text
-dist\m3u8-downloader-v2\m3u8-dl-v2.exe
+dist\m3u8-downloader\m3u8-dl.exe
 ```
 
 构建配置会收集 PySide6、ffmpeg、深度提取脚本和应用图标。发布前应从最终目录启动 EXE，并验证 SQLite 初始化、ffmpeg、Playwright 浏览器和实际网页提取。
@@ -169,13 +169,13 @@ dist\m3u8-downloader-v2\m3u8-dl-v2.exe
 分发 ZIP 解压后只应生成一个程序文件夹，README 放在程序文件夹内部：
 
 ```text
-m3u8-downloader-v2\
-├── m3u8-dl-v2.exe
+m3u8-downloader\
+├── m3u8-dl.exe
 ├── README.md
 └── _internal\
 ```
 
-`m3u8-dl-v2.exe` 必须与 `_internal` 保持上述相对位置，不能只复制 EXE 单独运行。
+`m3u8-dl.exe` 必须与 `_internal` 保持上述相对位置，不能只复制 EXE 单独运行。
 
 ## 项目结构
 
