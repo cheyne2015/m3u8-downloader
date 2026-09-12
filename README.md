@@ -24,6 +24,8 @@ m3u8-downloader\m3u8-dl.exe
 - M3U8 分片并发、AES-128 解密、断点续传、HTTP Range 和失败重试。
 - 优先使用发布包内的 ffmpeg 合并为 MP4。
 - 下载中、已完成、任务详情、搜索、状态筛选和完整右键菜单。
+- 主任务支持多选和批量删除；右击任一已选任务会保留整组选中状态。
+- 下载项支持双击打开文件，并记住用户调整后的各列宽度。
 - 深色、浅色和跟随 Windows 三种主题。
 - SQLite 持久化任务、下载项、队列顺序、设置和日志。
 - Windows 单实例、系统托盘及可选的下载完成通知。
@@ -148,7 +150,7 @@ py -3.13 -m playwright install chromium
 py -3.13 -m pytest -q
 ```
 
-v2.0.0 发布前验证结果为 `607 passed`，覆盖任务服务、SQLite、调度、网页提取、下载与续传、文件处理、Windows 集成和 PySide6 界面交互。
+当前版本发布前验证结果为 `657 passed`，覆盖任务服务、SQLite、调度、网页提取、下载与续传、文件处理、Windows 集成和 PySide6 界面交互。
 
 ## 打包 Windows 程序
 
