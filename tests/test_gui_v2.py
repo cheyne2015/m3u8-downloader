@@ -566,25 +566,134 @@ def test_quick_start_keeps_invalid_address_and_shows_feedback(qtbot, tmp_path):
     assert "有效" in window.feedback_label.text()
 
 
-def test_quick_start_supports_enter_and_preserves_duplicate_address(qtbot, tmp_path):
+def test_quick_start_duplicate_locates_latest_task_and_offers_same_choices(
+    qtbot, tmp_path, monkeypatch,
+):
     repository = SQLiteTaskRepository(tmp_path / "tasks.db")
-    service = TaskService(repository, id_factory=iter(["first", "unused"]).__next__)
+    service = TaskService(
+        repository,
+        id_factory=iter(["older", "newer", "unused"]).__next__,
+    )
+    address = "https://cdn.example/video.m3u8"
+    service.create_tasks(CreateTaskRequest(
+        addresses=address, save_directory=str(tmp_path),
+    ))
+    newer = service.create_tasks(CreateTaskRequest(
+        addresses=address, save_directory=str(tmp_path),
+    ), allow_duplicates=True)[0]
+    item = service.list_items(newer.id)[0]
+    output = tmp_path / "newer.mp4"
+    output.write_bytes(b"video")
+    service.complete_item(newer.id, item.id, output)
+    service.finish_parent_if_handled(newer.id)
     window = MainWindow(service)
     qtbot.addWidget(window)
     window.show()
     window._force_exit = True
-    address = "https://site.example/watch/enter"
-    window.quick_address_edit.setText(address)
+    window.search_edit.setText("会隐藏所有任务")
+    window.status_filter_combo.setCurrentIndex(
+        window.status_filter_combo.findData("failed")
+    )
+    observed = []
 
-    qtbot.keyPress(window.quick_address_edit, Qt.Key.Key_Return)
+    def view_existing(box):
+        current = window.completed_list.currentItem()
+        observed.append({
+            "title": box.windowTitle(),
+            "page": window.pages.currentIndex(),
+            "task_id": current.data(Qt.ItemDataRole.UserRole).id if current else "",
+            "search": window.search_edit.text(),
+            "status": window.status_filter_combo.currentData(),
+            "buttons": {button.text() for button in box.buttons()},
+        })
+        next(button for button in box.buttons() if button.text() == "查看原任务").click()
+        return 0
 
-    assert service.get_task("first").source_url == address
-    assert window.quick_address_edit.text() == ""
+    monkeypatch.setattr(QMessageBox, "exec", view_existing)
     window.quick_address_edit.setText(address)
     qtbot.mouseClick(window.quick_start_button, Qt.MouseButton.LeftButton)
-    assert len(service.list_tasks()) == 1
+
+    assert len(service.list_tasks()) == 2
     assert window.quick_address_edit.text() == address
-    assert "已存在" in window.feedback_label.text()
+    assert observed == [{
+        "title": "链接已存在",
+        "page": 1,
+        "task_id": "newer",
+        "search": "",
+        "status": "all",
+        "buttons": {"查看原任务", "仍创建副本", "取消"},
+    }]
+    assert "已定位" in window.feedback_label.text()
+
+
+def test_new_task_dialog_duplicate_copy_selects_the_new_task(
+    qtbot, tmp_path, monkeypatch,
+):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    service = TaskService(
+        repository,
+        id_factory=iter(["older", "newer", "copy"]).__next__,
+    )
+    address = "https://cdn.example/video.m3u8"
+    request = CreateTaskRequest(addresses=address, save_directory=str(tmp_path))
+    service.create_tasks(request)
+    service.create_tasks(request, allow_duplicates=True)
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+    located_before_choice = []
+
+    def create_copy(box):
+        current = window.task_list.currentItem()
+        located_before_choice.append(
+            current.data(Qt.ItemDataRole.UserRole).id if current else ""
+        )
+        next(button for button in box.buttons() if button.text() == "仍创建副本").click()
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", create_copy)
+    qtbot.mouseClick(window.new_task_button, Qt.MouseButton.LeftButton)
+    dialog = window.new_task_dialog
+    dialog.address_edit.setPlainText(address)
+    dialog.directory_edit.setText(str(tmp_path))
+    qtbot.mouseClick(dialog.start_button, Qt.MouseButton.LeftButton)
+
+    assert located_before_choice == ["newer"]
+    assert [task.id for task in service.list_tasks()] == ["older", "newer", "copy"]
+    assert window.pages.currentIndex() == 0
+    assert window.task_list.currentItem().data(Qt.ItemDataRole.UserRole).id == "copy"
+
+
+def test_completed_list_keeps_scroll_position_during_refresh(qtbot, tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    service = TaskService(repository)
+    for index in range(12):
+        task = service.create_tasks(CreateTaskRequest(
+            addresses=f"https://cdn.example/video-{index}.m3u8",
+            save_directory=str(tmp_path),
+        ))[0]
+        item = service.list_items(task.id)[0]
+        output = tmp_path / f"video-{index}.mp4"
+        output.write_bytes(b"video")
+        service.complete_item(task.id, item.id, output)
+        service.finish_parent_if_handled(task.id)
+
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+    qtbot.mouseClick(window.completed_button, Qt.MouseButton.LeftButton)
+    QApplication.processEvents()
+    scroll_bar = window.completed_list.verticalScrollBar()
+    assert scroll_bar.maximum() > 0
+    scroll_bar.setValue(scroll_bar.maximum())
+    previous = scroll_bar.value()
+
+    window.refresh_tasks()
+    QApplication.processEvents()
+
+    assert scroll_bar.value() == previous
 
 
 def test_stopped_extraction_button_can_restart_with_fresh_candidates(qtbot, tmp_path):

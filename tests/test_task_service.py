@@ -336,6 +336,29 @@ def test_existing_source_requires_explicit_duplicate_creation(tmp_path):
     assert duplicate.queue_position == 2
 
 
+def test_duplicate_error_lists_most_recent_matching_task_first(tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    moments = iter([
+        datetime(2026, 9, 12, 9, 0, 0),
+        datetime(2026, 9, 12, 9, 0, 0),
+    ])
+    service = TaskService(
+        repository,
+        clock=moments.__next__,
+        id_factory=iter(["older", "newer"]).__next__,
+    )
+    request = CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8", save_directory=str(tmp_path)
+    )
+    service.create_tasks(request)
+    service.create_tasks(request, allow_duplicates=True)
+
+    with pytest.raises(DuplicateSourceError) as raised:
+        service.create_tasks(request)
+
+    assert raised.value.existing_task_ids == ("newer", "older")
+
+
 def test_stop_extraction_applies_threshold_to_current_candidates(tmp_path):
     repository = SQLiteTaskRepository(tmp_path / "tasks.db")
     service = TaskService(repository, id_factory=lambda: "parent")

@@ -66,10 +66,9 @@ class TaskService:
     ) -> List[Task]:
         addresses = self._normalize_addresses(request.addresses)
         if not allow_duplicates:
-            wanted = set(addresses)
             duplicates = [
-                task.id for task in self._repository.list_tasks()
-                if task.source_url in wanted
+                task.id
+                for task in self._repository.list_tasks_by_source_urls(addresses)
             ]
             if duplicates:
                 raise DuplicateSourceError(duplicates)

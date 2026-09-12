@@ -267,6 +267,19 @@ class SQLiteTaskRepository:
             ).fetchall()
         return [self._from_row(row) for row in rows]
 
+    def list_tasks_by_source_urls(self, source_urls: Iterable[str]) -> List[Task]:
+        urls = tuple(dict.fromkeys(source_urls))
+        if not urls:
+            return []
+        placeholders = ", ".join("?" for _ in urls)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM tasks WHERE source_url IN ({placeholders}) "
+                "ORDER BY created_at DESC, rowid DESC",
+                urls,
+            ).fetchall()
+        return [self._from_row(row) for row in rows]
+
     def get_task(self, task_id: str) -> Task:
         with self._connect() as connection:
             row = connection.execute(

@@ -348,6 +348,21 @@ class TaskCard(QWidget):
         layout.addWidget(path)
 
 
+def _ask_duplicate_source_action(parent: QWidget) -> str:
+    box = QMessageBox(parent)
+    box.setWindowTitle("链接已存在")
+    box.setText("任务列表中已有相同链接。")
+    locate = box.addButton("查看原任务", QMessageBox.ButtonRole.ActionRole)
+    duplicate = box.addButton("仍创建副本", QMessageBox.ButtonRole.AcceptRole)
+    box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+    box.exec()
+    if box.clickedButton() is locate:
+        return "locate"
+    if box.clickedButton() is duplicate:
+        return "duplicate"
+    return "cancel"
+
+
 class NewTaskDialog(QDialog):
     tasks_created = Signal(list)
     existing_task_requested = Signal(str)
@@ -472,18 +487,12 @@ class NewTaskDialog(QDialog):
         try:
             tasks = self._service.create_tasks(request)
         except DuplicateSourceError as error:
-            box = QMessageBox(self)
-            box.setWindowTitle("链接已存在")
-            box.setText("任务列表中已有相同链接。")
-            locate = box.addButton("查看原任务", QMessageBox.ButtonRole.ActionRole)
-            duplicate = box.addButton("仍创建副本", QMessageBox.ButtonRole.AcceptRole)
-            box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
-            box.exec()
-            if box.clickedButton() is locate:
-                self.existing_task_requested.emit(error.existing_task_ids[0])
+            self.existing_task_requested.emit(error.existing_task_ids[0])
+            action = _ask_duplicate_source_action(self)
+            if action == "locate":
                 self.reject()
                 return
-            if box.clickedButton() is not duplicate:
+            if action != "duplicate":
                 return
             tasks = self._service.create_tasks(request, allow_duplicates=True)
         if tasks:
@@ -1059,9 +1068,16 @@ class MainWindow(QMainWindow):
                 save_directory=self._last_save_directory(),
                 settings=settings,
             ))
-        except DuplicateSourceError:
-            self._show_feedback("链接已存在，可在任务列表中查看")
-            return
+        except DuplicateSourceError as error:
+            self._locate_existing_task(error.existing_task_ids[0])
+            action = _ask_duplicate_source_action(self)
+            if action != "duplicate":
+                return
+            tasks = self._service.create_tasks(CreateTaskRequest(
+                addresses=address,
+                save_directory=self._last_save_directory(),
+                settings=settings,
+            ), allow_duplicates=True)
         if not tasks:
             self._show_feedback("没有可创建的链接")
             return
@@ -1073,8 +1089,11 @@ class MainWindow(QMainWindow):
 
     def _locate_existing_task(self, task_id: str) -> None:
         task = self._service.get_task(task_id)
+        self.search_edit.clear()
+        self.status_filter_combo.setCurrentIndex(0)
         self._switch_view(1 if task.download_status is DownloadStatus.COMPLETED else 0)
         self._show_task_by_id(task_id)
+        self._show_feedback("已定位到最近创建的相同链接任务")
 
     def _tasks_created(self, tasks: list[Task]) -> None:
         for task in tasks:
@@ -1082,10 +1101,16 @@ class MainWindow(QMainWindow):
         self.refresh_tasks()
         self._refresh_logs()
         if tasks:
+            self._switch_view(0)
+            self._show_task_by_id(tasks[-1].id)
             self._show_feedback(f"已创建 {len(tasks)} 个任务")
 
     def refresh_tasks(self) -> None:
         selected_id = ""
+        scroll_positions = {
+            task_list: task_list.verticalScrollBar().value()
+            for task_list in (self.task_list, self.completed_list)
+        }
         current_list = self.completed_list if self.pages.currentIndex() == 1 else self.task_list
         current = current_list.currentItem()
         if current is not None:
@@ -1146,6 +1171,8 @@ class MainWindow(QMainWindow):
         else:
             active_list = self.completed_list if self.pages.currentIndex() == 1 else self.task_list
             self._sync_task_detail_from_selection(active_list)
+        for task_list, position in scroll_positions.items():
+            task_list.verticalScrollBar().setValue(position)
 
     def _sync_task_detail_from_selection(self, task_list: QListWidget) -> None:
         active_list = self.completed_list if self.pages.currentIndex() == 1 else self.task_list
@@ -1817,6 +1844,7 @@ class MainWindow(QMainWindow):
                 candidate = task_list.item(row)
                 if candidate.data(Qt.ItemDataRole.UserRole).id == task_id:
                     task_list.setCurrentItem(candidate)
+                    task_list.scrollToItem(candidate)
                     return
         raise KeyError(task_id)
 
