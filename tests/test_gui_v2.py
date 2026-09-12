@@ -303,6 +303,88 @@ def test_parent_lists_support_multi_selection_and_batch_delete_uses_one_prompt(
     assert [task.id for task in service.list_tasks()] == ["three"]
 
 
+def test_right_clicking_any_selected_parent_keeps_multi_selection_for_batch_actions(
+    qtbot, tmp_path,
+):
+    ids = iter(["one", "two", "three"])
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=ids.__next__)
+    service.create_tasks(CreateTaskRequest(
+        addresses=(
+            "https://cdn.example/one.m3u8\n"
+            "https://cdn.example/two.m3u8\n"
+            "https://cdn.example/three.m3u8"
+        ),
+        save_directory=str(tmp_path),
+    ))
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+    first = window.task_list.item(0)
+    second = window.task_list.item(1)
+    first.setSelected(True)
+    second.setSelected(True)
+    position = window.task_list.visualItemRect(second).center()
+    assert window.task_list.itemAt(position) is second
+    qtbot.mouseClick(
+        window.task_list.viewport(), Qt.MouseButton.RightButton, pos=position,
+    )
+
+    assert {
+        item.data(Qt.ItemDataRole.UserRole).id for item in window.task_list.selectedItems()
+    } == {"one", "two"}
+
+
+def test_download_item_column_widths_persist_after_reopening(qtbot, tmp_path):
+    database = tmp_path / "tasks.db"
+    first = MainWindow(TaskService(SQLiteTaskRepository(database)))
+    qtbot.addWidget(first)
+    first.resize(1280, 790)
+    first.show()
+    first._force_exit = True
+    header = first.item_table.horizontalHeader()
+    requested = [260, 145, 96, 205]
+    for column, width in enumerate(requested):
+        header.resizeSection(column, width)
+    qtbot.wait(300)
+    expected = [header.sectionSize(column) for column in range(4)]
+    first.close()
+
+    restored = MainWindow(TaskService(SQLiteTaskRepository(database)))
+    qtbot.addWidget(restored)
+    restored.show()
+    restored._force_exit = True
+
+    assert [
+        restored.item_table.horizontalHeader().sectionSize(column) for column in range(4)
+    ] == expected
+
+
+def test_double_clicking_download_item_opens_its_existing_file(qtbot, tmp_path, monkeypatch):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "task")
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8", save_directory=str(tmp_path),
+    ))[0]
+    item = service.list_items(task.id)[0]
+    output = tmp_path / "video.mp4"
+    output.write_bytes(b"video")
+    service.complete_item(task.id, item.id, output)
+    service.finish_parent_if_handled(task.id)
+    opened = []
+    monkeypatch.setattr("m3u8_downloader.gui_v2.os.startfile", opened.append)
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+    qtbot.mouseClick(window.completed_button, Qt.MouseButton.LeftButton)
+    window.completed_list.setCurrentRow(0)
+
+    cell = window.item_table.item(0, 0)
+    window.item_table.itemDoubleClicked.emit(cell)
+
+    assert opened == [str(output)]
+
+
 def test_new_task_dialog_explains_missing_required_fields(qtbot, tmp_path):
     window = MainWindow(TaskService(SQLiteTaskRepository(tmp_path / "tasks.db")))
     qtbot.addWidget(window)

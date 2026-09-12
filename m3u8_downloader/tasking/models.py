@@ -67,6 +67,7 @@ class AppSettings:
     detail_panel_width: int = 0
     window_width: int = 0
     window_height: int = 0
+    item_table_header_state: str = ""
 
     def __post_init__(self) -> None:
         ranges = {

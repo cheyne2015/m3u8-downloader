@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 from urllib.parse import urlsplit
 
-from PySide6.QtCore import QItemSelectionModel, QSignalBlocker, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QItemSelectionModel, QSignalBlocker, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QIcon, QIntValidator, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -241,7 +241,18 @@ class DeselectableListWidget(QListWidget):
     """空白点击或 Esc 取消主任务选择。"""
 
     def mousePressEvent(self, event) -> None:
-        blank = self.itemAt(event.position().toPoint()) is None
+        clicked = self.itemAt(event.position().toPoint())
+        blank = clicked is None
+        if (
+            event.button() is Qt.MouseButton.RightButton
+            and clicked is not None
+            and clicked.isSelected()
+        ):
+            self.selectionModel().setCurrentIndex(
+                self.indexFromItem(clicked), QItemSelectionModel.SelectionFlag.NoUpdate,
+            )
+            event.accept()
+            return
         super().mousePressEvent(event)
         if blank:
             self.clearSelection()
@@ -618,6 +629,17 @@ class MainWindow(QMainWindow):
         QApplication.instance().setFont(QFont("Microsoft YaHei UI", 10))
         self.setStyleSheet(_STYLE)
         self._build_ui()
+        self._item_header_save_timer = QTimer(self)
+        self._item_header_save_timer.setSingleShot(True)
+        self._item_header_save_timer.timeout.connect(self._persist_item_table_header_state)
+        self._pending_item_table_header_state: str | None = None
+        if app_settings.item_table_header_state:
+            self.item_table.horizontalHeader().restoreState(QByteArray.fromBase64(
+                app_settings.item_table_header_state.encode("ascii")
+            ))
+        self.item_table.horizontalHeader().sectionResized.connect(
+            self._schedule_item_table_header_save
+        )
         self._build_feedback_area()
         _install_button_cursors(self)
         self._apply_theme(self._service.load_app_settings().theme)
@@ -723,6 +745,25 @@ class MainWindow(QMainWindow):
             settings,
             task_panel_width=task_width,
             detail_panel_width=detail_width,
+        ))
+
+    def _schedule_item_table_header_save(
+        self, _logical_index: int, _old_size: int, _new_size: int,
+    ) -> None:
+        state = self.item_table.horizontalHeader().saveState().toBase64()
+        self._pending_item_table_header_state = bytes(state).decode("ascii")
+        self._item_header_save_timer.start(250)
+
+    def _persist_item_table_header_state(self) -> None:
+        state = self._pending_item_table_header_state
+        if state is None:
+            return
+        self._pending_item_table_header_state = None
+        settings = self._service.load_app_settings()
+        if settings.item_table_header_state == state:
+            return
+        self._service.save_app_settings(replace(
+            settings, item_table_header_state=state,
         ))
 
     def _show_feedback(self, message: str, duration_ms: int = 2400) -> None:
@@ -979,6 +1020,7 @@ class MainWindow(QMainWindow):
         self.item_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.item_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.item_table.customContextMenuRequested.connect(self._show_item_menu)
+        self.item_table.itemDoubleClicked.connect(self._open_item_from_table)
         self.item_table.itemChanged.connect(self._remember_item_check)
         self.info_view = QPlainTextEdit()
         self.info_view.setReadOnly(True)
@@ -1811,6 +1853,7 @@ class MainWindow(QMainWindow):
     def request_exit(self) -> None:
         self._persist_window_size()
         self._persist_horizontal_splitter_sizes()
+        self._persist_item_table_header_state()
         self._force_exit = True
         controller = getattr(self, "background_controller", None)
         if controller is not None:
@@ -1820,6 +1863,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         self._persist_window_size()
         self._persist_horizontal_splitter_sizes()
+        self._persist_item_table_header_state()
         if self._force_exit:
             event.accept()
             return
@@ -1983,6 +2027,21 @@ class MainWindow(QMainWindow):
             lambda: self._copy_text(item.source_url, "m3u8 链接已复制"),
         )
         menu.exec(self.item_table.viewport().mapToGlobal(position))
+
+    def _open_item_from_table(self, cell: QTableWidgetItem) -> None:
+        task_id = getattr(self, "_detail_task_id", "")
+        if not task_id:
+            return
+        id_cell = self.item_table.item(cell.row(), 0)
+        if id_cell is None:
+            return
+        item = self._service.get_item(
+            task_id, id_cell.data(Qt.ItemDataRole.UserRole),
+        )
+        if not item.output_path:
+            self._show_feedback("该下载项尚无可打开文件")
+            return
+        self._open_item_file(item)
 
     def _queue_item(self, task_id: str, item_id: str) -> None:
         selected = [
