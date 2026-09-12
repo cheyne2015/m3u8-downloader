@@ -362,7 +362,17 @@ class SQLiteTaskRepository:
                 VALUES (?, ?, ?, ?, ?)
             """, (task_id, level, category, message, created_at.isoformat()))
 
-    def list_logs(self, *, task_id: str | None = None, level: str | None = None) -> List[LogEntry]:
+    def latest_log_id(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COALESCE(MAX(id), 0) AS value FROM task_logs"
+            ).fetchone()
+        return int(row["value"])
+
+    def list_logs(
+        self, *, task_id: str | None = None, level: str | None = None,
+        after_id: int | None = None,
+    ) -> List[LogEntry]:
         clauses = []
         values = []
         if task_id is not None:
@@ -371,6 +381,9 @@ class SQLiteTaskRepository:
         if level is not None:
             clauses.append("level = ?")
             values.append(level)
+        if after_id is not None:
+            clauses.append("id > ?")
+            values.append(after_id)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self._connect() as connection:
             rows = connection.execute(

@@ -558,6 +558,7 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self._service = service
         self._force_exit = False
+        self._log_session_start_id = self._service.latest_log_id()
         self._skip_delete_task_confirmation = False
         self._skip_permanent_delete_confirmation = False
         self._pending_item_checks: dict[str, set[str]] = {}
@@ -979,7 +980,6 @@ class MainWindow(QMainWindow):
         self.log_scope_combo = QComboBox()
         self.log_scope_combo.addItem("当前任务", "current")
         self.log_scope_combo.addItem("全部任务", "all")
-        self.log_scope_combo.setCurrentIndex(1)
         self.log_level_combo = QComboBox()
         self.log_level_combo.addItem("全部级别", "all")
         for level in ["信息", "警告", "错误"]:
@@ -1506,7 +1506,11 @@ class MainWindow(QMainWindow):
         level = None
         if hasattr(self, "log_level_combo") and self.log_level_combo.currentData() != "all":
             level = self.log_level_combo.currentData()
-        entries = self._service.list_logs(task_id=selected_task_id or None, level=level)
+        entries = self._service.list_logs(
+            task_id=selected_task_id or None,
+            level=level,
+            after_id=self._log_session_start_id,
+        )
         task_names = {task.id: task.name for task in self._service.list_tasks()}
         self.log_view.setPlainText("\n".join(
             f"{entry.created_at:%H:%M:%S}  [{entry.level}] "

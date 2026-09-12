@@ -132,8 +132,16 @@ class TaskService:
             task_id, level, category, str(message), self._clock()
         )
 
-    def list_logs(self, *, task_id: str | None = None, level: str | None = None):
-        return self._repository.list_logs(task_id=task_id, level=level)
+    def latest_log_id(self) -> int:
+        return self._repository.latest_log_id()
+
+    def list_logs(
+        self, *, task_id: str | None = None, level: str | None = None,
+        after_id: int | None = None,
+    ):
+        return self._repository.list_logs(
+            task_id=task_id, level=level, after_id=after_id
+        )
 
     def purge_expired_logs(self) -> int:
         days = self.load_app_settings().log_retention_days
