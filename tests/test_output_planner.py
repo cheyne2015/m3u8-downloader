@@ -34,6 +34,7 @@ def test_multiple_m3u8_use_original_title_folder_and_renamed_numbered_files(tmp_
         Candidate("https://cdn.example/1.m3u8"),
         Candidate("https://cdn.example/2.m3u8"),
     ])
+    service.finish_extraction(task.id)
     task = service.get_task(task.id)
     folder = tmp_path / "downloads" / "网页标题"
     folder.mkdir(parents=True)
@@ -45,4 +46,26 @@ def test_multiple_m3u8_use_original_title_folder_and_renamed_numbered_files(tmp_
         folder / "重命名_01 (1).mp4",
         folder / "重命名_02.mp4",
     ]
+
+
+def test_multiple_candidates_with_one_selected_save_directly_without_folder(tmp_path):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "task")
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42",
+        save_directory=str(tmp_path / "downloads"),
+    ))[0]
+    service.apply_page_title(task.id, "网页标题")
+    service.rename_task(task.id, "选择的名称")
+    items = service.add_candidates(task.id, [
+        Candidate("https://cdn.example/low.m3u8"),
+        Candidate("https://cdn.example/high.m3u8"),
+    ])
+    service.finish_extraction(task.id)
+    service.select_items_for_download(task.id, [items[1].id])
+
+    paths = OutputPlanner().plan(service.get_task(task.id), service.list_items(task.id))
+
+    assert paths == {
+        items[1].id: tmp_path / "downloads" / "选择的名称.mp4",
+    }
 

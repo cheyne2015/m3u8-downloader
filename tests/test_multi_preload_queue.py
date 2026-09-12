@@ -804,17 +804,17 @@ def test_real_gui_two_preloads_auto_chain(
         video_page.release_download.set()
 
     # A 完成 → B 自动下载并落盘
-    pump_until(root, lambda: (tmp_path / "Next episode.mp4").exists(), timeout=40)
+    pump_until(root, lambda: (tmp_path / "Next episode.ts").exists(), timeout=40)
     # B 完成 → C 自动下载并落盘
-    pump_until(root, lambda: (tmp_path / "Third episode.mp4").exists(), timeout=40)
+    pump_until(root, lambda: (tmp_path / "Third episode.ts").exists(), timeout=40)
     # 全部处理完：队列清空、恢复空闲
     pump_until(root, lambda: (
         not app._preload_queue
         and str(_find_button(root, "停止下载").cget("state")) == "disabled"
     ), timeout=40)
     assert app._preload_queue == []
-    assert (tmp_path / "Next episode.mp4").read_bytes() == video_page.segment
-    assert (tmp_path / "Third episode.mp4").read_bytes() == video_page.segment
+    assert (tmp_path / "Next episode.ts").read_bytes() == video_page.segment
+    assert (tmp_path / "Third episode.ts").read_bytes() == video_page.segment
 
 
 # 复用 test_deep_streaming 的真实 GUI / 本地 HTTP fixture（须在模块级注册）

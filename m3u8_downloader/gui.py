@@ -799,8 +799,11 @@ class M3U8DownloaderGUI:
             return
 
         output_path = os.path.join(save_dir, filename)
-        # 规范化：保证最终保存文件后缀为 .mp4 且仅有一个 .mp4
+        use_ffmpeg = self._use_ffmpeg_var.get()
+        # 不使用 ffmpeg 时只能保存为 TS，不能把原始字节伪装成 MP4。
         output_path = normalize_mp4_filename(output_path)
+        if not use_ffmpeg:
+            output_path = os.path.splitext(output_path)[0] + ".ts"
         # 把规范化后的名称回填到输入框，让用户清楚实际会保存成什么文件
         self._filename_var.set(os.path.basename(output_path))
         self._log(f"保存文件: {output_path}")
@@ -818,7 +821,6 @@ class M3U8DownloaderGUI:
         workers = self._workers_var.get()
         retries = self._retries_var.get()
         timeout = self._timeout_var.get()
-        use_ffmpeg = self._use_ffmpeg_var.get()
         tmp_dir = self._tmpdir_var.get().strip()
 
         # 切换按钮状态
@@ -2465,6 +2467,7 @@ class M3U8DownloaderGUI:
             return
 
         base_name = self._filename_var.get().strip() or "output.mp4"
+        use_ffmpeg = self._use_ffmpeg_var.get()
         save_dir = self._dir_var.get().strip()
         total = len(sel)
 
@@ -2497,6 +2500,8 @@ class M3U8DownloaderGUI:
             output_path = normalize_mp4_filename(
                 os.path.join(target_dir, output_name)
             )
+            if not use_ffmpeg:
+                output_path = os.path.splitext(output_path)[0] + ".ts"
             jobs.append(DownloadJob(
                 url, output_path, self._page_title or row_title, self._candidate_page_url,
             ))

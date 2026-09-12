@@ -2,12 +2,15 @@
 
 import threading
 import errno
+import os
+import uuid
 from dataclasses import replace
 from pathlib import Path
 
 from .models import ItemStatus
 from .output import OutputPlanner
 from .disk_space import DiskSpaceGuard
+from ..merger import validate_media_file
 
 
 class _InsufficientDiskSpace(RuntimeError):
@@ -90,6 +93,15 @@ class DownloadCoordinator:
                     )
                     on_log("磁盘已写满，任务已自动暂停")
                     break
+                backup = self._service.activate_same_duration_backup(
+                    task_id, item.id,
+                )
+                if backup is not None:
+                    on_log(
+                        f"首选候选未完成：{exc}；已自动切换同时间备用链接 "
+                        f"{backup.source_url}"
+                    )
+                    continue
                 if self._is_retryable(exc):
                     retrying = self._service.schedule_item_retry(task_id, item.id, str(exc))
                     if retrying.download_status.value == "retry_wait":
@@ -100,6 +112,52 @@ class DownloadCoordinator:
                     self._service.fail_item(task_id, item.id, str(exc))
                 break
         return self._service.finish_parent_if_handled(task_id)
+
+    def validate_and_repair(
+        self, task_id: str, item_id: str, *, stop_event=None,
+        on_log=lambda _message: None,
+    ) -> str:
+        """校验已完成文件；损坏时在同目录重下并原子替换。"""
+        stop_event = stop_event or threading.Event()
+        task = self._service.get_task(task_id)
+        item = self._service.get_item(task_id, item_id)
+        output = Path(item.output_path)
+        if not output.is_file():
+            raise FileNotFoundError(f"找不到已完成文件：{output}")
+        try:
+            validate_media_file(output)
+            on_log("媒体文件校验通过，无需修复")
+            return "valid"
+        except RuntimeError as exc:
+            on_log(f"媒体文件校验失败：{exc}；正在重新下载到临时文件")
+
+        temporary = output.with_name(
+            f".{output.stem}.{uuid.uuid4().hex}.repair{output.suffix or '.mp4'}"
+        )
+        try:
+            repaired = Path(self._downloader.download(
+                task,
+                item,
+                temporary,
+                stop_event=stop_event,
+                on_progress=lambda _progress: None,
+                on_log=on_log,
+            ))
+            validate_media_file(repaired)
+            if stop_event.is_set():
+                raise RuntimeError("用户取消修复")
+            os.replace(repaired, output)
+            self._service.complete_item(task_id, item_id, output)
+            on_log("媒体文件已校验并修复")
+            return "repaired"
+        except Exception:
+            for path in {temporary, Path(str(temporary) + ".part")}:
+                try:
+                    if path.is_file():
+                        path.unlink()
+                except OSError:
+                    pass
+            raise
 
     @staticmethod
     def _is_retryable(error: Exception) -> bool:

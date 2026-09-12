@@ -336,7 +336,7 @@ def test_stop_scan_keeps_result_and_active_download(video_page, desktop_gui, tmp
         labels = visible_text(root)
         # 标题在扫描期间提前到达并覆盖用户初始文件名，下载启动时应显示真实网页标题
         assert "当前标题：Streaming test" in labels
-        assert "保存文件：Streaming test.mp4" in labels
+        assert "保存文件：Streaming test.ts" in labels
         assert str(button(root, "停止提取").cget("state")) == "normal"
         button(root, "停止提取").invoke()
         pump_until(root, lambda: str(button(root, "停止提取").cget("state")) == "disabled", timeout=3)
@@ -346,7 +346,7 @@ def test_stop_scan_keeps_result_and_active_download(video_page, desktop_gui, tmp
     finally:
         video_page.release_download.set()
     pump_until(root, lambda: str(button(root, "停止下载").cget("state")) == "disabled")
-    assert (tmp_path / "Streaming test.mp4").read_bytes() == video_page.segment
+    assert (tmp_path / "Streaming test.ts").read_bytes() == video_page.segment
 
 
 def test_public_extractor_subprocess_retains_candidate_on_stop(video_page, monkeypatch):
@@ -456,10 +456,10 @@ def test_auto_download_chains_preloaded_episode(video_page, desktop_gui, tmp_pat
     finally:
         video_page.release_download.set()
     # A 完成后 B 应被自动下载：无需再点「确定」或「下载选中」
-    pump_until(root, lambda: (tmp_path / "Next episode.mp4").exists())
-    assert (tmp_path / "Next episode.mp4").read_bytes() == video_page.segment
-    # A（Streaming test.mp4）与自动下载的 B（Next episode.mp4）都落盘
-    assert len([p for p in tmp_path.iterdir() if p.suffix == ".mp4"]) == 2
+    pump_until(root, lambda: (tmp_path / "Next episode.ts").exists())
+    assert (tmp_path / "Next episode.ts").read_bytes() == video_page.segment
+    # A（Streaming test.ts）与自动下载的 B（Next episode.ts）都落盘
+    assert len([p for p in tmp_path.iterdir() if p.suffix == ".ts"]) == 2
 
 
 def test_estimate_stream_clones_custom_adapter_and_hooks(monkeypatch):
@@ -589,4 +589,4 @@ def test_preload_swaps_list_and_title_only_after_download(
     assert "预载：已载入 1 条结果" in visible_text(root)
     assert [tree.item(item, "values")[-1] for item in tree.get_children()] == [video_page + "next.m3u8"]
     assert preserved, "Preload changed the active download's list, selection or filename"
-    assert (tmp_path / "current.mp4").read_bytes() == video_page.segment
+    assert (tmp_path / "current.ts").read_bytes() == video_page.segment

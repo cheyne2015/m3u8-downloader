@@ -3,8 +3,8 @@
 from dataclasses import replace
 
 from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QPalette
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtGui import QPalette, QTextCursor
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QAbstractItemView
 
 from m3u8_downloader.gui_v2 import MainWindow
 from m3u8_downloader.tasking import (
@@ -269,6 +269,40 @@ def test_permanent_delete_has_independent_session_confirmation_and_removes_files
     assert not output_after_reopen.exists()
 
 
+def test_parent_lists_support_multi_selection_and_batch_delete_uses_one_prompt(
+    qtbot, tmp_path, monkeypatch,
+):
+    ids = iter(["one", "two", "three"])
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=ids.__next__)
+    tasks = service.create_tasks(CreateTaskRequest(
+        addresses=(
+            "https://cdn.example/one.m3u8\n"
+            "https://cdn.example/two.m3u8\n"
+            "https://cdn.example/three.m3u8"
+        ),
+        save_directory=str(tmp_path),
+    ))
+    prompts = []
+
+    def accept(box):
+        prompts.append(box.text())
+        return QMessageBox.StandardButton.Yes.value
+
+    monkeypatch.setattr(QMessageBox, "exec", accept)
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+
+    assert window.task_list.selectionMode() is QAbstractItemView.SelectionMode.ExtendedSelection
+    assert window.completed_list.selectionMode() is QAbstractItemView.SelectionMode.ExtendedSelection
+    window._delete_tasks(tasks[:2], delete_outputs=False)
+
+    assert len(prompts) == 1
+    assert "2 个任务" in prompts[0]
+    assert [task.id for task in service.list_tasks()] == ["three"]
+
+
 def test_new_task_dialog_explains_missing_required_fields(qtbot, tmp_path):
     window = MainWindow(TaskService(SQLiteTaskRepository(tmp_path / "tasks.db")))
     qtbot.addWidget(window)
@@ -351,6 +385,59 @@ def test_clear_log_button_only_hides_logs_from_the_current_process(qtbot, tmp_pa
     window._refresh_logs()
     assert "清空前日志" not in window.log_view.toPlainText()
     assert "清空后日志" in window.log_view.toPlainText()
+
+
+def test_log_refresh_appends_without_replacing_document_or_disturbing_user_selection(
+    qtbot, tmp_path,
+):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+    for index in range(80):
+        service.add_log("task", "信息", "下载", f"可选择日志 {index:02d}")
+    window.log_scope_combo.setCurrentIndex(1)
+    QApplication.processEvents()
+
+    document = window.log_view.document()
+    cursor = window.log_view.textCursor()
+    start = window.log_view.toPlainText().index("可选择日志 00")
+    cursor.setPosition(start)
+    cursor.setPosition(start + len("可选择日志 00"), QTextCursor.MoveMode.KeepAnchor)
+    window.log_view.setTextCursor(cursor)
+    scroll_bar = window.log_view.verticalScrollBar()
+    scroll_bar.setValue(0)
+
+    service.add_log("task", "信息", "下载", "新增日志")
+    window._refresh_logs()
+    QApplication.processEvents()
+
+    assert window.log_view.document() is document
+    assert window.log_view.textCursor().selectedText() == "可选择日志 00"
+    assert scroll_bar.value() == 0
+    assert window.log_view.toPlainText().endswith("新增日志")
+
+
+def test_log_refresh_over_five_hundred_lines_still_preserves_selection(qtbot, tmp_path):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window._force_exit = True
+    for index in range(500):
+        service.add_log("task", "信息", "下载", f"长日志 {index:03d}")
+    window._refresh_logs()
+    cursor = window.log_view.textCursor()
+    start = window.log_view.toPlainText().index("长日志 250")
+    cursor.setPosition(start)
+    cursor.setPosition(start + len("长日志 250"), QTextCursor.MoveMode.KeepAnchor)
+    window.log_view.setTextCursor(cursor)
+
+    service.add_log("task", "信息", "下载", "第 501 条日志")
+    window._refresh_logs()
+
+    assert window.log_view.textCursor().selectedText() == "长日志 250"
+    assert window.log_view.toPlainText().endswith("第 501 条日志")
 
 
 def test_log_filters_never_reveal_entries_from_a_previous_process(
@@ -442,6 +529,39 @@ def test_task_detail_width_stays_equal_when_switching_between_task_names(qtbot, 
 
     assert short_sizes == initial_sizes
     assert long_sizes == initial_sizes
+
+
+def test_parent_task_card_is_compact_and_keeps_only_progress_size_and_speed(qtbot, tmp_path):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "task")
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8",
+        save_directory=str(tmp_path / "不应显示的保存位置"),
+    ))[0]
+    service.rename_task(task.id, "父任务名称")
+    item = service.list_items(task.id)[0]
+    service.start_item(task.id, item.id)
+    service.update_item_progress(task.id, item.id, {
+        "downloaded": 256,
+        "byte_total": 1024,
+        "speed": 128,
+        "eta": 999,
+    })
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+    card = window.task_list.itemWidget(window.task_list.item(0))
+    labels = card.findChildren(QLabel)
+    texts = [label.text() for label in labels]
+    name = next(label for label in labels if label.objectName() == "taskName")
+    status = next(label for label in labels if label.objectName() == "status")
+
+    assert window.task_list.item(0).sizeHint().height() <= 96
+    assert abs(name.geometry().center().y() - status.geometry().center().y()) <= 2
+    assert status.geometry().left() > name.geometry().left()
+    assert not any("不应显示的保存位置" in text for text in texts)
+    assert not any("剩余" in text or text == "video" for text in texts)
+    assert any("256 B / 1.0 KB" in text and "128 B/秒" in text for text in texts)
 
 
 def test_task_detail_width_is_restored_after_user_moves_splitter(qtbot, tmp_path):
@@ -640,6 +760,27 @@ def test_quick_start_from_completed_view_creates_and_selects_task(qtbot, tmp_pat
     assert window.task_list.currentItem().data(Qt.ItemDataRole.UserRole).id == "quick"
 
 
+def test_quick_bar_pastes_before_start_and_both_inputs_have_clear_buttons(qtbot, tmp_path):
+    window = MainWindow(TaskService(SQLiteTaskRepository(tmp_path / "tasks.db")))
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+
+    assert window.search_edit.isClearButtonEnabled()
+    assert window.quick_address_edit.isClearButtonEnabled()
+    assert not any(
+        label.text() == "快速下载"
+        for label in window.quick_download_panel.findChildren(QLabel)
+    )
+    QApplication.clipboard().setText("https://site.example/watch/pasted")
+    window.quick_address_edit.setText("将被替换")
+    qtbot.mouseClick(window.quick_paste_button, Qt.MouseButton.LeftButton)
+
+    assert window.quick_address_edit.text() == "https://site.example/watch/pasted"
+    assert window.quick_paste_button.geometry().left() < window.quick_start_button.geometry().left()
+    assert "已粘贴" in window.feedback_label.text()
+
+
 def test_quick_start_keeps_invalid_address_and_shows_feedback(qtbot, tmp_path):
     window = MainWindow(TaskService(SQLiteTaskRepository(tmp_path / "tasks.db")))
     qtbot.addWidget(window)
@@ -754,6 +895,84 @@ def test_new_task_dialog_duplicate_copy_selects_the_new_task(
     assert window.task_list.currentItem().data(Qt.ItemDataRole.UserRole).id == "copy"
 
 
+def test_content_duplicate_prompt_can_resume_the_paused_task(
+    qtbot, tmp_path, monkeypatch,
+):
+    service = TaskService(
+        SQLiteTaskRepository(tmp_path / "tasks.db"),
+        id_factory=iter(["existing", "new"]).__next__,
+    )
+    existing = service.create_tasks(CreateTaskRequest(
+        addresses="https://first.example/watch/1", save_directory=str(tmp_path),
+    ))[0]
+    new = service.create_tasks(CreateTaskRequest(
+        addresses="https://second.example/watch/2", save_directory=str(tmp_path),
+    ))[0]
+    service.add_candidates(new.id, [Candidate(
+        "https://cdn.example/video.m3u8", duration_seconds=60, segment_count=12,
+    )])
+    service.finish_extraction(new.id)
+    service.hold_for_content_duplicate(new.id, existing.id)
+    observed = []
+
+    def continue_download(box):
+        observed.append({
+            "title": box.windowTitle(),
+            "buttons": {button.text() for button in box.buttons()},
+        })
+        next(button for button in box.buttons() if button.text() == "仍然下载").click()
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", continue_download)
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window._force_exit = True
+    qtbot.waitUntil(lambda: bool(observed))
+
+    assert observed == [{
+        "title": "发现疑似重复内容",
+        "buttons": {"定位已有任务", "仍然下载", "取消"},
+    }]
+    assert service.get_task(new.id).download_status is DownloadStatus.WAITING
+    assert service.get_task(new.id).last_error == ""
+
+
+def test_completed_task_detail_can_start_background_validation_and_repair(
+    qtbot, tmp_path,
+):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8", save_directory=str(tmp_path),
+    ))[0]
+    item = service.list_items(task.id)[0]
+    output = tmp_path / "video.mp4"
+    output.write_bytes(b"video")
+    service.complete_item(task.id, item.id, output)
+    service.finish_parent_if_handled(task.id)
+
+    class RepairController:
+        def __init__(self):
+            self.calls = []
+
+        def repair_task(self, task_id, item_ids):
+            self.calls.append((task_id, item_ids))
+            return True
+
+    controller = RepairController()
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.background_controller = controller
+    window._force_exit = True
+    qtbot.mouseClick(window.completed_button, Qt.MouseButton.LeftButton)
+    window.completed_list.setCurrentRow(0)
+
+    assert window.repair_task_button.isEnabled()
+    qtbot.mouseClick(window.repair_task_button, Qt.MouseButton.LeftButton)
+
+    assert controller.calls == [(task.id, [item.id])]
+    assert "正在后台校验" in window.feedback_label.text()
+
+
 def test_completed_list_keeps_scroll_position_during_refresh(qtbot, tmp_path):
     repository = SQLiteTaskRepository(tmp_path / "tasks.db")
     service = TaskService(repository)
@@ -783,6 +1002,69 @@ def test_completed_list_keeps_scroll_position_during_refresh(qtbot, tmp_path):
     QApplication.processEvents()
 
     assert scroll_bar.value() == previous
+
+
+def test_task_refresh_keeps_existing_cards_multi_selection_and_current_detail(
+    qtbot, tmp_path,
+):
+    ids = iter(["one", "two", "three"])
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=ids.__next__)
+    service.create_tasks(CreateTaskRequest(
+        addresses=(
+            "https://cdn.example/one.m3u8\n"
+            "https://cdn.example/two.m3u8\n"
+            "https://cdn.example/three.m3u8"
+        ),
+        save_directory=str(tmp_path),
+    ))
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+    first = window.task_list.item(0)
+    second = window.task_list.item(1)
+    first.setSelected(True)
+    second.setSelected(True)
+    window.task_list.setCurrentItem(second)
+    widgets = {
+        window.task_list.item(row).data(Qt.ItemDataRole.UserRole).id:
+            window.task_list.itemWidget(window.task_list.item(row))
+        for row in range(window.task_list.count())
+    }
+
+    window.refresh_tasks()
+
+    assert {
+        item.data(Qt.ItemDataRole.UserRole).id for item in window.task_list.selectedItems()
+    } == {"one", "two"}
+    assert window.task_list.currentItem().data(Qt.ItemDataRole.UserRole).id == "two"
+    assert window._detail_task_id == "two"
+    for row in range(window.task_list.count()):
+        item = window.task_list.item(row)
+        task_id = item.data(Qt.ItemDataRole.UserRole).id
+        assert window.task_list.itemWidget(item) is widgets[task_id]
+
+
+def test_unchanged_task_refresh_preserves_detail_text_selection(qtbot, tmp_path):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "task")
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8", save_directory=str(tmp_path),
+    ))[0]
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+    window.task_list.setCurrentRow(0)
+    text = window.info_view.toPlainText()
+    start = text.index(task.source_url)
+    cursor = window.info_view.textCursor()
+    cursor.setPosition(start)
+    cursor.setPosition(start + len(task.source_url), QTextCursor.MoveMode.KeepAnchor)
+    window.info_view.setTextCursor(cursor)
+
+    window.refresh_tasks()
+
+    assert window.info_view.textCursor().selectedText() == task.source_url
 
 
 def test_stopped_extraction_button_can_restart_with_fresh_candidates(qtbot, tmp_path):

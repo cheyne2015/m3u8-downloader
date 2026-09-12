@@ -13,6 +13,8 @@ def _map_candidate(candidate) -> Candidate:
         label=getattr(candidate, "title", "") or "",
         estimated_bytes=getattr(candidate, "estimated_size", 0) or None,
         duration_seconds=getattr(candidate, "duration", 0.0) or None,
+        segment_count=int(getattr(candidate, "segment_count", 0) or 0),
+        bandwidth=int(getattr(candidate, "bandwidth", 0) or 0),
         valid=bool(getattr(candidate, "reachable", True)),
     )
 

@@ -54,9 +54,11 @@ class TaskBackgroundController(QObject):
         self._pool.setMaxThreadCount(12)
         self._extracting: set[str] = set()
         self._downloading: set[str] = set()
+        self._repairing: set[str] = set()
         self._workers: set[_Worker] = set()
         self._extract_events: dict[str, threading.Event] = {}
         self._download_events: dict[str, threading.Event] = {}
+        self._repair_events: dict[str, threading.Event] = {}
         self._completion_emitted: set[str] = set()
         self._pending_deletions: dict[str, bool] = {}
         self._pending_extraction_restarts: set[str] = set()
@@ -70,8 +72,32 @@ class TaskBackgroundController(QObject):
 
     def stop(self) -> None:
         self._timer.stop()
-        for event in [*self._extract_events.values(), *self._download_events.values()]:
+        for event in [
+            *self._extract_events.values(), *self._download_events.values(),
+            *self._repair_events.values(),
+        ]:
             event.set()
+
+    def repair_task(self, task_id: str, item_ids: list[str]) -> bool:
+        if task_id in self._repairing:
+            return False
+        self._repairing.add(task_id)
+        event = threading.Event()
+        self._repair_events[task_id] = event
+
+        def repair_all() -> None:
+            for item_id in item_ids:
+                if event.is_set():
+                    break
+                self._download.validate_and_repair(
+                    task_id,
+                    item_id,
+                    stop_event=event,
+                    on_log=lambda message: self._record_log(task_id, "修复", message),
+                )
+
+        self._submit("repair", task_id, repair_all)
+        return True
 
     def pause_task(self, task_id: str) -> None:
         if task_id in self._extract_events:
@@ -103,13 +129,21 @@ class TaskBackgroundController(QObject):
         self._pending_extraction_restarts.discard(task_id)
         extract_event = self._extract_events.get(task_id)
         download_event = self._download_events.get(task_id)
+        repair_event = self._repair_events.get(task_id)
         if extract_event is not None:
             setattr(extract_event, "delete_requested", True)
             extract_event.set()
         if download_event is not None:
             setattr(download_event, "delete_requested", True)
             download_event.set()
-        if task_id in self._extracting or task_id in self._downloading:
+        if repair_event is not None:
+            setattr(repair_event, "delete_requested", True)
+            repair_event.set()
+        if (
+            task_id in self._extracting
+            or task_id in self._downloading
+            or task_id in self._repairing
+        ):
             self._pending_deletions[task_id] = delete_outputs
         else:
             self._service.delete_task(task_id, delete_outputs=delete_outputs)
@@ -195,9 +229,12 @@ class TaskBackgroundController(QObject):
         if kind == "extract":
             self._extracting.discard(task_id)
             self._extract_events.pop(task_id, None)
-        else:
+        elif kind == "download":
             self._downloading.discard(task_id)
             self._download_events.pop(task_id, None)
+        else:
+            self._repairing.discard(task_id)
+            self._repair_events.pop(task_id, None)
         self._workers = {
             worker for worker in self._workers
             if not (worker.kind == kind and worker.task_id == task_id)
@@ -206,6 +243,7 @@ class TaskBackgroundController(QObject):
             task_id in self._pending_deletions
             and task_id not in self._extracting
             and task_id not in self._downloading
+            and task_id not in self._repairing
         ):
             delete_outputs = self._pending_deletions.pop(task_id)
             self._service.delete_task(task_id, delete_outputs=delete_outputs)

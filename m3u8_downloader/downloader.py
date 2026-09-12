@@ -131,6 +131,7 @@ def _fetch_small_with_retry(
     timeout: int,
     max_retries: int,
     stop_event: Optional[threading.Event] = None,
+    request_headers: Optional[dict] = None,
 ) -> bytes:
     """下载播放列表或密钥等小资源，并对瞬时网络错误重试。"""
     attempts = max(0, int(max_retries)) + 1
@@ -140,7 +141,10 @@ def _fetch_small_with_retry(
             raise DownloadCancelled("用户停止")
         response = None
         try:
-            response = session.get(url, timeout=timeout)
+            kwargs = {"timeout": timeout}
+            if request_headers:
+                kwargs["headers"] = request_headers
+            response = session.get(url, **kwargs)
             response.raise_for_status()
             return response.content
         except requests.RequestException as exc:
@@ -325,14 +329,21 @@ def _download_key(
     """
     if key.method == "NONE" or not key.uri:
         return
+    if key.method != "AES-128":
+        raise RuntimeError(f"不支持的加密方式: {key.method}")
 
     try:
-        key.key = _fetch_small_with_retry(
+        key_data = _fetch_small_with_retry(
             session, key.uri, timeout=timeout, max_retries=max_retries,
             stop_event=stop_event,
         )
     except requests.RequestException as e:
         raise RuntimeError(f"下载解密密钥失败 ({key.uri}): {e}")
+    if len(key_data) != 16:
+        raise RuntimeError(
+            f"AES-128 密钥长度无效：需要 16 字节，实际 {len(key_data)} 字节"
+        )
+    key.key = key_data
 
 
 def _download_segment_task(
@@ -565,6 +576,8 @@ class M3U8Downloader:
                 "key_method": key.method if key else "NONE",
                 "key_uri": key.uri if key else None,
                 "key_iv": key.iv.hex() if key and key.iv is not None else None,
+                "init_url": segment.init_section.url if segment.init_section else None,
+                "init_range": segment.init_section.byte_range if segment.init_section else None,
             })
         return {"version": 2, "segments": segments}
 
@@ -598,6 +611,11 @@ class M3U8Downloader:
                     or name.endswith(".ts.part")
                     or name.endswith(".ts.dec")
                 ):
+                    try:
+                        os.remove(os.path.join(self._tmp_dir, name))
+                    except FileNotFoundError:
+                        pass
+                elif name.startswith("init_"):
                     try:
                         os.remove(os.path.join(self._tmp_dir, name))
                     except FileNotFoundError:
@@ -684,6 +702,61 @@ class M3U8Downloader:
                         self._max_retries, self._stop_event,
                     )
                     seen_keys[key_uri] = segment.key.key
+
+    def _download_initialization_sections(self, playlist: M3U8Playlist) -> dict:
+        """下载分段 MP4 的初始化数据，并按清单中的对象返回本地路径。"""
+        sections = list(dict.fromkeys(
+            segment.init_section for segment in playlist.segments
+            if segment.init_section is not None
+        ))
+        paths = {}
+        for index, section in enumerate(sections):
+            self._check_stopped()
+            path = os.path.join(self._tmp_dir, f"init_{index:04d}.mp4")
+            headers = None
+            if section.byte_range:
+                length_text, _, offset_text = section.byte_range.partition("@")
+                length = int(length_text)
+                offset = int(offset_text or 0)
+                headers = {"Range": f"bytes={offset}-{offset + length - 1}"}
+            data = _fetch_small_with_retry(
+                self._session,
+                section.url,
+                timeout=self._timeout,
+                max_retries=self._max_retries,
+                stop_event=self._stop_event,
+                request_headers=headers,
+            )
+            if section.byte_range:
+                if len(data) == length:
+                    pass
+                elif len(data) >= offset + length:
+                    # 部分站点忽略 Range 并返回整个资源，只保留清单指定区间。
+                    data = data[offset:offset + length]
+                else:
+                    raise RuntimeError(
+                        f"初始化片段字节范围不完整: {section.url}"
+                    )
+            if not data:
+                raise RuntimeError(f"初始化片段为空: {section.url}")
+            part_path = path + ".part"
+            with open(part_path, "wb") as stream:
+                stream.write(data)
+            os.replace(part_path, path)
+            paths[section] = path
+        return paths
+
+    @staticmethod
+    def _insert_initialization_sections(playlist, segment_paths, init_paths):
+        ordered = []
+        previous = None
+        for segment, path in zip(playlist.segments, segment_paths):
+            section = segment.init_section
+            if section is not None and section != previous:
+                ordered.append(init_paths[section])
+            ordered.append(path)
+            previous = section
+        return ordered
 
     def _download_one_segment(
         self, segment: M3U8Segment, seg_path: str,
@@ -860,12 +933,18 @@ class M3U8Downloader:
                 self._download_keys(playlist)
 
             segment_paths = self._download_segments(playlist)
+            init_paths = self._download_initialization_sections(playlist)
 
             self._check_stopped()
             if playlist.has_encryption:
                 from m3u8_downloader.merger import decrypt_segments
                 self._log("正在解密 TS 片段...")
                 segment_paths = decrypt_segments(playlist.segments, segment_paths)
+
+            if init_paths:
+                segment_paths = self._insert_initialization_sections(
+                    playlist, segment_paths, init_paths,
+                )
 
             self._check_stopped()
             from m3u8_downloader.merger import merge_segments_to_mp4

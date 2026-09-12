@@ -8,9 +8,10 @@ from pathlib import Path
 import sys
 from urllib.parse import urlsplit
 
-from PySide6.QtCore import QSignalBlocker, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QItemSelectionModel, QSignalBlocker, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFont, QIcon, QIntValidator, QTextCursor
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -288,17 +289,20 @@ class TaskCard(QWidget):
         super().__init__(parent)
         self.setObjectName("taskCard")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setContentsMargins(12, 7, 12, 7)
         layout.setSpacing(4)
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(10)
         name = QLabel(task.name)
         name.setObjectName("taskName")
+        name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.status_label = QLabel(_task_status(task))
         self.status_label.setObjectName("status")
-        path = QLabel(task.save_directory)
-        path.setObjectName("muted")
-        path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(name)
-        layout.addWidget(self.status_label)
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        title_row.addWidget(name, 1)
+        title_row.addWidget(self.status_label)
+        layout.addLayout(title_row)
         selected = [item for item in (items or []) if item.status.value != "unselected"]
         if selected:
             total = sum(item.total_bytes or item.estimated_bytes or 0 for item in selected)
@@ -325,17 +329,16 @@ class TaskCard(QWidget):
             progress.setTextVisible(False)
             progress.setFixedHeight(8)
             layout.addWidget(progress)
-            running = next((item for item in selected if item.status.value == "downloading"), None)
             total_size = sum(item.total_bytes or item.estimated_bytes or 0 for item in selected)
             details = []
             if total_size:
                 details.append(f"{_format_bytes(done)} / {_format_bytes(total_size)}")
-            if running is not None:
-                details.append(running.label or f"下载项 {running.output_index:02d}")
-                if running.speed_bps:
-                    details.append(f"{_format_bytes(running.speed_bps)}/秒")
-                if running.eta_seconds:
-                    details.append(f"剩余 {_format_duration(running.eta_seconds)}")
+            speed = sum(
+                item.speed_bps for item in selected
+                if item.status.value == "downloading"
+            )
+            if speed:
+                details.append(f"{_format_bytes(speed)}/秒")
             if details:
                 meta = QLabel("  ·  ".join(details))
                 meta.setObjectName("muted")
@@ -346,7 +349,6 @@ class TaskCard(QWidget):
             progress.setTextVisible(False)
             progress.setFixedHeight(8)
             layout.addWidget(progress)
-        layout.addWidget(path)
 
 
 def _ask_duplicate_source_action(parent: QWidget) -> str:
@@ -361,6 +363,23 @@ def _ask_duplicate_source_action(parent: QWidget) -> str:
         return "locate"
     if box.clickedButton() is duplicate:
         return "duplicate"
+    return "cancel"
+
+
+def _ask_content_duplicate_action(parent: QWidget, existing_name: str) -> str:
+    box = QMessageBox(parent)
+    box.setWindowTitle("发现疑似重复内容")
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setText(f"该任务与已有任务“{existing_name}”的标题和媒体结构高度相似。")
+    box.setInformativeText("任务已暂停，请选择如何处理。")
+    locate = box.addButton("定位已有任务", QMessageBox.ButtonRole.ActionRole)
+    download = box.addButton("仍然下载", QMessageBox.ButtonRole.AcceptRole)
+    box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+    box.exec()
+    if box.clickedButton() is locate:
+        return "locate"
+    if box.clickedButton() is download:
+        return "download"
     return "cancel"
 
 
@@ -569,10 +588,14 @@ class MainWindow(QMainWindow):
         self._service = service
         self._force_exit = False
         self._log_session_start_id = self._service.latest_log_id()
+        self._log_render_key = None
+        self._log_rendered_ids: list[int] = []
         self._skip_delete_task_confirmation = False
         self._skip_permanent_delete_confirmation = False
         self._pending_item_checks: dict[str, set[str]] = {}
+        self._shown_content_duplicates: set[str] = set()
         self._updating_item_table = False
+        self._detail_render_state = None
         self.new_task_dialog: NewTaskDialog | None = None
         self.setWindowTitle("m3u8 下载器")
         icon = QIcon(str(_asset_path("m3u8-downloader.ico")))
@@ -615,8 +638,6 @@ class MainWindow(QMainWindow):
         side.setContentsMargins(12, 18, 12, 14)
         brand = QLabel("M3U8 下载器")
         brand.setStyleSheet("font-size: 17px; font-weight: 700; padding: 8px;")
-        section = QLabel("任务")
-        section.setObjectName("sidebarTitle")
         self.downloading_button = self._nav_button("↓  下载中", True)
         self.completed_button = self._nav_button("✓  已完成")
         self.settings_button = self._nav_button("⚙  设置")
@@ -627,7 +648,6 @@ class MainWindow(QMainWindow):
         self.completed_button.clicked.connect(lambda: self._switch_view(1))
         self.settings_button.clicked.connect(lambda: self._switch_view(2))
         side.addWidget(brand)
-        side.addWidget(section)
         side.addWidget(self.downloading_button)
         side.addWidget(self.completed_button)
         side.addStretch()
@@ -717,6 +737,7 @@ class MainWindow(QMainWindow):
         toolbar = QHBoxLayout()
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("搜索任务、链接或文件")
+        self.search_edit.setClearButtonEnabled(True)
         self.search_edit.textChanged.connect(self.refresh_tasks)
         self.pause_task_button = QPushButton("暂停")
         _set_button_enabled(self.pause_task_button, False, "请先选择一个主任务")
@@ -741,14 +762,17 @@ class MainWindow(QMainWindow):
         quick_layout = QHBoxLayout(self.quick_download_panel)
         quick_layout.setContentsMargins(10, 8, 10, 8)
         quick_layout.setSpacing(8)
-        quick_layout.addWidget(QLabel("快速下载"))
         self.quick_address_edit = QLineEdit()
         self.quick_address_edit.setPlaceholderText("粘贴网页链接或 m3u8 链接，按回车快速创建任务")
+        self.quick_address_edit.setClearButtonEnabled(True)
         self.quick_address_edit.returnPressed.connect(self._quick_start)
+        self.quick_paste_button = QPushButton("粘贴")
+        self.quick_paste_button.clicked.connect(self._paste_quick_address)
         self.quick_start_button = QPushButton("快速开始")
         self.quick_start_button.setObjectName("newTask")
         self.quick_start_button.clicked.connect(self._quick_start)
         quick_layout.addWidget(self.quick_address_edit, 1)
+        quick_layout.addWidget(self.quick_paste_button)
         quick_layout.addWidget(self.quick_start_button)
         layout.addWidget(self.quick_download_panel)
         filter_row = QHBoxLayout()
@@ -778,6 +802,7 @@ class MainWindow(QMainWindow):
         )
         self.pages.setMinimumHeight(0)
         self.task_list = DeselectableListWidget()
+        self.task_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.task_list.itemSelectionChanged.connect(
             lambda: self._sync_task_detail_from_selection(self.task_list)
         )
@@ -786,6 +811,7 @@ class MainWindow(QMainWindow):
             lambda position: self._show_task_menu(self.task_list, position)
         )
         self.completed_list = DeselectableListWidget()
+        self.completed_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.completed_list.itemSelectionChanged.connect(
             lambda: self._sync_task_detail_from_selection(self.completed_list)
         )
@@ -962,6 +988,9 @@ class MainWindow(QMainWindow):
         self.download_selected_button.setObjectName("newTask")
         _set_button_enabled(self.download_selected_button, False, "请先选择一个主任务")
         self.download_selected_button.clicked.connect(self._download_selected_items)
+        self.repair_task_button = QPushButton("校验并修复")
+        _set_button_enabled(self.repair_task_button, False, "请先选择已完成任务")
+        self.repair_task_button.clicked.connect(self._validate_and_repair_current_task)
         self.select_all_checkbox = MasterCheckBox("全选")
         self.select_all_checkbox.setTristate(True)
         self.select_all_checkbox.setEnabled(False)
@@ -970,6 +999,7 @@ class MainWindow(QMainWindow):
         action_row = QHBoxLayout()
         action_row.addWidget(self.select_all_checkbox)
         action_row.addStretch()
+        action_row.addWidget(self.repair_task_button)
         action_row.addWidget(self.download_selected_button)
         layout.addWidget(self.detail_title)
         layout.addWidget(self.detail_tabs, 1)
@@ -1038,6 +1068,12 @@ class MainWindow(QMainWindow):
     def _last_save_directory(self) -> str:
         tasks = self._service.list_tasks()
         return tasks[-1].save_directory if tasks else str(Path.home() / "Downloads")
+
+    def _paste_quick_address(self) -> None:
+        value = QApplication.clipboard().text().strip()
+        self.quick_address_edit.setText(value)
+        self.quick_address_edit.setFocus()
+        self._show_feedback("链接已粘贴" if value else "剪贴板中没有文字")
 
     def _quick_start(self) -> None:
         address = self.quick_address_edit.text().strip()
@@ -1110,15 +1146,24 @@ class MainWindow(QMainWindow):
             self._show_feedback(f"已创建 {len(tasks)} 个任务")
 
     def refresh_tasks(self) -> None:
-        selected_id = ""
+        selected_ids = {
+            task_list: {
+                item.data(Qt.ItemDataRole.UserRole).id
+                for item in task_list.selectedItems()
+            }
+            for task_list in (self.task_list, self.completed_list)
+        }
+        current_ids = {
+            task_list: (
+                task_list.currentItem().data(Qt.ItemDataRole.UserRole).id
+                if task_list.currentItem() is not None else ""
+            )
+            for task_list in (self.task_list, self.completed_list)
+        }
         scroll_positions = {
             task_list: task_list.verticalScrollBar().value()
             for task_list in (self.task_list, self.completed_list)
         }
-        current_list = self.completed_list if self.pages.currentIndex() == 1 else self.task_list
-        current = current_list.currentItem()
-        if current is not None:
-            selected_id = current.data(Qt.ItemDataRole.UserRole).id
         query = self.search_edit.text().strip().lower() if hasattr(self, "search_edit") else ""
         tasks = self._service.list_tasks()
         task_items_by_id = {
@@ -1141,10 +1186,8 @@ class MainWindow(QMainWindow):
             completed_tasks.sort(
                 key=lambda task: task.completed_at or task.updated_at, reverse=True
             )
-        tasks = active_tasks + completed_tasks
-        self.task_list.clear()
-        self.completed_list.clear()
-        for task in tasks:
+        displayed = {self.task_list: [], self.completed_list: []}
+        for task in active_tasks + completed_tasks:
             task_items = task_items_by_id[task.id]
             searchable = "\n".join([
                 task.name, task.source_url, task.save_directory,
@@ -1160,18 +1203,15 @@ class MainWindow(QMainWindow):
                 if task.download_status is DownloadStatus.COMPLETED
                 else self.task_list
             )
-            item = QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole, task)
-            card_height = 124 if task_items else (
-                94 if task.extraction_status in {
-                    ExtractionStatus.WAITING, ExtractionStatus.RUNNING,
-                } else 76
+            displayed[target].append((task, task_items))
+
+        for task_list in (self.task_list, self.completed_list):
+            self._reconcile_task_list(
+                task_list,
+                displayed[task_list],
+                selected_ids[task_list],
+                current_ids[task_list],
             )
-            item.setSizeHint(QSize(0, card_height))
-            target.addItem(item)
-            target.setItemWidget(item, TaskCard(task, task_items))
-            if task.id == selected_id and target is current_list:
-                target.setCurrentItem(item)
 
         if self.pages.currentIndex() == 2:
             self._clear_task_detail()
@@ -1184,6 +1224,95 @@ class MainWindow(QMainWindow):
             self.page_title.setText(
                 self._global_download_status(active_tasks, task_items_by_id)
             )
+        self._schedule_content_duplicate_reviews(active_tasks)
+
+    def _schedule_content_duplicate_reviews(self, tasks: list[Task]) -> None:
+        for task in tasks:
+            if (
+                task.last_error.startswith("疑似重复内容:")
+                and task.id not in self._shown_content_duplicates
+            ):
+                self._shown_content_duplicates.add(task.id)
+                QTimer.singleShot(
+                    0, lambda task_id=task.id: self._review_content_duplicate(task_id)
+                )
+
+    def _review_content_duplicate(self, task_id: str) -> str:
+        try:
+            task = self._service.get_task(task_id)
+        except KeyError:
+            return "cancel"
+        if not task.last_error.startswith("疑似重复内容:"):
+            return "download"
+        existing_task_id = task.last_error.split(":", 1)[1]
+        try:
+            existing = self._service.get_task(existing_task_id)
+        except KeyError:
+            self._service.allow_content_duplicate(task_id)
+            self.refresh_tasks()
+            return "download"
+        action = _ask_content_duplicate_action(self, existing.name)
+        if action == "locate":
+            self._locate_existing_task(existing.id)
+        elif action == "download":
+            self._service.allow_content_duplicate(task_id)
+            self._service.add_log(task_id, "信息", "任务", "用户确认仍然下载疑似重复内容")
+            self.refresh_tasks()
+            self._show_task_by_id(task_id)
+            self._show_feedback("任务已恢复下载")
+        else:
+            self._show_feedback("任务保持暂停，稍后可在任务详情中继续")
+        return action
+
+    @staticmethod
+    def _task_card_height(task: Task, task_items: list) -> int:
+        if task_items:
+            return 88
+        if task.extraction_status in {ExtractionStatus.WAITING, ExtractionStatus.RUNNING}:
+            return 66
+        return 54
+
+    def _reconcile_task_list(
+        self,
+        task_list: QListWidget,
+        desired: list[tuple[Task, list]],
+        selected_ids: set[str],
+        current_id: str,
+    ) -> None:
+        desired_ids = [task.id for task, _items in desired]
+        existing_ids = [
+            task_list.item(row).data(Qt.ItemDataRole.UserRole).id
+            for row in range(task_list.count())
+        ]
+        blocker = QSignalBlocker(task_list)
+        if existing_ids != desired_ids:
+            task_list.clear()
+            for task, task_items in desired:
+                item = QListWidgetItem()
+                item.setData(Qt.ItemDataRole.UserRole, task)
+                item.setSizeHint(QSize(0, self._task_card_height(task, task_items)))
+                item._render_state = (task, tuple(task_items))
+                task_list.addItem(item)
+                task_list.setItemWidget(item, TaskCard(task, task_items))
+        else:
+            for row, (task, task_items) in enumerate(desired):
+                item = task_list.item(row)
+                state = (task, tuple(task_items))
+                item.setData(Qt.ItemDataRole.UserRole, task)
+                item.setSizeHint(QSize(0, self._task_card_height(task, task_items)))
+                if getattr(item, "_render_state", None) != state:
+                    item._render_state = state
+                    task_list.setItemWidget(item, TaskCard(task, task_items))
+        for row in range(task_list.count()):
+            item = task_list.item(row)
+            task_id = item.data(Qt.ItemDataRole.UserRole).id
+            item.setSelected(task_id in selected_ids)
+            if task_id == current_id:
+                task_list.selectionModel().setCurrentIndex(
+                    task_list.indexFromItem(item),
+                    QItemSelectionModel.SelectionFlag.NoUpdate,
+                )
+        del blocker
 
     @staticmethod
     def _global_download_status(tasks: list[Task], task_items_by_id: dict[str, list]) -> str:
@@ -1233,12 +1362,17 @@ class MainWindow(QMainWindow):
             return
         selected = task_list.selectedItems()
         if selected:
-            self._show_task_detail(selected[0], None)
+            current = task_list.currentItem()
+            self._show_task_detail(
+                current if current is not None and current.isSelected() else selected[-1],
+                None,
+            )
         else:
             self._clear_task_detail()
 
     def _clear_task_detail(self) -> None:
         self._detail_task_id = ""
+        self._detail_render_state = None
         self.detail_title.clear()
         self._updating_item_table = True
         self.item_table.setRowCount(0)
@@ -1255,6 +1389,7 @@ class MainWindow(QMainWindow):
         _set_button_enabled(self.resume_task_button, False, reason)
         _set_button_enabled(self.stop_extraction_button, False, reason)
         _set_button_enabled(self.download_selected_button, False, reason)
+        _set_button_enabled(self.repair_task_button, False, reason)
 
     def _show_task_detail(self, current: QListWidgetItem | None, _previous) -> None:
         if current is None:
@@ -1263,6 +1398,10 @@ class MainWindow(QMainWindow):
         task: Task = current.data(Qt.ItemDataRole.UserRole)
         self._detail_task_id = task.id
         items = self._service.list_items(task.id)
+        render_state = (task, tuple(items))
+        if self._detail_render_state == render_state:
+            self._refresh_logs(task.id)
+            return
         can_pause = (
             task.extraction_status in {ExtractionStatus.WAITING, ExtractionStatus.RUNNING}
             or any(item.status.value in {"waiting", "downloading", "retry_wait"} for item in items)
@@ -1298,6 +1437,18 @@ class MainWindow(QMainWindow):
                 "停止当前网页提取" if extraction_active
                 else "重新提取网页" if extraction_restartable
                 else "当前任务不支持停止或重新提取"
+            ),
+        )
+        completed_items = [
+            item for item in items
+            if item.status.value == "completed" and item.output_path
+        ]
+        _set_button_enabled(
+            self.repair_task_button,
+            task.download_status is DownloadStatus.COMPLETED and bool(completed_items),
+            (
+                "校验已完成文件，损坏时安全重新下载"
+                if completed_items else "当前任务没有可校验的已完成文件"
             ),
         )
         self.detail_title.setText(task.name)
@@ -1377,12 +1528,15 @@ class MainWindow(QMainWindow):
                 self.item_table.setItem(row, column, cell)
         self._updating_item_table = False
         self._refresh_selection_controls()
-        self.info_view.setPlainText(
+        info_text = (
             f"状态：{_task_status(task)}\n"
             f"来源：{task.source_url}\n"
             f"保存位置：{task.save_directory}\n"
             f"创建时间：{task.created_at:%Y-%m-%d %H:%M:%S}"
         )
+        if self.info_view.toPlainText() != info_text:
+            self.info_view.setPlainText(info_text)
+        self._detail_render_state = render_state
         self._refresh_logs(task.id)
 
     def _remember_item_check(self, cell: QTableWidgetItem) -> None:
@@ -1477,6 +1631,10 @@ class MainWindow(QMainWindow):
         if not task_id:
             self._show_feedback("请先选择一个下载任务")
             return
+        task = self._service.get_task(task_id)
+        if task.last_error.startswith("疑似重复内容:"):
+            if self._review_content_duplicate(task_id) != "download":
+                return
         selected = []
         for row in range(self.item_table.rowCount()):
             cell = self.item_table.item(row, 0)
@@ -1592,20 +1750,52 @@ class MainWindow(QMainWindow):
             after_id=self._log_session_start_id,
         )
         task_names = {task.id: task.name for task in self._service.list_tasks()}
-        self.log_view.setPlainText("\n".join(
+        render_key = (selected_task_id or None, level, show_all, self._log_session_start_id)
+        lines = [
             f"{entry.created_at:%H:%M:%S}  [{entry.level}] "
             f"[{entry.category}]  "
             f"{f'[{task_names.get(entry.task_id, entry.task_id)}]  ' if show_all else ''}"
             f"{entry.message}"
-            for entry in entries[-500:]
-        ))
-        self.log_view.moveCursor(QTextCursor.MoveOperation.End)
-        self.log_view.ensureCursorVisible()
-        self._scroll_logs_to_latest()
-        QTimer.singleShot(0, self._scroll_logs_to_latest)
+            for entry in entries
+        ]
+        entry_ids = [entry.id for entry in entries]
+        prefix_matches = (
+            render_key == self._log_render_key
+            and entry_ids[:len(self._log_rendered_ids)] == self._log_rendered_ids
+        )
+        if not prefix_matches:
+            self.log_view.setPlainText("\n".join(lines))
+            self._log_render_key = render_key
+            self._log_rendered_ids = entry_ids
+            self._scroll_logs_to_latest()
+            return
+        new_lines = lines[len(self._log_rendered_ids):]
+        if not new_lines:
+            return
+        scroll_bar = self.log_view.verticalScrollBar()
+        old_scroll = scroll_bar.value()
+        was_at_bottom = old_scroll >= scroll_bar.maximum() - 2
+        selected_cursor = self.log_view.textCursor()
+        anchor = selected_cursor.anchor()
+        position = selected_cursor.position()
+        append_cursor = QTextCursor(self.log_view.document())
+        append_cursor.movePosition(QTextCursor.MoveOperation.End)
+        if self.log_view.document().characterCount() > 1:
+            append_cursor.insertBlock()
+        append_cursor.insertText("\n".join(new_lines))
+        selected_cursor.setPosition(anchor)
+        selected_cursor.setPosition(position, QTextCursor.MoveMode.KeepAnchor)
+        self.log_view.setTextCursor(selected_cursor)
+        self._log_rendered_ids = entry_ids
+        if was_at_bottom:
+            self._scroll_logs_to_latest()
+        else:
+            scroll_bar.setValue(old_scroll)
 
     def _clear_current_session_logs(self) -> None:
         self._log_session_start_id = self._service.latest_log_id()
+        self._log_render_key = None
+        self._log_rendered_ids = []
         self._refresh_logs()
         self._show_feedback("已清空本次运行显示的日志")
 
@@ -1694,10 +1884,17 @@ class MainWindow(QMainWindow):
         item = task_list.itemAt(position)
         if item is None:
             return
+        if not item.isSelected():
+            task_list.clearSelection()
+            item.setSelected(True)
         task_list.setCurrentItem(item)
         task = item.data(Qt.ItemDataRole.UserRole)
+        selected_tasks = [
+            selected.data(Qt.ItemDataRole.UserRole)
+            for selected in task_list.selectedItems()
+        ]
         menu = QMenu(self)
-        if task.download_status is not DownloadStatus.COMPLETED:
+        if len(selected_tasks) == 1 and task.download_status is not DownloadStatus.COMPLETED:
             menu.addAction("继续", self._resume_current_task)
             menu.addAction("暂停", self._pause_current_task)
             if task.extraction_status in {ExtractionStatus.WAITING, ExtractionStatus.RUNNING}:
@@ -1715,13 +1912,16 @@ class MainWindow(QMainWindow):
             queue_menu.addAction("下移", lambda: self._move_task(task.id, "down"))
             queue_menu.addAction("移到最后", lambda: self._move_task(task.id, "back"))
             menu.addSeparator()
-        else:
+        elif len(selected_tasks) == 1:
             menu.addAction("重新下载", lambda: self._redownload_task(task.id))
             completed_items = [
                 candidate for candidate in self._service.list_items(task.id)
                 if candidate.status.value == "completed"
             ]
             menu.addAction("查看下载项", lambda: self.detail_tabs.setCurrentIndex(0))
+            menu.addAction(
+                "校验并修复", lambda: self._validate_and_repair_task(task.id)
+            )
             if len(completed_items) == 1:
                 completed_item = completed_items[0]
                 if completed_item.output_path and Path(completed_item.output_path).is_file():
@@ -1731,16 +1931,17 @@ class MainWindow(QMainWindow):
                         "重命名文件",
                         lambda: self._rename_item_file(task.id, completed_item),
                     )
-        menu.addAction("查看详情", lambda: self.detail_tabs.setCurrentIndex(1))
-        menu.addAction("打开保存位置", lambda: self._open_task_directory(task))
-        menu.addAction("重命名任务", lambda: self._rename_task(task))
-        menu.addAction(
-            "复制原始链接",
-            lambda: self._copy_text(task.source_url, "原始链接已复制"),
-        )
+        if len(selected_tasks) == 1:
+            menu.addAction("查看详情", lambda: self.detail_tabs.setCurrentIndex(1))
+            menu.addAction("打开保存位置", lambda: self._open_task_directory(task))
+            menu.addAction("重命名任务", lambda: self._rename_task(task))
+            menu.addAction(
+                "复制原始链接",
+                lambda: self._copy_text(task.source_url, "原始链接已复制"),
+            )
         menu.addSeparator()
-        menu.addAction("删除任务", lambda: self._delete_task(task, False))
-        menu.addAction("彻底删除文件", lambda: self._delete_task(task, True))
+        menu.addAction("删除任务", lambda: self._delete_tasks(selected_tasks, False))
+        menu.addAction("彻底删除文件", lambda: self._delete_tasks(selected_tasks, True))
         menu.exec(task_list.mapToGlobal(position))
 
     def _edit_task_settings(self, task: Task) -> None:
@@ -1772,6 +1973,10 @@ class MainWindow(QMainWindow):
             else:
                 menu.addAction("重新关联文件", lambda: self._relink_item_file(task_id, item))
             menu.addAction("重命名文件", lambda: self._rename_item_file(task_id, item))
+            menu.addAction(
+                "校验并修复",
+                lambda: self._validate_and_repair_task(task_id, [item.id]),
+            )
             menu.addAction("重新下载", lambda: self._redownload_item(task_id, item.id))
         menu.addAction(
             "复制 m3u8 链接",
@@ -1836,6 +2041,37 @@ class MainWindow(QMainWindow):
         copied = self._service.redownload_item(task_id, item_id)
         self._after_task_action(copied.id, "已创建重新下载任务")
         self._switch_view(0)
+
+    def _validate_and_repair_current_task(self) -> None:
+        task_id = getattr(self, "_detail_task_id", "")
+        if not task_id:
+            self._show_feedback("请先选择一个已完成任务")
+            return
+        self._validate_and_repair_task(task_id)
+
+    def _validate_and_repair_task(
+        self, task_id: str, item_ids: list[str] | None = None,
+    ) -> None:
+        completed = [
+            item.id for item in self._service.list_items(task_id)
+            if item.status.value == "completed" and item.output_path
+        ]
+        targets = item_ids or completed
+        if not targets:
+            self._show_feedback("当前任务没有可校验的文件")
+            return
+        controller = getattr(self, "background_controller", None)
+        if controller is None:
+            self._show_feedback("后台下载服务尚未启动")
+            return
+        if controller.repair_task(task_id, targets):
+            self._service.add_log(
+                task_id, "信息", "修复", f"开始校验 {len(targets)} 个已完成文件",
+            )
+            self._refresh_logs(task_id)
+            self._show_feedback(f"正在后台校验 {len(targets)} 个文件")
+        else:
+            self._show_feedback("该任务正在校验或修复")
 
     def _redownload_task(self, task_id: str) -> None:
         copied = self._service.redownload_task(task_id)
@@ -1928,28 +2164,43 @@ class MainWindow(QMainWindow):
         self._show_feedback("任务顺序已调整")
 
     def _delete_task(self, task: Task, delete_outputs: bool) -> None:
-        preview = self._service.preview_deletion(task.id)
+        self._delete_tasks([task], delete_outputs)
+
+    def _delete_tasks(self, tasks: list[Task], delete_outputs: bool) -> None:
+        if not tasks:
+            return
+        previews = [self._service.preview_deletion(task.id) for task in tasks]
+        output_files = tuple(dict.fromkeys(
+            path for preview in previews for path in preview.output_files
+        ))
+        total_bytes = sum(path.stat().st_size for path in output_files if path.is_file())
+        task_count = len(tasks)
         if delete_outputs:
-            file_lines = "\n".join(str(path) for path in preview.output_files) or "没有已记录的输出文件"
-            size_mb = preview.total_bytes / 1024 / 1024
+            file_lines = "\n".join(str(path) for path in output_files) or "没有已记录的输出文件"
+            size_mb = total_bytes / 1024 / 1024
             message = (
-                f"将删除任务记录和以下文件（共 {size_mb:.2f} MB）：\n\n"
+                f"将彻底删除 {task_count} 个任务、{len(output_files)} 个文件"
+                f"（共 {size_mb:.2f} MB）：\n\n"
                 f"{file_lines}\n\n此操作无法撤销。"
             )
             title = "彻底删除文件"
         else:
-            message = "删除任务记录？已完成的输出文件会保留。"
+            message = f"删除 {task_count} 个任务记录？已完成的输出文件会保留。"
             title = "删除任务"
         if not self._confirm_task_deletion(title, message, delete_outputs):
             return
         controller = getattr(self, "background_controller", None)
-        if controller is not None:
-            controller.delete_task(task.id, delete_outputs=delete_outputs)
-        else:
-            self._service.delete_task(task.id, delete_outputs=delete_outputs)
+        for task in tasks:
+            if controller is not None:
+                controller.delete_task(task.id, delete_outputs=delete_outputs)
+            else:
+                self._service.delete_task(task.id, delete_outputs=delete_outputs)
         self.refresh_tasks()
         self._refresh_logs()
-        self._show_feedback("任务和文件已彻底删除" if delete_outputs else "任务已删除，文件已保留")
+        self._show_feedback(
+            f"已彻底删除 {task_count} 个任务及其文件"
+            if delete_outputs else f"已删除 {task_count} 个任务，文件已保留"
+        )
 
     def _confirm_task_deletion(
         self, title: str, message: str, delete_outputs: bool,

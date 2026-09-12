@@ -3,6 +3,8 @@
 from pathlib import Path
 from datetime import datetime, timedelta
 
+import pytest
+
 from m3u8_downloader.tasking import (
     Candidate,
     CreateTaskRequest,
@@ -57,6 +59,70 @@ def test_parent_downloads_selected_children_one_by_one_then_completes(tmp_path):
         "重命名_01.mp4", "重命名_02.mp4"
     ]
     assert all(Path(item.output_path).is_file() for item in items)
+
+
+def test_completed_item_validation_repairs_through_temp_file_then_atomically_replaces(
+    tmp_path, monkeypatch,
+):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8", save_directory=str(tmp_path),
+    ))[0]
+    item = service.list_items(task.id)[0]
+    output = tmp_path / "video.mp4"
+    output.write_bytes(b"old-broken-file")
+    service.complete_item(task.id, item.id, output)
+    service.finish_parent_if_handled(task.id)
+    downloader = RecordingDownloader()
+    checked = []
+
+    def validate(path):
+        checked.append(Path(path))
+        if Path(path) == output:
+            raise RuntimeError("文件无法解码")
+
+    monkeypatch.setattr(
+        "m3u8_downloader.tasking.download_coordinator.validate_media_file", validate,
+    )
+    coordinator = DownloadCoordinator(service, downloader=downloader)
+
+    result = coordinator.validate_and_repair(task.id, item.id)
+
+    assert result == "repaired"
+    assert output.read_bytes() == item.source_url.encode("utf-8")
+    assert checked[0] == output
+    assert checked[1] != output
+    assert checked[1].parent == output.parent
+    assert not checked[1].exists()
+
+
+def test_failed_completed_item_repair_preserves_the_original_file(tmp_path, monkeypatch):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8", save_directory=str(tmp_path),
+    ))[0]
+    item = service.list_items(task.id)[0]
+    output = tmp_path / "video.mp4"
+    output.write_bytes(b"old-broken-file")
+    service.complete_item(task.id, item.id, output)
+
+    class FailedRepairDownloader:
+        def download(self, task, item, output_path, **_kwargs):
+            output_path.write_bytes(b"incomplete-repair")
+            raise RuntimeError("重新下载失败")
+
+    monkeypatch.setattr(
+        "m3u8_downloader.tasking.download_coordinator.validate_media_file",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("文件无法解码")),
+    )
+
+    with pytest.raises(RuntimeError, match="重新下载失败"):
+        DownloadCoordinator(
+            service, downloader=FailedRepairDownloader(),
+        ).validate_and_repair(task.id, item.id)
+
+    assert output.read_bytes() == b"old-broken-file"
+    assert not list(tmp_path.glob(".*.repair.mp4"))
 
 
 def test_user_skipped_child_counts_as_handled_for_parent_completion(tmp_path):
@@ -139,3 +205,81 @@ def test_low_space_during_progress_pauses_parent(tmp_path):
 
     assert finished.download_status is DownloadStatus.PAUSED
     assert "磁盘空间不足" in finished.last_error
+
+
+def test_failed_largest_same_duration_candidate_automatically_uses_backup(tmp_path):
+    service = TaskService(
+        SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "parent"
+    )
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42", save_directory=str(tmp_path)
+    ))[0]
+    service.add_candidates(task.id, [
+        Candidate(
+            "https://cdn.example/smaller.m3u8",
+            estimated_bytes=100,
+            duration_seconds=60.2,
+        ),
+        Candidate(
+            "https://cdn.example/largest.m3u8",
+            estimated_bytes=900,
+            duration_seconds=60.8,
+        ),
+    ])
+    service.finish_extraction(task.id)
+
+    class FallbackDownloader(RecordingDownloader):
+        def download(self, task, item, output_path, **kwargs):
+            self.calls.append(item.source_url)
+            if "largest" in item.source_url:
+                raise RuntimeError("媒体文件校验失败")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"valid-backup")
+            return output_path
+
+    downloader = FallbackDownloader()
+    finished = DownloadCoordinator(service, downloader=downloader).run_parent(task.id)
+
+    assert downloader.calls == [
+        "https://cdn.example/largest.m3u8",
+        "https://cdn.example/smaller.m3u8",
+    ]
+    assert finished.download_status is DownloadStatus.COMPLETED
+    completed = [item for item in service.list_items(task.id) if item.status is ItemStatus.COMPLETED]
+    assert len(completed) == 1
+    assert completed[0].source_url.endswith("smaller.m3u8")
+
+
+def test_unreachable_same_duration_candidate_is_not_used_as_a_backup(tmp_path):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42",
+        save_directory=str(tmp_path),
+        settings=TaskSettings(task_retries=0),
+    ))[0]
+    service.add_candidates(task.id, [
+        Candidate(
+            "https://cdn.example/primary.m3u8", estimated_bytes=2000,
+            duration_seconds=60, valid=True,
+        ),
+        Candidate(
+            "https://cdn.example/unreachable.m3u8", estimated_bytes=1000,
+            duration_seconds=60, valid=False,
+        ),
+    ])
+    service.finish_extraction(task.id)
+
+    class AlwaysFails:
+        def __init__(self):
+            self.calls = []
+
+        def download(self, task, item, output_path, **_kwargs):
+            self.calls.append(item.source_url)
+            raise RuntimeError("媒体数据损坏")
+
+    downloader = AlwaysFails()
+    result = DownloadCoordinator(service, downloader=downloader).run_parent(task.id)
+
+    assert downloader.calls == ["https://cdn.example/primary.m3u8"]
+    assert result.download_status is DownloadStatus.PARTIAL_FAILURE
+    assert service.list_items(task.id)[1].valid is False

@@ -16,7 +16,7 @@ from m3u8_downloader.downloader import (
     _download_key,
     _download_with_retry,
 )
-from m3u8_downloader.parser import M3U8Key, M3U8Playlist, M3U8Segment
+from m3u8_downloader.parser import M3U8InitSection, M3U8Key, M3U8Playlist, M3U8Segment
 
 
 class FakeResponse:
@@ -61,6 +61,66 @@ class FakeSession:
         if isinstance(response, Exception):
             raise response
         return response
+
+
+def test_download_places_initialization_section_before_fragmented_mp4_segments(
+    tmp_path, monkeypatch,
+):
+    init = M3U8InitSection("https://cdn.example/init.mp4")
+    playlist = M3U8Playlist(segments=[
+        M3U8Segment("https://cdn.example/one.m4s", init_section=init),
+        M3U8Segment("https://cdn.example/two.m4s", init_section=init),
+    ])
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    init_path = cache / "init.mp4"
+    first = cache / "one.m4s"
+    second = cache / "two.m4s"
+    for path in (init_path, first, second):
+        path.write_bytes(path.name.encode())
+    output = tmp_path / "video.mp4"
+    downloader = M3U8Downloader(
+        "https://cdn.example/index.m3u8", str(output), tmp_dir=str(cache),
+    )
+    monkeypatch.setattr(downloader, "_resolve_playlist", lambda: playlist)
+    monkeypatch.setattr(downloader, "_download_segments", lambda _playlist: [str(first), str(second)])
+    monkeypatch.setattr(
+        downloader, "_download_initialization_sections",
+        lambda _playlist: {init: str(init_path)}, raising=False,
+    )
+    merged = []
+
+    def fake_merge(segment_paths, output_path, use_ffmpeg):
+        merged.extend(segment_paths)
+        Path(output_path).write_bytes(b"valid")
+        return output_path
+
+    monkeypatch.setattr("m3u8_downloader.merger.merge_segments_to_mp4", fake_merge)
+
+    downloader.download()
+
+    assert merged == [str(init_path), str(first), str(second)]
+
+
+def test_initialization_byte_range_slices_full_response_when_server_ignores_range(
+    tmp_path,
+):
+    section = M3U8InitSection(
+        "https://cdn.example/init.mp4", byte_range="4@2",
+    )
+    playlist = M3U8Playlist(segments=[
+        M3U8Segment("https://cdn.example/one.m4s", init_section=section),
+    ])
+    downloader = M3U8Downloader(
+        "https://cdn.example/index.m3u8", str(tmp_path / "video.mp4"),
+    )
+    downloader._tmp_dir = str(tmp_path)
+    downloader._session = FakeSession([FakeResponse([b"abcdefghij"])])
+
+    paths = downloader._download_initialization_sections(playlist)
+
+    assert Path(paths[section]).read_bytes() == b"cdef"
+    assert downloader._session.calls[0][1]["headers"] == {"Range": "bytes=2-5"}
 
 
 def test_zero_retries_still_performs_initial_request(tmp_path):
@@ -229,6 +289,16 @@ def test_playlist_and_key_requests_retry_transient_failures(tmp_path, monkeypatc
     _download_key(key_session, key, timeout=1, max_retries=1)
     assert key.key == b"0123456789abcdef"
     assert playlist_response.closed and key_response.closed
+
+
+def test_html_response_cannot_be_accepted_as_aes_key():
+    key = M3U8Key(method="AES-128", uri="https://cdn.example/key")
+    html = b"<html><body>redirect page</body></html>" * 20
+
+    with pytest.raises(RuntimeError, match="密钥长度无效"):
+        _download_key(FakeSession([FakeResponse([html])]), key, max_retries=0)
+
+    assert key.key is None
 
 
 def test_playlist_403_surfaces_immediately_for_page_access_recovery(tmp_path):
@@ -443,7 +513,7 @@ def test_real_http_download_recovers_mid_segment_disconnect(tmp_path):
     thread.start()
     try:
         base = f"http://127.0.0.1:{server.server_port}"
-        output = tmp_path / "video.mp4"
+        output = tmp_path / "video.ts"
         downloader = M3U8Downloader(
             f"{base}/index.m3u8",
             output=str(output),

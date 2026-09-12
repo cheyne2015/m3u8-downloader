@@ -36,11 +36,12 @@ def _decrypt_segment(
         iv = b"\x00" * 16
 
     cipher = AES.new(key, AES.MODE_CBC, iv)
+    raw = cipher.decrypt(data)
     try:
-        decrypted = unpad(cipher.decrypt(data), AES.block_size)
+        decrypted = unpad(raw, AES.block_size)
     except ValueError:
         # 如果 unpad 失败，直接返回解密结果（某些流不使用标准 padding）
-        decrypted = cipher.decrypt(data)
+        decrypted = raw
     return decrypted
 
 
@@ -176,6 +177,30 @@ def convert_ts_to_mp4_ffmpeg(
         )
 
 
+def validate_media_file(path: str) -> None:
+    """快速验证容器、音视频流和开头一秒能否被正常读取。"""
+    result = subprocess.run(
+        [
+            resolve_ffmpeg_executable(),
+            "-v", "error",
+            "-xerror",
+            "-i", path,
+            "-t", "1",
+            "-map", "0:v:0?",
+            "-map", "0:a:0?",
+            "-f", "null",
+            os.devnull,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or "无法识别有效的音视频流").strip()
+        raise RuntimeError(f"媒体文件校验失败：{detail}")
+
+
 def merge_segments_to_mp4(
     segment_paths: List[str],
     output_path: str,
@@ -183,10 +208,8 @@ def merge_segments_to_mp4(
 ) -> str:
     """将 TS 片段合并为 MP4 文件.
 
-    合并策略：
-    1. 如果 use_ffmpeg=True 且 ffmpeg 可用：先二进制拼接为 TS，再用 ffmpeg 转码为 MP4
-    2. 如果 use_ffmpeg=True 但 ffmpeg 不可用：二进制拼接后直接重命名为 .mp4
-    3. 如果 use_ffmpeg=False：二进制拼接后直接重命名为 .mp4
+    MP4 输出必须经过 ffmpeg 成功封装。转换失败或 ffmpeg 不可用时抛出错误，
+    绝不把未经验证的片段拼接数据改名伪装成 MP4。
 
     Args:
         segment_paths: TS 片段文件路径列表（按顺序）.
@@ -210,10 +233,14 @@ def merge_segments_to_mp4(
 
     ffmpeg_available = use_ffmpeg and is_ffmpeg_available()
 
-    if ffmpeg_available and output_path.endswith(".mp4"):
+    if output_path.endswith(".mp4"):
+        if not ffmpeg_available:
+            raise RuntimeError("无法生成 MP4：ffmpeg 不可用或已被关闭")
+        output_existed = os.path.exists(output_path)
         try:
             print("正在使用 ffmpeg 转码为 MP4...")
             convert_ts_to_mp4_ffmpeg(temp_ts_path, output_path)
+            validate_media_file(output_path)
             # 转码成功，删除临时 TS 文件
             if os.path.exists(temp_ts_path):
                 os.remove(temp_ts_path)
@@ -221,12 +248,9 @@ def merge_segments_to_mp4(
             return output_path
         except RuntimeError as e:
             print(f"ffmpeg 转码失败: {e}")
-            print("将使用 TS 二进制拼接方式...")
-
-    # ffmpeg 不可用或转码失败，直接重命名
-    if output_path.endswith(".mp4") and not ffmpeg_available:
-        print("提示: ffmpeg 不可用，TS 文件将直接重命名为 .mp4")
-        print("大多数播放器可以正常播放，如需精确转码请安装 ffmpeg")
+            if not output_existed and os.path.exists(output_path):
+                os.remove(output_path)
+            raise
 
     if temp_ts_path != output_path:
         shutil.move(temp_ts_path, output_path)
@@ -256,10 +280,7 @@ def decrypt_segments(
             continue
 
         if segment.key.key is None:
-            # key 未下载，无法解密
-            print(f"警告: 片段 {seg_path} 的解密密钥未获取，跳过解密")
-            result_paths.append(seg_path)
-            continue
+            raise RuntimeError(f"片段 {seg_path} 的解密密钥未获取")
 
         # 解密后的文件路径
         decrypted_path = seg_path + ".dec"
@@ -275,7 +296,11 @@ def decrypt_segments(
             )
             result_paths.append(decrypted_path)
         except Exception as e:
-            print(f"警告: 片段 {seg_path} 解密失败: {e}，使用原始文件")
-            result_paths.append(seg_path)
+            try:
+                if os.path.exists(decrypted_path):
+                    os.remove(decrypted_path)
+            except OSError:
+                pass
+            raise RuntimeError(f"片段 {seg_path} 解密失败: {e}") from e
 
     return result_paths

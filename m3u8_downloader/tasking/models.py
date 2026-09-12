@@ -162,6 +162,8 @@ class Candidate:
     label: str = ""
     estimated_bytes: int | None = None
     duration_seconds: float | None = None
+    segment_count: int = 0
+    bandwidth: int = 0
     valid: bool = True
 
 
@@ -175,6 +177,9 @@ class DownloadItem:
     status: ItemStatus
     estimated_bytes: int | None = None
     duration_seconds: float | None = None
+    segment_count: int = 0
+    bandwidth: int = 0
+    duration_backup: bool = False
     valid: bool = True
     output_path: str = ""
     downloaded_bytes: int = 0

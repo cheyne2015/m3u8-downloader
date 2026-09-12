@@ -215,6 +215,26 @@ seg006.ts
         assert len(playlist.segments) == 0
         assert len(playlist.streams) == 0
 
+    def test_fragmented_mp4_map_is_attached_to_following_segments(self):
+        content = """#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-MAP:URI="init/main.mp4"
+#EXTINF:4.0,
+part-001.m4s
+#EXTINF:4.0,
+part-002.m4s
+#EXT-X-ENDLIST"""
+
+        playlist = M3U8Parser(
+            content, "https://cdn.example/video/index.m3u8"
+        ).parse()
+
+        assert playlist.segments[0].init_section is not None
+        assert playlist.segments[0].init_section.url == (
+            "https://cdn.example/video/init/main.mp4"
+        )
+        assert playlist.segments[1].init_section == playlist.segments[0].init_section
+
 
 # ---------------------------------------------------------------------------
 # M3U8Parser – parse (encrypted media playlist)

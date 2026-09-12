@@ -5,6 +5,9 @@ import re
 import shutil
 import threading
 import uuid
+import hashlib
+import json
+import unicodedata
 from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -215,6 +218,8 @@ class TaskService:
                         candidate.duration_seconds
                         if candidate.duration_seconds is not None else current.duration_seconds
                     ),
+                    segment_count=candidate.segment_count or current.segment_count,
+                    bandwidth=candidate.bandwidth or current.bandwidth,
                     valid=current.valid or candidate.valid,
                 )
                 if improved != current:
@@ -227,6 +232,8 @@ class TaskService:
                 status=ItemStatus.UNSELECTED,
                 estimated_bytes=candidate.estimated_bytes,
                 duration_seconds=candidate.duration_seconds,
+                segment_count=candidate.segment_count,
+                bandwidth=candidate.bandwidth,
                 valid=candidate.valid,
             ))
             next_index += 1
@@ -335,13 +342,45 @@ class TaskService:
     def prepare_output_paths(self, task_id: str, planner) -> List[DownloadItem]:
         task = self._repository.get_task(task_id)
         items = self._repository.list_items(task_id)
-        paths = planner.plan(task, items)
-        items = [
-            replace(item, output_path=str(paths[item.id])) if not item.output_path else item
-            for item in items
-        ]
-        self._repository.save_items(items)
-        return items
+        desired_paths = planner.plan(
+            task, [replace(item, output_path="") for item in items]
+        )
+        multiple = len(desired_paths) > 1
+        save_root = Path(task.save_directory).resolve()
+        updated = []
+        moved: list[tuple[Path, Path]] = []
+        try:
+            for item in items:
+                target = desired_paths.get(item.id)
+                if target is None:
+                    updated.append(item)
+                    continue
+                current = Path(item.output_path) if item.output_path else None
+                output_path = current or target
+                should_replan = current is None or not current.exists()
+                should_migrate = (
+                    multiple
+                    and current is not None
+                    and current.is_file()
+                    and current.resolve().parent == save_root
+                    and item.status is not ItemStatus.DOWNLOADING
+                )
+                if should_migrate:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(current, target)
+                    moved.append((target, current))
+                    output_path = target
+                elif should_replan and item.status is not ItemStatus.DOWNLOADING:
+                    output_path = target
+                updated.append(replace(item, output_path=str(output_path)))
+            self._repository.save_items(updated)
+        except Exception:
+            for target, original in reversed(moved):
+                if target.exists() and not original.exists():
+                    original.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(target, original)
+            raise
+        return updated
 
     def start_item(self, task_id: str, item_id: str) -> DownloadItem:
         item = replace(self.get_item(task_id, item_id), status=ItemStatus.DOWNLOADING)
@@ -353,6 +392,56 @@ class TaskService:
         )
         self._repository.save_many([task])
         return item
+
+    def activate_same_duration_backup(
+        self, task_id: str, failed_item_id: str,
+    ) -> DownloadItem | None:
+        """首选候选失败后，把同显示时长的下一候选接入同一个输出位置。"""
+        items = self._repository.list_items(task_id)
+        failed = next(item for item in items if item.id == failed_item_id)
+        if not failed.duration_seconds or failed.duration_seconds <= 0:
+            return None
+        displayed_second = int(failed.duration_seconds)
+        backups = sorted(
+            (
+                item for item in items
+                if item.id != failed.id
+                and item.status is ItemStatus.UNSELECTED
+                and item.duration_backup
+                and item.duration_seconds is not None
+                and item.duration_seconds > 0
+                and int(item.duration_seconds) == displayed_second
+            ),
+            key=lambda item: (item.estimated_bytes or 0, -item.output_index),
+            reverse=True,
+        )
+        if not backups:
+            return None
+        backup = replace(
+            backups[0],
+            valid=True,
+            status=ItemStatus.WAITING,
+            output_path=failed.output_path,
+            duration_backup=False,
+        )
+        failed = replace(
+            failed,
+            valid=False,
+            status=ItemStatus.UNSELECTED,
+            output_path="",
+            speed_bps=0.0,
+            eta_seconds=0.0,
+            duration_backup=False,
+        )
+        self._repository.save_items([failed, backup])
+        task = replace(
+            self._repository.get_task(task_id),
+            download_status=DownloadStatus.WAITING,
+            last_error="",
+            updated_at=self._clock(),
+        )
+        self._repository.save_many([task])
+        return backup
 
     def update_item_progress(self, task_id: str, item_id: str, progress: dict) -> None:
         item = self.get_item(task_id, item_id)
@@ -842,6 +931,86 @@ class TaskService:
         with self._task_locks[task_id]:
             return self._finish_extraction_locked(task_id)
 
+    def record_content_identity(self, task_id: str) -> str:
+        """保存网页标题与媒体结构组成的保守内容指纹。"""
+        task = self._repository.get_task(task_id)
+        identity_title = _automatic_task_name(task.original_title or task.name)
+        normalized_title = "".join(
+            character.casefold()
+            for character in unicodedata.normalize("NFKC", identity_title)
+            if character.isalnum()
+        )
+        media = sorted(
+            (
+                round(float(item.duration_seconds), 1),
+                int(item.segment_count),
+                int(item.bandwidth),
+            )
+            for item in self._repository.list_items(task_id)
+            if item.valid
+            and item.duration_seconds is not None
+            and item.duration_seconds > 0
+            and item.segment_count > 0
+        )
+        if not normalized_title or not media:
+            return ""
+        payload = json.dumps(
+            {"title": normalized_title, "media": media},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        fingerprint = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        self._repository.save_content_identity(task_id, fingerprint, self._clock())
+        return fingerprint
+
+    def find_content_duplicate(self, task_id: str) -> Task | None:
+        fingerprint = self._repository.get_content_identity(task_id)
+        if not fingerprint:
+            return None
+        return self._repository.find_task_by_content_identity(
+            fingerprint, excluding_task_id=task_id,
+        )
+
+    def hold_for_content_duplicate(self, task_id: str, existing_task_id: str) -> Task:
+        items = self._repository.list_items(task_id)
+        self._repository.save_items([
+            replace(item, status=ItemStatus.UNSELECTED)
+            if item.status is ItemStatus.WAITING else item
+            for item in items
+        ])
+        task = replace(
+            self._repository.get_task(task_id),
+            download_status=DownloadStatus.PENDING_SELECTION,
+            last_error=f"疑似重复内容:{existing_task_id}",
+            updated_at=self._clock(),
+        )
+        self._repository.save_many([task])
+        return task
+
+    def allow_content_duplicate(self, task_id: str) -> Task:
+        task = self._repository.get_task(task_id)
+        if not task.last_error.startswith("疑似重复内容:"):
+            return task
+        items = self._repository.list_items(task_id)
+        selected = [
+            replace(item, status=ItemStatus.WAITING)
+            if item.valid and item.status is ItemStatus.UNSELECTED else item
+            for item in items
+        ]
+        self._repository.save_items(selected)
+        task = replace(
+            task,
+            download_status=(
+                DownloadStatus.WAITING
+                if any(item.status is ItemStatus.WAITING for item in selected)
+                else DownloadStatus.PENDING_SELECTION
+            ),
+            last_error="",
+            updated_at=self._clock(),
+        )
+        self._repository.save_many([task])
+        return task
+
     def _finish_extraction_locked(self, task_id: str) -> Task:
         task = self._repository.get_task(task_id)
         items = self._repository.list_items(task_id)
@@ -887,7 +1056,10 @@ class TaskService:
         retained_ids = {item.id for item in best_by_second.values()}
         grouped_seconds = set(best_by_second)
         filtered = [
-            replace(item, valid=False, status=ItemStatus.UNSELECTED)
+            replace(
+                item, valid=False, status=ItemStatus.UNSELECTED,
+                duration_backup=True,
+            )
             if (
                 item.valid
                 and item.status in {ItemStatus.UNSELECTED, ItemStatus.WAITING}
@@ -896,6 +1068,8 @@ class TaskService:
                 and max(0, int(item.duration_seconds)) in grouped_seconds
                 and item.id not in retained_ids
             )
+            else replace(item, duration_backup=False)
+            if item.id in retained_ids and item.duration_backup
             else item
             for item in items
         ]

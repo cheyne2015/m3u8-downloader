@@ -507,3 +507,91 @@ def test_late_title_replans_only_unstarted_outputs(tmp_path):
 
     assert after[0].output_path == before[0].output_path
     assert after[1].output_path == ""
+
+
+def test_selecting_second_item_moves_completed_single_file_into_numbered_folder(tmp_path):
+    service = TaskService(
+        SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "parent"
+    )
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42",
+        save_directory=str(tmp_path / "downloads"),
+    ))[0]
+    service.apply_page_title(task.id, "网页标题")
+    service.rename_task(task.id, "任务名称")
+    items = service.add_candidates(task.id, [
+        Candidate("https://cdn.example/first.m3u8"),
+        Candidate("https://cdn.example/second.m3u8"),
+    ])
+    service.finish_extraction(task.id)
+    service.select_items_for_download(task.id, [items[0].id])
+    planned = service.prepare_output_paths(task.id, OutputPlanner())
+    first_path = Path(next(item for item in planned if item.id == items[0].id).output_path)
+    first_path.parent.mkdir(parents=True, exist_ok=True)
+    first_path.write_bytes(b"finished-video")
+    service.complete_item(task.id, items[0].id, first_path)
+
+    service.select_items_for_download(task.id, [items[1].id])
+    replanned = service.prepare_output_paths(task.id, OutputPlanner())
+    first = next(item for item in replanned if item.id == items[0].id)
+    second = next(item for item in replanned if item.id == items[1].id)
+
+    folder = tmp_path / "downloads" / "网页标题"
+    assert Path(first.output_path) == folder / "任务名称_01.mp4"
+    assert Path(first.output_path).read_bytes() == b"finished-video"
+    assert not first_path.exists()
+    assert Path(second.output_path) == folder / "任务名称_02.mp4"
+
+
+def test_different_links_with_same_title_and_media_structure_are_content_duplicates(tmp_path):
+    ids = iter(["first", "second", "different"])
+    service = TaskService(
+        SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=ids.__next__,
+    )
+
+    def finish(address, segment_count):
+        task = service.create_tasks(CreateTaskRequest(
+            addresses=address, save_directory=str(tmp_path),
+        ))[0]
+        service.apply_page_title(task.id, "同一个网页标题 - 站点")
+        service.add_candidates(task.id, [Candidate(
+            f"https://cdn.example/{task.id}.m3u8",
+            estimated_bytes=1000,
+            duration_seconds=120.4,
+            segment_count=segment_count,
+        )])
+        service.finish_extraction(task.id)
+        service.record_content_identity(task.id)
+        return task
+
+    first = finish("https://site-a.example/watch/1", 30)
+    second = finish("https://site-b.example/watch/9", 30)
+    different = finish("https://site-c.example/watch/2", 31)
+
+    assert service.find_content_duplicate(second.id).id == first.id
+    assert service.find_content_duplicate(different.id) is None
+
+
+def test_reextracting_a_task_clears_its_old_content_identity(tmp_path):
+    ids = iter(["first", "second"])
+    service = TaskService(
+        SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=ids.__next__,
+    )
+    tasks = []
+    for address in ("https://site-a.example/1", "https://site-b.example/2"):
+        task = service.create_tasks(CreateTaskRequest(
+            addresses=address, save_directory=str(tmp_path),
+        ))[0]
+        service.apply_page_title(task.id, "相同标题 - 站点")
+        service.add_candidates(task.id, [Candidate(
+            f"https://cdn.example/{task.id}.m3u8",
+            duration_seconds=60, segment_count=12,
+        )])
+        service.finish_extraction(task.id)
+        service.record_content_identity(task.id)
+        tasks.append(task)
+    assert service.find_content_duplicate(tasks[1].id).id == tasks[0].id
+
+    service.retry_extraction(tasks[0].id)
+
+    assert service.find_content_duplicate(tasks[1].id) is None

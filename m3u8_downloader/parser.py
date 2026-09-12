@@ -24,6 +24,15 @@ class M3U8Segment:
     duration: float = 0.0
     key: Optional[M3U8Key] = None
     sequence: int = 0
+    init_section: Optional["M3U8InitSection"] = None
+
+
+@dataclass(frozen=True)
+class M3U8InitSection:
+    """分段 MP4 在媒体片段前必须包含的初始化数据。"""
+
+    url: str
+    byte_range: Optional[str] = None
 
 
 @dataclass
@@ -259,6 +268,7 @@ class M3U8Parser:
             playlist: 待填充的 M3U8Playlist 对象.
         """
         current_key: Optional[M3U8Key] = None
+        current_init: Optional[M3U8InitSection] = None
         current_duration: float = 0.0
         media_sequence: int = 0
         total_duration: float = 0.0
@@ -285,6 +295,15 @@ class M3U8Parser:
                 if current_key.method != "NONE":
                     playlist.has_encryption = True
 
+            elif line.startswith("#EXT-X-MAP"):
+                uri_match = re.search(r'URI="([^"]+)"', line)
+                range_match = re.search(r'BYTERANGE="([^"]+)"', line)
+                if uri_match:
+                    current_init = M3U8InitSection(
+                        url=self._resolve_url(uri_match.group(1)),
+                        byte_range=range_match.group(1) if range_match else None,
+                    )
+
             elif line.startswith("#EXTINF"):
                 # 解析片段时长
                 dur_match = re.match(r'#EXTINF:([\d.]+)', line)
@@ -303,6 +322,7 @@ class M3U8Parser:
                     duration=current_duration,
                     key=current_key if current_key and current_key.method != "NONE" else None,
                     sequence=media_sequence + segment_index,
+                    init_section=current_init,
                 )
                 playlist.segments.append(segment)
                 total_duration += current_duration

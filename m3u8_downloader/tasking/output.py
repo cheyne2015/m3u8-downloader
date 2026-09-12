@@ -3,7 +3,7 @@
 from pathlib import Path
 import re
 
-from .models import DownloadItem, Task
+from .models import DownloadItem, ItemStatus, Task
 
 
 _INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -18,6 +18,10 @@ class OutputPlanner:
     """只计算路径，不创建、移动或覆盖文件。"""
 
     def plan(self, task: Task, items: list[DownloadItem]) -> dict[str, Path]:
+        items = [
+            item for item in items
+            if item.valid and item.status not in {ItemStatus.UNSELECTED, ItemStatus.SKIPPED}
+        ]
         base = Path(task.save_directory)
         task_name = _safe_name(task.name, "新建任务")
         multiple = len(items) > 1
@@ -26,12 +30,12 @@ class OutputPlanner:
             base = base / folder_name
         planned: dict[str, Path] = {}
         reserved: set[Path] = set()
-        for item in items:
+        for selected_index, item in enumerate(items, 1):
             if item.output_path:
                 planned[item.id] = Path(item.output_path)
                 reserved.add(Path(item.output_path))
                 continue
-            stem = task_name if not multiple else f"{task_name}_{item.output_index:02d}"
+            stem = task_name if not multiple else f"{task_name}_{selected_index:02d}"
             candidate = base / f"{stem}.mp4"
             suffix = 1
             while candidate.exists() or candidate in reserved:

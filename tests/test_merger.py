@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +11,7 @@ from m3u8_downloader.merger import (
     _decrypt_segment,
     decrypt_and_save_segment,
     merge_ts_files_binary,
+    merge_segments_to_mp4,
     decrypt_segments,
 )
 
@@ -170,6 +172,45 @@ class TestMergeTsFilesBinary:
             with pytest.raises(FileNotFoundError):
                 merge_ts_files_binary([missing], output)
 
+    def test_ffmpeg_failure_does_not_rename_unverified_bytes_to_mp4(
+        self, tmp_path, monkeypatch,
+    ):
+        segment = tmp_path / "segment.ts"
+        segment.write_bytes(b"not-a-valid-media-file")
+        output = tmp_path / "video.mp4"
+        monkeypatch.setattr("m3u8_downloader.merger.is_ffmpeg_available", lambda: True)
+        monkeypatch.setattr(
+            "m3u8_downloader.merger.convert_ts_to_mp4_ffmpeg",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("转换失败")),
+        )
+
+        with pytest.raises(RuntimeError, match="转换失败"):
+            merge_segments_to_mp4([str(segment)], str(output), use_ffmpeg=True)
+
+        assert not output.exists()
+
+    def test_media_validation_failure_prevents_merge_from_reporting_success(
+        self, tmp_path, monkeypatch,
+    ):
+        segment = tmp_path / "segment.ts"
+        segment.write_bytes(b"segment")
+        output = tmp_path / "video.mp4"
+        monkeypatch.setattr("m3u8_downloader.merger.is_ffmpeg_available", lambda: True)
+        monkeypatch.setattr(
+            "m3u8_downloader.merger.convert_ts_to_mp4_ffmpeg",
+            lambda _source, target: Path(target).write_bytes(b"broken-output"),
+        )
+        monkeypatch.setattr(
+            "m3u8_downloader.merger.validate_media_file",
+            lambda _path: (_ for _ in ()).throw(RuntimeError("媒体文件校验失败")),
+            raising=False,
+        )
+
+        with pytest.raises(RuntimeError, match="媒体文件校验失败"):
+            merge_segments_to_mp4([str(segment)], str(output), use_ffmpeg=True)
+
+        assert not output.exists()
+
 
 # ---------------------------------------------------------------------------
 # decrypt_segments
@@ -198,16 +239,15 @@ class TestDecryptSegments:
         result = decrypt_segments(segments, paths)
         assert result == paths
 
-    def test_encrypted_segment_key_not_downloaded_returns_original(self):
-        """If key.key is None (not downloaded), should return original path with warning."""
+    def test_encrypted_segment_without_key_fails_instead_of_using_encrypted_bytes(self):
         key = M3U8Key(method="AES-128", uri="https://example.com/key.php", key=None)
         segments = [
             M3U8Segment(url="http://example.com/1.ts", key=key),
         ]
         paths = ["/tmp/1.ts"]
 
-        result = decrypt_segments(segments, paths)
-        assert result == paths  # Should return original since key not available
+        with pytest.raises(RuntimeError, match="解密密钥未获取"):
+            decrypt_segments(segments, paths)
 
     def test_encrypted_segment_decrypted(self):
         """Full round-trip: encrypt, save, decrypt via decrypt_segments."""

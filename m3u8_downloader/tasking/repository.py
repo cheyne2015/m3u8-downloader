@@ -99,6 +99,22 @@ class SQLiteTaskRepository:
             self._ensure_item_column(connection, "progress_percent", "REAL NOT NULL DEFAULT 0")
             self._ensure_item_column(connection, "speed_bps", "REAL NOT NULL DEFAULT 0")
             self._ensure_item_column(connection, "eta_seconds", "REAL NOT NULL DEFAULT 0")
+            self._ensure_item_column(connection, "segment_count", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_item_column(connection, "bandwidth", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_item_column(
+                connection, "duration_backup", "INTEGER NOT NULL DEFAULT 0"
+            )
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS task_content_identities (
+                    task_id TEXT PRIMARY KEY,
+                    fingerprint TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_content_identity_fingerprint "
+                "ON task_content_identities(fingerprint)"
+            )
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS task_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -202,7 +218,8 @@ class SQLiteTaskRepository:
             item.output_index, item.status.value, item.estimated_bytes,
             item.duration_seconds, int(item.valid), item.output_path,
             item.downloaded_bytes, item.total_bytes, item.progress_percent,
-            item.speed_bps, item.eta_seconds,
+            item.speed_bps, item.eta_seconds, item.segment_count, item.bandwidth,
+            int(item.duration_backup),
         ) for item in items]
         with self._connect() as connection:
             if task_rows:
@@ -221,8 +238,8 @@ class SQLiteTaskRepository:
                         id, task_id, source_url, label, output_index, status,
                         estimated_bytes, duration_seconds, valid, output_path,
                         downloaded_bytes, total_bytes, progress_percent, speed_bps,
-                        eta_seconds
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        eta_seconds, segment_count, bandwidth, duration_backup
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, item_rows)
 
     def save_many(self, tasks: Iterable[Task]) -> None:
@@ -297,6 +314,7 @@ class SQLiteTaskRepository:
             int(item.valid),
             item.output_path, item.downloaded_bytes, item.total_bytes,
             item.progress_percent, item.speed_bps, item.eta_seconds,
+            item.segment_count, item.bandwidth, int(item.duration_backup),
         ) for item in items]
         if not rows:
             return
@@ -306,8 +324,8 @@ class SQLiteTaskRepository:
                     id, task_id, source_url, label, output_index, status,
                     estimated_bytes, duration_seconds, valid, output_path,
                     downloaded_bytes, total_bytes, progress_percent, speed_bps,
-                    eta_seconds
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    eta_seconds, segment_count, bandwidth, duration_backup
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, rows)
 
     def list_items(self, task_id: str) -> List[DownloadItem]:
@@ -322,6 +340,9 @@ class SQLiteTaskRepository:
             status=ItemStatus(row["status"]),
             estimated_bytes=row["estimated_bytes"],
             duration_seconds=row["duration_seconds"],
+            segment_count=int(row["segment_count"]),
+            bandwidth=int(row["bandwidth"]),
+            duration_backup=bool(row["duration_backup"]),
             valid=bool(row["valid"]),
             output_path=row["output_path"],
             downloaded_bytes=int(row["downloaded_bytes"]),
@@ -336,7 +357,8 @@ class SQLiteTaskRepository:
             item.source_url, item.label, item.output_index, item.status.value,
             item.estimated_bytes, item.duration_seconds, int(item.valid),
             item.output_path, item.downloaded_bytes, item.total_bytes,
-            item.progress_percent, item.speed_bps, item.eta_seconds, item.id,
+            item.progress_percent, item.speed_bps, item.eta_seconds,
+            item.segment_count, item.bandwidth, int(item.duration_backup), item.id,
         ) for item in items]
         if not rows:
             return
@@ -346,13 +368,51 @@ class SQLiteTaskRepository:
                     output_index = ?, status = ?, estimated_bytes = ?,
                     duration_seconds = ?, valid = ?, output_path = ?,
                     downloaded_bytes = ?, total_bytes = ?, progress_percent = ?,
-                    speed_bps = ?, eta_seconds = ? WHERE id = ?
+                    speed_bps = ?, eta_seconds = ?, segment_count = ?, bandwidth = ?,
+                    duration_backup = ?
+                    WHERE id = ?
             """, rows)
 
     def delete_items(self, task_id: str) -> None:
         """删除父任务的旧候选，供用户重新提取网页内容。"""
         with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM task_content_identities WHERE task_id = ?", (task_id,)
+            )
             connection.execute("DELETE FROM download_items WHERE task_id = ?", (task_id,))
+
+    def save_content_identity(
+        self, task_id: str, fingerprint: str, created_at: datetime,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute("""
+                INSERT INTO task_content_identities(task_id, fingerprint, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    fingerprint = excluded.fingerprint,
+                    created_at = excluded.created_at
+            """, (task_id, fingerprint, created_at.isoformat()))
+
+    def get_content_identity(self, task_id: str) -> str:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT fingerprint FROM task_content_identities WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return "" if row is None else str(row["fingerprint"])
+
+    def find_task_by_content_identity(
+        self, fingerprint: str, *, excluding_task_id: str,
+    ) -> Task | None:
+        with self._connect() as connection:
+            row = connection.execute("""
+                SELECT tasks.* FROM task_content_identities
+                JOIN tasks ON tasks.id = task_content_identities.task_id
+                WHERE task_content_identities.fingerprint = ? AND tasks.id != ?
+                ORDER BY tasks.created_at DESC, tasks.rowid DESC
+                LIMIT 1
+            """, (fingerprint, excluding_task_id)).fetchone()
+        return None if row is None else self._from_row(row)
 
     def update_item_progress(self, item: DownloadItem) -> None:
         """只更新进度列，避免覆盖并发发生的暂停或跳过状态。"""
@@ -410,6 +470,9 @@ class SQLiteTaskRepository:
 
     def delete_task(self, task_id: str) -> None:
         with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM task_content_identities WHERE task_id = ?", (task_id,)
+            )
             connection.execute("DELETE FROM task_logs WHERE task_id = ?", (task_id,))
             connection.execute("DELETE FROM download_items WHERE task_id = ?", (task_id,))
             connection.execute("DELETE FROM tasks WHERE id = ?", (task_id,))

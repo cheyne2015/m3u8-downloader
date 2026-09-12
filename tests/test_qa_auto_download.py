@@ -525,15 +525,15 @@ def test_qa_auto_download_on_does_not_break_preload_list_and_title_swap(
         video_page.release_download.set()
 
     # A 完成后：B 被自动下载（无需再点任何按钮）
-    pump_until(root, lambda: (tmp_path / "Next episode.mp4").exists(), timeout=30)
+    pump_until(root, lambda: (tmp_path / "Next episode.ts").exists(), timeout=30)
 
     # 列表已切换为 B 的候选，且标题/文件名切换正确
     assert [tree.item(i, "values")[-1] for i in tree.get_children()] == [video_page + "next.m3u8"]
     assert entries[2].get() == "Next episode"
     assert "共 1 条，已选 1 条" in visible_text(root)
     # A 也正常落盘（用的是 A 的文件名，未被预载标题覆盖）
-    assert (tmp_path / "current.mp4").read_bytes() == video_page.segment
-    assert (tmp_path / "Next episode.mp4").read_bytes() == video_page.segment
+    assert (tmp_path / "current.ts").read_bytes() == video_page.segment
+    assert (tmp_path / "Next episode.ts").read_bytes() == video_page.segment
 
 
 def test_qa_no_auto_download_before_any_manual_download(
@@ -595,8 +595,8 @@ def test_qa_stop_extract_during_preload_blocks_chain(
     pump_until(root, lambda: str(_gui_button(root, "停止下载").cget("state")) == "disabled")
     for _ in range(15):
         root.update()
-    assert not (tmp_path / "Next episode.mp4").exists(), "预载被停止却仍自动下载了 B"
-    assert (tmp_path / "Streaming test.mp4").exists(), "A 本身应正常落盘"
+    assert not (tmp_path / "Next episode.ts").exists(), "预载被停止却仍自动下载了 B"
+    assert (tmp_path / "Streaming test.ts").exists(), "A 本身应正常落盘"
 
 
 def test_qa_continuous_download_checkbox_suppresses_popup(
