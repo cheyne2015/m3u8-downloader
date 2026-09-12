@@ -51,6 +51,7 @@ from .tasking import (
     DownloadStatus,
     DuplicateSourceError,
     ExtractionStatus,
+    ItemStatus,
     Task,
     TaskService,
     TaskSettings,
@@ -998,6 +999,9 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.log_scope_combo)
         header_layout.addWidget(self.log_level_combo)
         header_layout.addStretch()
+        self.clear_logs_button = QPushButton("清空日志")
+        self.clear_logs_button.clicked.connect(self._clear_current_session_logs)
+        header_layout.addWidget(self.clear_logs_button)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setPlaceholderText("任务状态、提取结果和下载过程会显示在这里")
@@ -1117,6 +1121,9 @@ class MainWindow(QMainWindow):
             selected_id = current.data(Qt.ItemDataRole.UserRole).id
         query = self.search_edit.text().strip().lower() if hasattr(self, "search_edit") else ""
         tasks = self._service.list_tasks()
+        task_items_by_id = {
+            task.id: self._service.list_items(task.id) for task in tasks
+        }
         active_tasks = [task for task in tasks if task.download_status is not DownloadStatus.COMPLETED]
         active_tasks.sort(key=lambda task: (task.queue_position, task.created_at, task.id))
         completed_tasks = [task for task in tasks if task.download_status is DownloadStatus.COMPLETED]
@@ -1127,7 +1134,7 @@ class MainWindow(QMainWindow):
             completed_tasks.sort(
                 key=lambda task: sum(
                     item.total_bytes or item.estimated_bytes or 0
-                    for item in self._service.list_items(task.id)
+                    for item in task_items_by_id[task.id]
                 ), reverse=True,
             )
         else:
@@ -1138,7 +1145,7 @@ class MainWindow(QMainWindow):
         self.task_list.clear()
         self.completed_list.clear()
         for task in tasks:
-            task_items = self._service.list_items(task.id)
+            task_items = task_items_by_id[task.id]
             searchable = "\n".join([
                 task.name, task.source_url, task.save_directory,
                 *(item.source_url for item in task_items),
@@ -1173,6 +1180,52 @@ class MainWindow(QMainWindow):
             self._sync_task_detail_from_selection(active_list)
         for task_list, position in scroll_positions.items():
             task_list.verticalScrollBar().setValue(position)
+        if self.pages.currentIndex() == 0:
+            self.page_title.setText(
+                self._global_download_status(active_tasks, task_items_by_id)
+            )
+
+    @staticmethod
+    def _global_download_status(tasks: list[Task], task_items_by_id: dict[str, list]) -> str:
+        if not tasks:
+            return "无任务"
+        items = [item for task in tasks for item in task_items_by_id[task.id]]
+        if (
+            any(task.download_status is DownloadStatus.RUNNING for task in tasks)
+            or any(item.status is ItemStatus.DOWNLOADING for item in items)
+        ):
+            speed = sum(
+                item.speed_bps
+                for item in items
+                if item.status is ItemStatus.DOWNLOADING
+            )
+            return f"{_format_bytes(speed)}/秒"
+        if any(
+            task.extraction_status in {ExtractionStatus.WAITING, ExtractionStatus.RUNNING}
+            for task in tasks
+        ):
+            return "提取中"
+        waiting_statuses = {
+            DownloadStatus.PENDING_SELECTION,
+            DownloadStatus.WAITING,
+            DownloadStatus.MERGING,
+            DownloadStatus.RETRY_WAIT,
+        }
+        if any(task.download_status in waiting_statuses for task in tasks):
+            return "等待中"
+        if all(
+            task.download_status is DownloadStatus.PAUSED
+            or task.extraction_status is ExtractionStatus.PAUSED
+            for task in tasks
+        ):
+            return "暂停中"
+        if any(
+            task.download_status is DownloadStatus.PARTIAL_FAILURE
+            or task.extraction_status is ExtractionStatus.FAILED
+            for task in tasks
+        ):
+            return "有失败任务"
+        return "等待中"
 
     def _sync_task_detail_from_selection(self, task_list: QListWidget) -> None:
         active_list = self.completed_list if self.pages.currentIndex() == 1 else self.task_list
@@ -1550,6 +1603,11 @@ class MainWindow(QMainWindow):
         self.log_view.ensureCursorVisible()
         self._scroll_logs_to_latest()
         QTimer.singleShot(0, self._scroll_logs_to_latest)
+
+    def _clear_current_session_logs(self) -> None:
+        self._log_session_start_id = self._service.latest_log_id()
+        self._refresh_logs()
+        self._show_feedback("已清空本次运行显示的日志")
 
     def _scroll_logs_to_latest(self) -> None:
         scroll_bar = self.log_view.verticalScrollBar()

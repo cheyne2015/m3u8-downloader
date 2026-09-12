@@ -49,6 +49,70 @@ def test_main_window_restores_the_last_user_size(qtbot, tmp_path):
     assert restored.size().height() == 820
 
 
+def test_downloading_page_title_shows_global_runtime_status(qtbot, tmp_path):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+
+    assert window.page_title.text() == "无任务"
+
+    extracting = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42", save_directory=str(tmp_path),
+    ))[0]
+    window.refresh_tasks()
+    assert window.page_title.text() == "提取中"
+
+    service.delete_task(extracting.id, delete_outputs=False)
+    downloading = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8", save_directory=str(tmp_path),
+    ))[0]
+    item = service.list_items(downloading.id)[0]
+    window.refresh_tasks()
+    assert window.page_title.text() == "等待中"
+
+    service.pause_task(downloading.id)
+    window.refresh_tasks()
+    assert window.page_title.text() == "暂停中"
+
+    second = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/second.m3u8", save_directory=str(tmp_path),
+    ))[0]
+    second_item = service.list_items(second.id)[0]
+    window.refresh_tasks()
+    assert window.page_title.text() == "等待中"
+    service.pause_task(second.id)
+    window.refresh_tasks()
+    assert window.page_title.text() == "暂停中"
+
+    service.resume_task(downloading.id)
+    service.resume_task(second.id)
+    service.start_item(downloading.id, item.id)
+    service.start_item(second.id, second_item.id)
+    service.update_item_progress(downloading.id, item.id, {"speed": 2 * 1024 * 1024})
+    service.update_item_progress(second.id, second_item.id, {"speed": 1024 * 1024})
+    window.refresh_tasks()
+    assert window.page_title.text() == "3.0 MB/秒"
+
+    service.delete_task(second.id, delete_outputs=False)
+    service.fail_item(downloading.id, item.id, "测试失败")
+    window.refresh_tasks()
+    assert window.page_title.text() == "有失败任务"
+
+    output = tmp_path / "video.mp4"
+    output.write_bytes(b"video")
+    service.complete_item(downloading.id, item.id, output)
+    service.finish_parent_if_handled(downloading.id)
+    window.refresh_tasks()
+    assert window.page_title.text() == "无任务"
+
+    qtbot.mouseClick(window.completed_button, Qt.MouseButton.LeftButton)
+    assert window.page_title.text() == "已完成"
+    qtbot.mouseClick(window.settings_button, Qt.MouseButton.LeftButton)
+    assert window.page_title.text() == "设置"
+
+
 def test_new_link_dialog_adds_tasks_to_downloading_view(qtbot, tmp_path):
     repository = SQLiteTaskRepository(tmp_path / "tasks.db")
     service = TaskService(repository, id_factory=iter(["page", "direct"]).__next__)
@@ -262,6 +326,31 @@ def test_reopened_window_starts_with_empty_log_view_and_follows_new_logs(
     QApplication.processEvents()
 
     assert opened_again.log_view.toPlainText() == ""
+
+
+def test_clear_log_button_only_hides_logs_from_the_current_process(qtbot, tmp_path):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8", save_directory=str(tmp_path),
+    ))[0]
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+    service.add_log(task.id, "信息", "下载", "清空前日志")
+    window._refresh_logs()
+    assert "清空前日志" in window.log_view.toPlainText()
+
+    qtbot.mouseClick(window.clear_logs_button, Qt.MouseButton.LeftButton)
+
+    assert window.log_view.toPlainText() == ""
+    assert any(
+        entry.message == "清空前日志" for entry in service.list_logs(task_id=task.id)
+    )
+    service.add_log(task.id, "信息", "下载", "清空后日志")
+    window._refresh_logs()
+    assert "清空前日志" not in window.log_view.toPlainText()
+    assert "清空后日志" in window.log_view.toPlainText()
 
 
 def test_log_filters_never_reveal_entries_from_a_previous_process(
