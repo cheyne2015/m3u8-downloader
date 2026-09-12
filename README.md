@@ -166,6 +166,17 @@ dist\m3u8-downloader-v2\m3u8-dl-v2.exe
 
 构建配置会收集 PySide6、ffmpeg、深度提取脚本和应用图标。发布前应从最终目录启动 EXE，并验证 SQLite 初始化、ffmpeg、Playwright 浏览器和实际网页提取。
 
+分发 ZIP 解压后只应生成一个程序文件夹，README 放在程序文件夹内部：
+
+```text
+m3u8-downloader-v2\
+├── m3u8-dl-v2.exe
+├── README.md
+└── _internal\
+```
+
+`m3u8-dl-v2.exe` 必须与 `_internal` 保持上述相对位置，不能只复制 EXE 单独运行。
+
 ## 项目结构
 
 ```text
