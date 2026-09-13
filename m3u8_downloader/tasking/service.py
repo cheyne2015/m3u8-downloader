@@ -480,10 +480,21 @@ class TaskService:
         return item
 
     def fail_item(self, task_id: str, item_id: str, error: str) -> Task:
+        task = self._repository.get_task(task_id)
+        if (
+            task.source_kind is SourceKind.WEB_PAGE
+            and task.extraction_status is ExtractionStatus.NOT_REQUIRED
+            and re.search(r"\b(?:400|401|403|404|410)\b", str(error))
+        ):
+            self.add_log(
+                task_id, "警告", "提取",
+                "上次媒体地址已失效，正在自动重新提取原网页",
+            )
+            return self._restart_legacy_web_redownload(task_id)
         item = replace(self.get_item(task_id, item_id), status=ItemStatus.FAILED)
         self._repository.save_items([item])
         task = replace(
-            self._repository.get_task(task_id),
+            task,
             download_status=DownloadStatus.PARTIAL_FAILURE,
             last_error=str(error),
             updated_at=self._clock(),
@@ -495,6 +506,12 @@ class TaskService:
         item = self.get_item(task_id, item_id)
         if item.status not in {ItemStatus.FAILED, ItemStatus.SKIPPED}:
             raise ValueError("只有失败或已跳过的下载项可以重试")
+        task = self._repository.get_task(task_id)
+        if (
+            task.source_kind is SourceKind.WEB_PAGE
+            and task.extraction_status is ExtractionStatus.NOT_REQUIRED
+        ):
+            return self._restart_legacy_web_redownload(task_id)
         self._repository.save_items([replace(
             item,
             status=ItemStatus.WAITING,
@@ -516,6 +533,12 @@ class TaskService:
         return task
 
     def retry_failed_items(self, task_id: str) -> Task:
+        task = self._repository.get_task(task_id)
+        if (
+            task.source_kind is SourceKind.WEB_PAGE
+            and task.extraction_status is ExtractionStatus.NOT_REQUIRED
+        ):
+            return self._restart_legacy_web_redownload(task_id)
         failed = [
             item for item in self._repository.list_items(task_id)
             if item.status is ItemStatus.FAILED
@@ -618,7 +641,7 @@ class TaskService:
         return task
 
     def redownload_task(self, task_id: str) -> Task:
-        """复制父任务中曾选择的下载项，生成一个新的待下载父任务。"""
+        """复制父任务中曾选择的下载项，生成一个快速重新下载任务。"""
         source_task = self._repository.get_task(task_id)
         source_items = [
             item for item in self._repository.list_items(task_id)
@@ -652,6 +675,47 @@ class TaskService:
             eta_seconds=0.0,
         ) for item in source_items]
         self._repository.add_bundle([task], items)
+        return task
+
+    def reextract_task(self, task_id: str) -> Task:
+        """从原网页创建独立的重新提取任务，保留原任务及磁盘文件。"""
+        source_task = self._repository.get_task(task_id)
+        if source_task.source_kind is SourceKind.DIRECT_M3U8:
+            raise ValueError("直接 m3u8 任务没有原网页可重新提取")
+        return self._create_web_redownload(source_task)
+
+    def _create_web_redownload(self, source_task: Task) -> Task:
+        """创建重新提取原网页的新任务，避免复用可能过期的签名地址。"""
+        now = self._clock()
+        task = replace(
+            source_task,
+            id=self._id_factory(),
+            extraction_status=ExtractionStatus.WAITING,
+            download_status=DownloadStatus.NOT_READY,
+            queue_position=self._repository.next_queue_position(),
+            created_at=now,
+            updated_at=now,
+            last_error="",
+            retry_count=0,
+            retry_at=None,
+            completed_at=None,
+            selection_mode=SelectionMode.AUTO,
+            settings=replace(
+                source_task.settings, allow_content_duplicate=True,
+            ),
+        )
+        self._repository.add_bundle([task], [])
+        return task
+
+    def _restart_legacy_web_redownload(self, task_id: str) -> Task:
+        """把旧地址失败的网页重下任务转回网页重新提取流程。"""
+        task = self.retry_extraction(task_id)
+        task = replace(
+            task,
+            selection_mode=SelectionMode.AUTO,
+            settings=replace(task.settings, allow_content_duplicate=True),
+        )
+        self._repository.save_many([task])
         return task
 
     def rename_output_file(self, task_id: str, item_id: str, name: str) -> DownloadItem:

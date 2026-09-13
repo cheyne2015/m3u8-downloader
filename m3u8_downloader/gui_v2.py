@@ -248,12 +248,30 @@ class NavigationButton(QPushButton):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._count_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._normal_count_color = "#e8ebef"
+        self._checked_count_color = "#65a6ff"
+        self.toggled.connect(self._update_count_color)
+        self._update_count_color()
 
     def setCount(self, count: int) -> None:
         self._count_label.setText(str(max(0, int(count))))
 
     def countText(self) -> str:
         return self._count_label.text()
+
+    def setCountColors(self, normal: str, checked: str) -> None:
+        self._normal_count_color = normal
+        self._checked_count_color = checked
+        self._update_count_color()
+
+    def _update_count_color(self, _checked: bool | None = None) -> None:
+        color = (
+            self._checked_count_color if self.isChecked()
+            else self._normal_count_color
+        )
+        self._count_label.setStyleSheet(
+            f"background: transparent; color: {color};"
+        )
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -1045,6 +1063,12 @@ class MainWindow(QMainWindow):
                 else "light"
             )
         self.setStyleSheet(_theme_style(theme))
+        normal, checked = (
+            ("#e8ebef", "#65a6ff") if theme == "dark"
+            else ("#20242a", "#216bd6")
+        )
+        for button in (self.downloading_button, self.completed_button):
+            button.setCountColors(normal, checked)
 
     def _build_detail_area(self) -> QWidget:
         panel = QFrame()
@@ -1494,9 +1518,16 @@ class MainWindow(QMainWindow):
             task for task in tasks
             if task.source_kind.value == "web_page"
             and task.download_status is not DownloadStatus.COMPLETED
-            and task.extraction_status in {
-                ExtractionStatus.PAUSED, ExtractionStatus.FAILED, ExtractionStatus.COMPLETED,
-            }
+            and (
+                task.extraction_status in {
+                    ExtractionStatus.PAUSED, ExtractionStatus.FAILED,
+                    ExtractionStatus.COMPLETED,
+                }
+                or (
+                    task.extraction_status is ExtractionStatus.NOT_REQUIRED
+                    and task.download_status is DownloadStatus.PARTIAL_FAILURE
+                )
+            )
         ]
         _set_button_enabled(
             self.pause_task_button, can_pause,
@@ -1574,9 +1605,16 @@ class MainWindow(QMainWindow):
         extraction_restartable = (
             task.source_kind.value == "web_page"
             and task.download_status is not DownloadStatus.COMPLETED
-            and task.extraction_status in {
-                ExtractionStatus.PAUSED, ExtractionStatus.FAILED, ExtractionStatus.COMPLETED,
-            }
+            and (
+                task.extraction_status in {
+                    ExtractionStatus.PAUSED, ExtractionStatus.FAILED,
+                    ExtractionStatus.COMPLETED,
+                }
+                or (
+                    task.extraction_status is ExtractionStatus.NOT_REQUIRED
+                    and task.download_status is DownloadStatus.PARTIAL_FAILURE
+                )
+            )
         )
         self.stop_extraction_button.setText(
             "停止提取" if extraction_active else "重新提取"
@@ -1865,9 +1903,16 @@ class MainWindow(QMainWindow):
                 task for task in tasks
                 if task.source_kind.value == "web_page"
                 and task.download_status is not DownloadStatus.COMPLETED
-                and task.extraction_status in {
-                    ExtractionStatus.PAUSED, ExtractionStatus.FAILED, ExtractionStatus.COMPLETED,
-                }
+                and (
+                    task.extraction_status in {
+                        ExtractionStatus.PAUSED, ExtractionStatus.FAILED,
+                        ExtractionStatus.COMPLETED,
+                    }
+                    or (
+                        task.extraction_status is ExtractionStatus.NOT_REQUIRED
+                        and task.download_status is DownloadStatus.PARTIAL_FAILURE
+                    )
+                )
             ]
             self._restart_extractions(restartable)
 
@@ -2154,10 +2199,16 @@ class MainWindow(QMainWindow):
             restartable = [
                 selected for selected in selected_tasks
                 if selected.source_kind.value == "web_page"
-                and selected.extraction_status in {
-                    ExtractionStatus.PAUSED, ExtractionStatus.FAILED,
-                    ExtractionStatus.COMPLETED,
-                }
+                and (
+                    selected.extraction_status in {
+                        ExtractionStatus.PAUSED, ExtractionStatus.FAILED,
+                        ExtractionStatus.COMPLETED,
+                    }
+                    or (
+                        selected.extraction_status is ExtractionStatus.NOT_REQUIRED
+                        and selected.download_status is DownloadStatus.PARTIAL_FAILURE
+                    )
+                )
             ]
             retryable = [
                 selected for selected in selected_tasks
@@ -2194,6 +2245,14 @@ class MainWindow(QMainWindow):
             menu.addAction(
                 "重新下载", lambda: self._redownload_tasks(selected_tasks)
             )
+            web_tasks = [
+                selected for selected in selected_tasks
+                if selected.source_kind.value == "web_page"
+            ]
+            if web_tasks:
+                menu.addAction(
+                    "重新提取", lambda: self._reextract_task_copies(web_tasks)
+                )
             menu.addAction(
                 "校验并修复", lambda: self._validate_and_repair_tasks(selected_tasks)
             )
@@ -2203,9 +2262,15 @@ class MainWindow(QMainWindow):
             menu.addAction("暂停", self._pause_current_task)
             if task.extraction_status in {ExtractionStatus.WAITING, ExtractionStatus.RUNNING}:
                 menu.addAction("停止提取", self._stop_current_extraction)
-            if task.source_kind.value == "web_page" and task.extraction_status in {
-                ExtractionStatus.FAILED, ExtractionStatus.COMPLETED,
-            }:
+            if task.source_kind.value == "web_page" and (
+                task.extraction_status in {
+                    ExtractionStatus.FAILED, ExtractionStatus.COMPLETED,
+                }
+                or (
+                    task.extraction_status is ExtractionStatus.NOT_REQUIRED
+                    and task.download_status is DownloadStatus.PARTIAL_FAILURE
+                )
+            ):
                 menu.addAction("重新提取", lambda: self._retry_extraction(task.id))
             if task.download_status is DownloadStatus.PARTIAL_FAILURE:
                 menu.addAction("重试失败项", lambda: self._retry_failed_items(task.id))
@@ -2218,6 +2283,8 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
         elif len(selected_tasks) == 1:
             menu.addAction("重新下载", lambda: self._redownload_task(task.id))
+            if task.source_kind.value == "web_page":
+                menu.addAction("重新提取", lambda: self._reextract_task_copy(task.id))
             completed_items = [
                 candidate for candidate in self._service.list_items(task.id)
                 if candidate.status.value == "completed"
@@ -2261,10 +2328,14 @@ class MainWindow(QMainWindow):
             return
         settings = dialog.settings()
         for task in tasks:
-            task_settings = settings
+            current_settings = self._service.get_task(task.id).settings
+            task_settings = replace(
+                settings,
+                allow_content_duplicate=current_settings.allow_content_duplicate,
+            )
             if hasattr(dialog, "cookie") and not dialog.cookie.text():
                 task_settings = replace(
-                    settings, protected_cookie=task.settings.protected_cookie,
+                    task_settings, protected_cookie=current_settings.protected_cookie,
                 )
             self._service.update_task_settings(task.id, task_settings)
             self._service.add_log(task.id, "信息", "任务", "批量任务设置已保存")
@@ -2453,6 +2524,24 @@ class MainWindow(QMainWindow):
             self._service.add_log(copied.id, "信息", "任务", "已创建重新下载任务")
         self._switch_view(0)
         self._show_feedback(f"已创建 {len(copies)} 个重新下载任务")
+
+    def _reextract_task_copy(self, task_id: str) -> None:
+        copied = self._service.reextract_task(task_id)
+        self._service.add_log(copied.id, "信息", "提取", "已创建重新提取任务")
+        self.refresh_tasks()
+        self._switch_view(0)
+        self._show_task_by_id(copied.id)
+        self._show_feedback("已创建重新提取任务")
+
+    def _reextract_task_copies(self, tasks: list[Task]) -> None:
+        copies = [self._service.reextract_task(task.id) for task in tasks]
+        for copied in copies:
+            self._service.add_log(
+                copied.id, "信息", "提取", "已创建重新提取任务",
+            )
+        self.refresh_tasks()
+        self._switch_view(0)
+        self._show_feedback(f"已创建 {len(copies)} 个重新提取任务")
 
     def _rename_item_file(self, task_id: str, item) -> None:
         current_name = Path(item.output_path).stem if item.output_path else item.label

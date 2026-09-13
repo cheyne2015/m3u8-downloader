@@ -212,3 +212,42 @@ def test_extraction_pauses_before_download_when_content_matches_another_link(tmp
     assert result.download_status is DownloadStatus.PENDING_SELECTION
     assert result.last_error == f"疑似重复内容:{existing.id}"
     assert service.list_items(new_task.id)[0].status.value == "unselected"
+
+
+def test_intentional_redownload_is_not_blocked_as_duplicate_content(tmp_path):
+    ids = iter(["existing", "redownload"])
+    service = TaskService(
+        SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=ids.__next__,
+    )
+    existing = service.create_tasks(CreateTaskRequest(
+        addresses="https://first.example/watch/1", save_directory=str(tmp_path),
+    ))[0]
+    service.apply_page_title(existing.id, "相同节目 - 站点甲")
+    service.add_candidates(existing.id, [Candidate(
+        "https://cdn-a.example/video.m3u8", duration_seconds=90,
+        segment_count=18, bandwidth=2_000_000,
+    )])
+    service.finish_extraction(existing.id)
+    service.record_content_identity(existing.id)
+
+    redownload = service.create_tasks(CreateTaskRequest(
+        addresses="https://first.example/watch/1", save_directory=str(tmp_path),
+        settings=TaskSettings(extraction_mode="deep", allow_content_duplicate=True),
+    ), allow_duplicates=True)[0]
+
+    class MatchingExtractor:
+        def extract(self, task, *, deep, on_candidate, on_title, stop_event):
+            on_title("相同节目 - 站点甲")
+            on_candidate(Candidate(
+                "https://cdn-b.example/video.m3u8", duration_seconds=90,
+                segment_count=18, bandwidth=2_000_000,
+            ))
+            return []
+
+    result = TaskCoordinator(
+        service, extractor=MatchingExtractor(), retry_wait=_no_retry_delay,
+        content_verifier=type("Verifier", (), {"matches": lambda *_args: True})(),
+    ).run_extraction(redownload.id)
+
+    assert result.download_status is DownloadStatus.WAITING
+    assert result.last_error == ""

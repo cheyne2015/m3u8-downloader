@@ -444,6 +444,111 @@ def test_redownload_item_creates_independent_parent_copy(tmp_path):
     assert copy_item.status is ItemStatus.WAITING
 
 
+def test_redownload_web_task_reuses_selected_items_for_fast_path(tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    task_ids = iter(["original", "copy"])
+    service = TaskService(repository, id_factory=task_ids.__next__)
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42", save_directory=str(tmp_path)
+    ))[0]
+    service.start_extraction(task.id)
+    service.add_candidates(task.id, [Candidate(
+        "https://cdn.example/video.m3u8?expires=old"
+    )])
+    service.finish_extraction(task.id)
+
+    copied = service.redownload_task(task.id)
+
+    assert copied.id == "copy"
+    assert copied.source_url == task.source_url
+    assert copied.source_kind is SourceKind.WEB_PAGE
+    assert copied.extraction_status is ExtractionStatus.NOT_REQUIRED
+    assert copied.download_status is DownloadStatus.WAITING
+    copied_items = service.list_items(copied.id)
+    assert len(copied_items) == 1
+    assert copied_items[0].source_url.endswith("?expires=old")
+
+
+def test_reextract_web_task_refreshes_page_instead_of_reusing_signed_items(tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    task_ids = iter(["original", "copy"])
+    service = TaskService(repository, id_factory=task_ids.__next__)
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42", save_directory=str(tmp_path)
+    ))[0]
+    service.start_extraction(task.id)
+    service.add_candidates(task.id, [Candidate(
+        "https://cdn.example/video.m3u8?expires=old"
+    )])
+    service.finish_extraction(task.id)
+
+    copied = service.reextract_task(task.id)
+
+    assert copied.id == "copy"
+    assert copied.source_url == task.source_url
+    assert copied.source_kind is SourceKind.WEB_PAGE
+    assert copied.extraction_status is ExtractionStatus.WAITING
+    assert copied.download_status is DownloadStatus.NOT_READY
+    assert copied.selection_mode is SelectionMode.AUTO
+    assert copied.settings.allow_content_duplicate is True
+    assert service.list_items(copied.id) == []
+
+
+def test_expired_fast_redownload_automatically_falls_back_to_reextracting_page(tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    task_ids = iter(["original", "copy"])
+    service = TaskService(repository, id_factory=task_ids.__next__)
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42", save_directory=str(tmp_path)
+    ))[0]
+    service.start_extraction(task.id)
+    service.add_candidates(task.id, [Candidate(
+        "https://cdn.example/video.m3u8?expires=old"
+    )])
+    service.finish_extraction(task.id)
+    copied = service.redownload_task(task.id)
+    copied_item = service.list_items(copied.id)[0]
+
+    refreshed = service.fail_item(
+        copied.id, copied_item.id, "400 Client Error: Bad Request"
+    )
+
+    assert refreshed.extraction_status is ExtractionStatus.WAITING
+    assert refreshed.download_status is DownloadStatus.NOT_READY
+    assert refreshed.selection_mode is SelectionMode.AUTO
+    assert refreshed.settings.allow_content_duplicate is True
+    assert service.list_items(copied.id) == []
+
+
+def test_retry_failed_legacy_web_redownload_refreshes_expired_candidates(tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    service = TaskService(repository, id_factory=lambda: "legacy-copy")
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42", save_directory=str(tmp_path)
+    ))[0]
+    service.start_extraction(task.id)
+    items = service.add_candidates(task.id, [Candidate(
+        "https://cdn.example/video.m3u8?expires=old"
+    )])
+    service.finish_extraction(task.id)
+    repository.save_items([replace(items[0], status=ItemStatus.FAILED)])
+    repository.save_many([replace(
+        service.get_task(task.id),
+        extraction_status=ExtractionStatus.NOT_REQUIRED,
+        download_status=DownloadStatus.PARTIAL_FAILURE,
+        last_error="400 Client Error",
+    )])
+
+    retried = service.retry_failed_items(task.id)
+
+    assert retried.extraction_status is ExtractionStatus.WAITING
+    assert retried.download_status is DownloadStatus.NOT_READY
+    assert retried.last_error == ""
+    assert retried.selection_mode is SelectionMode.AUTO
+    assert retried.settings.allow_content_duplicate is True
+    assert service.list_items(task.id) == []
+
+
 def test_rename_output_file_changes_disk_and_persisted_path(tmp_path):
     repository = SQLiteTaskRepository(tmp_path / "tasks.db")
     service = TaskService(repository, id_factory=lambda: "parent")

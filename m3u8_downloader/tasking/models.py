@@ -112,6 +112,7 @@ class TaskSettings:
     task_retries: int = 1
     retry_delay_seconds: int = 30
     timeout_seconds: int = 30
+    allow_content_duplicate: bool = False
 
     def __post_init__(self) -> None:
         ranges = {

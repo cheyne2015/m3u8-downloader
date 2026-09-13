@@ -70,6 +70,12 @@ class TaskCoordinator:
                     if any(item.valid for item in self._service.list_items(task_id)):
                         self._service.finish_extraction(task_id)
                         self._service.record_content_identity(task_id)
+                        if task.settings.allow_content_duplicate:
+                            self._service.add_log(
+                                task_id, "信息", "任务",
+                                "重新下载任务已跳过重复内容拦截",
+                            )
+                            return self._service.finish_parent_if_handled(task_id)
                         duplicate = self._service.find_content_duplicate(task_id)
                         if duplicate is not None:
                             match = self._content_verifier.matches(

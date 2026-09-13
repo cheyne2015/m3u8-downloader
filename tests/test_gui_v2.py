@@ -68,6 +68,25 @@ def test_navigation_shows_total_parent_task_counts_independent_of_filter(qtbot, 
     assert window.completed_button.countText() == "1"
 
 
+def test_navigation_count_color_follows_button_state_in_both_themes(qtbot, tmp_path):
+    window = MainWindow(TaskService(SQLiteTaskRepository(tmp_path / "tasks.db")))
+    qtbot.addWidget(window)
+    window._force_exit = True
+
+    window._apply_theme("dark")
+    assert "#65a6ff" in window.downloading_button._count_label.styleSheet()
+    assert "#e8ebef" in window.completed_button._count_label.styleSheet()
+
+    window.downloading_button.setChecked(False)
+    window.completed_button.setChecked(True)
+    assert "#e8ebef" in window.downloading_button._count_label.styleSheet()
+    assert "#65a6ff" in window.completed_button._count_label.styleSheet()
+
+    window._apply_theme("light")
+    assert "#20242a" in window.downloading_button._count_label.styleSheet()
+    assert "#216bd6" in window.completed_button._count_label.styleSheet()
+
+
 def test_active_task_cards_keep_same_height_across_extraction_and_download_states(
     qtbot, tmp_path,
 ):
@@ -209,6 +228,56 @@ def test_multi_selected_failed_tasks_offer_batch_reextract_settings_and_queue(
     assert service.get_task(two.id).extraction_status is ExtractionStatus.WAITING
 
 
+def test_failed_fast_redownload_offers_retry_and_reextract(
+    qtbot, tmp_path, monkeypatch,
+):
+    ids = iter(["original", "copy"])
+    service = TaskService(
+        SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=ids.__next__,
+    )
+    original = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42", save_directory=str(tmp_path),
+    ))[0]
+    service.start_extraction(original.id)
+    service.add_candidates(original.id, [Candidate(
+        "https://cdn.example/video.m3u8?expires=old"
+    )])
+    service.finish_extraction(original.id)
+    copied = service.redownload_task(original.id)
+    copied_item = service.list_items(copied.id)[0]
+    service.fail_item(copied.id, copied_item.id, "媒体内容无法播放")
+
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+    callbacks = {}
+
+    class MenuStub:
+        def __init__(self, *_args): pass
+        def addSeparator(self): pass
+        def addAction(self, label, callback=None): callbacks[label] = callback
+        def addMenu(self, label): callbacks[label] = None; return self
+        def exec(self, *_args): pass
+
+    monkeypatch.setattr("m3u8_downloader.gui_v2.QMenu", MenuStub)
+    copied_row = next(
+        row for row in range(window.task_list.count())
+        if window.task_list.item(row).data(Qt.ItemDataRole.UserRole).id == copied.id
+    )
+    window.task_list.setCurrentRow(copied_row)
+    window._show_task_menu(
+        window.task_list,
+        window.task_list.visualItemRect(window.task_list.item(copied_row)).center(),
+    )
+
+    assert "重试失败项" in callbacks
+    assert "重新提取" in callbacks
+    callbacks["重新提取"]()
+    assert service.get_task(copied.id).extraction_status is ExtractionStatus.WAITING
+    assert service.list_items(copied.id) == []
+
+
 def test_batch_task_settings_apply_to_every_selected_parent(qtbot, tmp_path, monkeypatch):
     ids = iter(["one", "two"])
     service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=ids.__next__)
@@ -216,6 +285,9 @@ def test_batch_task_settings_apply_to_every_selected_parent(qtbot, tmp_path, mon
         addresses="https://site.example/one\nhttps://site.example/two",
         save_directory=str(tmp_path),
     ))
+    service.update_task_settings(
+        one.id, replace(one.settings, allow_content_duplicate=True),
+    )
 
     class DialogStub:
         def __init__(self, *_args):
@@ -240,6 +312,8 @@ def test_batch_task_settings_apply_to_every_selected_parent(qtbot, tmp_path, mon
     assert service.get_task(two.id).settings.segment_threads == 17
     assert service.get_task(one.id).settings.timeout_seconds == 75
     assert service.get_task(two.id).settings.timeout_seconds == 75
+    assert service.get_task(one.id).settings.allow_content_duplicate is True
+    assert service.get_task(two.id).settings.allow_content_duplicate is False
 
 
 def test_multi_selected_completed_tasks_offer_batch_redownload_and_validation(
@@ -283,6 +357,46 @@ def test_multi_selected_completed_tasks_offer_batch_redownload_and_validation(
     assert "校验并修复" in labels
     assert "删除任务" in labels
     assert "彻底删除文件" in labels
+
+
+def test_completed_web_task_offers_fast_redownload_and_fresh_reextract(
+    qtbot, tmp_path, monkeypatch,
+):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42", save_directory=str(tmp_path),
+    ))[0]
+    service.start_extraction(task.id)
+    items = service.add_candidates(task.id, [Candidate(
+        "https://cdn.example/video.m3u8?expires=old"
+    )])
+    service.finish_extraction(task.id)
+    output = tmp_path / "video.mp4"
+    output.write_bytes(b"done")
+    service.complete_item(task.id, items[0].id, output)
+    service.finish_parent_if_handled(task.id)
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+    window._switch_view(1)
+    labels = []
+
+    class MenuStub:
+        def __init__(self, *_args): pass
+        def addSeparator(self): pass
+        def addAction(self, label, callback=None): labels.append(label)
+        def addMenu(self, label): labels.append(label); return self
+        def exec(self, *_args): pass
+
+    monkeypatch.setattr("m3u8_downloader.gui_v2.QMenu", MenuStub)
+    window._show_task_menu(
+        window.completed_list,
+        window.completed_list.visualItemRect(window.completed_list.item(0)).center(),
+    )
+
+    assert "重新下载" in labels
+    assert "重新提取" in labels
 
 
 def test_main_window_restores_the_last_user_size(qtbot, tmp_path):
