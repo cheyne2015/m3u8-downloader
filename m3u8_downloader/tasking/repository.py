@@ -154,7 +154,13 @@ class SQLiteTaskRepository:
             row = connection.execute(
                 "SELECT settings_json FROM app_settings WHERE singleton = 1"
             ).fetchone()
-        return AppSettings() if row is None else AppSettings(**json.loads(row["settings_json"]))
+        if row is None:
+            return AppSettings()
+        values = json.loads(row["settings_json"])
+        legacy_close_to_tray = values.pop("close_to_tray", None)
+        if "close_rule_enabled" not in values and legacy_close_to_tray is not None:
+            values["close_rule_enabled"] = bool(legacy_close_to_tray)
+        return AppSettings(**values)
 
     def save_app_settings(self, settings: AppSettings) -> None:
         payload = json.dumps(asdict(settings), ensure_ascii=False, separators=(",", ":"))

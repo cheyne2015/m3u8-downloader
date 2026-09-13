@@ -62,7 +62,8 @@ class AppSettings:
     theme: str = "dark"
     log_retention_days: int = 30
     completion_notification: bool = False
-    close_to_tray: bool = False
+    close_rule_enabled: bool = False
+    close_rule: str = "tray"
     task_panel_width: int = 0
     detail_panel_width: int = 0
     window_width: int = 0
@@ -93,6 +94,8 @@ class AppSettings:
             raise ValueError("theme 必须是 dark、light 或 system")
         if self.extraction_mode not in {"smart", "deep", "normal"}:
             raise ValueError("extraction_mode 必须是 smart、deep 或 normal")
+        if self.close_rule not in {"tray", "exit", "smart"}:
+            raise ValueError("close_rule 必须是 tray、exit 或 smart")
 
 
 @dataclass(frozen=True)

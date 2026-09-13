@@ -18,6 +18,8 @@ def test_app_settings_have_confirmed_defaults_and_persist(tmp_path):
     assert defaults.segment_threads == 8
     assert defaults.extraction_mode == "smart"
     assert defaults.completion_notification is False
+    assert defaults.close_rule_enabled is False
+    assert defaults.close_rule == "tray"
 
     changed = replace(
         defaults,
@@ -38,6 +40,7 @@ def test_app_settings_have_confirmed_defaults_and_persist(tmp_path):
     ("segment_threads", 33),
     ("task_retries", 6),
     ("extraction_mode", "automatic"),
+    ("close_rule", "ask"),
 ])
 def test_app_settings_reject_values_outside_confirmed_ranges(field, value):
     with pytest.raises(ValueError):

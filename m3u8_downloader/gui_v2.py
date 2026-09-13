@@ -615,6 +615,7 @@ class MainWindow(QMainWindow):
         self._log_rendered_ids: list[int] = []
         self._skip_delete_task_confirmation = False
         self._skip_permanent_delete_confirmation = False
+        self._session_close_action: str | None = None
         self._pending_item_checks: dict[str, set[str]] = {}
         self._shown_content_duplicates: set[str] = set()
         self._updating_item_table = False
@@ -813,7 +814,7 @@ class MainWindow(QMainWindow):
         self.quick_download_panel = QFrame()
         self.quick_download_panel.setObjectName("quickDownloadPanel")
         quick_layout = QHBoxLayout(self.quick_download_panel)
-        quick_layout.setContentsMargins(10, 8, 10, 8)
+        quick_layout.setContentsMargins(0, 8, 0, 8)
         quick_layout.setSpacing(8)
         self.quick_address_edit = QLineEdit()
         self.quick_address_edit.setPlaceholderText("粘贴网页链接或 m3u8 链接，按回车快速创建任务")
@@ -915,7 +916,19 @@ class MainWindow(QMainWindow):
         self.threshold_spin = QSpinBox()
         self.threshold_spin.setRange(1, 20)
         self.notification_check = QCheckBox("父任务全部完成时显示 Windows 通知")
-        self.close_to_tray_check = QCheckBox("关闭窗口时最小化到托盘")
+        self.close_rule_enabled_check = QCheckBox("启用关闭规则")
+        self.close_rule_combo = QComboBox()
+        self.close_rule_combo.addItem("最小化到托盘", "tray")
+        self.close_rule_combo.addItem("直接关闭", "exit")
+        self.close_rule_combo.addItem(
+            "有任务时最小化到托盘，无任务时直接关闭", "smart",
+        )
+        close_rule_row = QWidget()
+        close_rule_layout = QHBoxLayout(close_rule_row)
+        close_rule_layout.setContentsMargins(0, 0, 0, 0)
+        close_rule_layout.setSpacing(10)
+        close_rule_layout.addWidget(self.close_rule_enabled_check)
+        close_rule_layout.addWidget(self.close_rule_combo, 1)
         self.request_retries_spin = QSpinBox()
         self.request_retries_spin.setRange(0, 10)
         self.task_retries_spin = QSpinBox()
@@ -929,7 +942,7 @@ class MainWindow(QMainWindow):
         behavior_form.addRow("任务级自动重试", self.task_retries_spin)
         behavior_form.addRow("任务重试等待", self.retry_delay_spin)
         behavior_form.addRow("", self.notification_check)
-        behavior_form.addRow("", self.close_to_tray_check)
+        behavior_form.addRow("关闭窗口", close_rule_row)
 
         appearance = QGroupBox("界面与日志")
         appearance_form = QFormLayout(appearance)
@@ -969,7 +982,9 @@ class MainWindow(QMainWindow):
         mode_index = self.extraction_mode_combo.findData(settings.extraction_mode)
         self.extraction_mode_combo.setCurrentIndex(max(0, mode_index))
         self.notification_check.setChecked(settings.completion_notification)
-        self.close_to_tray_check.setChecked(settings.close_to_tray)
+        self.close_rule_enabled_check.setChecked(settings.close_rule_enabled)
+        close_rule_index = self.close_rule_combo.findData(settings.close_rule)
+        self.close_rule_combo.setCurrentIndex(max(0, close_rule_index))
         self.log_days_spin.setValue(settings.log_retention_days)
         index = self.theme_combo.findData(settings.theme)
         self.theme_combo.setCurrentIndex(max(0, index))
@@ -987,7 +1002,8 @@ class MainWindow(QMainWindow):
             task_retries=self.task_retries_spin.value(),
             retry_delay_seconds=self.retry_delay_spin.value(),
             completion_notification=self.notification_check.isChecked(),
-            close_to_tray=self.close_to_tray_check.isChecked(),
+            close_rule_enabled=self.close_rule_enabled_check.isChecked(),
+            close_rule=self.close_rule_combo.currentData(),
             log_retention_days=self.log_days_spin.value(),
             theme=self.theme_combo.currentData(),
         )
@@ -1884,35 +1900,63 @@ class MainWindow(QMainWindow):
             task.download_status is not DownloadStatus.COMPLETED
             for task in self._service.list_tasks()
         )
-        if settings.close_to_tray:
-            self.hide()
+        if self._session_close_action == "tray":
+            self._apply_close_action("tray", event, active)
+            return
+        if settings.close_rule_enabled:
+            self._apply_close_action(
+                self._close_action_for_rule(settings.close_rule, active), event, active,
+            )
+            return
+        default_action = self._close_action_for_rule(settings.close_rule, active)
+        confirmed, minimize_to_tray = self._ask_close_action(default_action == "tray")
+        if minimize_to_tray:
+            self._session_close_action = "tray"
+        if not confirmed:
             event.ignore()
             return
-        if not active:
-            event.accept()
-            return
+        self._apply_close_action(
+            "tray" if minimize_to_tray else "exit", event, active,
+        )
+
+    @staticmethod
+    def _close_action_for_rule(rule: str, active: bool) -> str:
+        if rule == "smart":
+            return "tray" if active else "exit"
+        return rule
+
+    def _ask_close_action(self, default_to_tray: bool) -> tuple[bool, bool]:
         box = QMessageBox(self)
-        box.setWindowTitle("仍有任务未完成")
-        box.setText("请选择关闭方式")
-        tray_button = box.addButton("最小化到托盘", QMessageBox.ButtonRole.AcceptRole)
-        exit_button = box.addButton("暂停全部并退出", QMessageBox.ButtonRole.DestructiveRole)
-        cancel_button = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is tray_button:
+        box.setWindowTitle("关闭程序")
+        box.setText("是否最小化到托盘？")
+        box.setInformativeText("本次不再询问")
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+        )
+        box.button(QMessageBox.StandardButton.Ok).setText("确认")
+        box.button(QMessageBox.StandardButton.Cancel).setText("取消")
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        minimize_check = QCheckBox("最小化到托盘", box)
+        minimize_check.setChecked(default_to_tray)
+        box.setCheckBox(minimize_check)
+        confirmed = box.exec() == QMessageBox.StandardButton.Ok
+        return confirmed, minimize_check.isChecked()
+
+    def _apply_close_action(self, action: str, event, active: bool) -> None:
+        if action == "tray":
             self.hide()
             event.ignore()
-        elif clicked is exit_button:
-            controller = getattr(self, "background_controller", None)
+            return
+        controller = getattr(self, "background_controller", None)
+        if active:
             if controller is not None:
                 controller.pause_all()
-                controller.stop()
             else:
                 self._service.pause_all()
-            self._force_exit = True
-            event.accept()
-        else:
-            event.ignore()
+        if controller is not None:
+            controller.stop()
+        self._force_exit = True
+        event.accept()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -2298,7 +2342,7 @@ class MainWindow(QMainWindow):
             "彻底删除" if delete_outputs else "删除任务"
         )
         box.button(QMessageBox.StandardButton.Cancel).setText("取消")
-        skip_confirmation = QCheckBox("本次运行不再确认", box)
+        skip_confirmation = QCheckBox("本次不再询问", box)
         box.setCheckBox(skip_confirmation)
         if box.exec() != QMessageBox.StandardButton.Yes:
             return False

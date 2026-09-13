@@ -2,9 +2,13 @@
 
 from dataclasses import replace
 
+import pytest
+
 from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QPalette, QTextCursor
-from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QAbstractItemView
+from PySide6.QtWidgets import (
+    QApplication, QAbstractItemView, QCheckBox, QLabel, QMessageBox,
+)
 
 from m3u8_downloader.gui_v2 import MainWindow
 from m3u8_downloader.tasking import (
@@ -185,7 +189,7 @@ def test_delete_task_confirmation_can_be_suppressed_for_only_one_window_session(
     def accept_and_disable(box):
         prompts.append(box.windowTitle())
         assert box.checkBox() is not None
-        assert box.checkBox().text() == "本次运行不再确认"
+        assert box.checkBox().text() == "本次不再询问"
         box.checkBox().setChecked(True)
         return QMessageBox.StandardButton.Yes.value
 
@@ -886,6 +890,197 @@ def test_quick_bar_pastes_before_start_and_both_inputs_have_clear_buttons(qtbot,
     assert window.quick_address_edit.text() == "https://site.example/watch/pasted"
     assert window.quick_paste_button.geometry().left() < window.quick_start_button.geometry().left()
     assert "已粘贴" in window.feedback_label.text()
+
+
+def test_quick_download_and_search_inputs_are_left_aligned(qtbot, tmp_path):
+    window = MainWindow(TaskService(SQLiteTaskRepository(tmp_path / "tasks.db")))
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+
+    search_left = window.search_edit.mapTo(window, QPoint(0, 0)).x()
+    quick_left = window.quick_address_edit.mapTo(window, QPoint(0, 0)).x()
+
+    assert quick_left == search_left
+
+
+def test_close_rule_settings_persist_all_three_modes(qtbot, tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    window = MainWindow(TaskService(repository))
+    qtbot.addWidget(window)
+    window._force_exit = True
+
+    assert window.close_rule_enabled_check.isChecked() is False
+    assert [window.close_rule_combo.itemData(index) for index in range(3)] == [
+        "tray", "exit", "smart",
+    ]
+    window.close_rule_enabled_check.setChecked(True)
+    window.close_rule_combo.setCurrentIndex(window.close_rule_combo.findData("smart"))
+    qtbot.mouseClick(window.save_settings_button, Qt.MouseButton.LeftButton)
+
+    saved = repository.load_app_settings()
+    assert saved.close_rule_enabled is True
+    assert saved.close_rule == "smart"
+
+
+class CloseEventStub:
+    def __init__(self):
+        self.accepted = None
+
+    def accept(self):
+        self.accepted = True
+
+    def ignore(self):
+        self.accepted = False
+
+
+def test_prompt_checked_then_cancel_remembers_tray_for_this_process(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(TaskService(SQLiteTaskRepository(tmp_path / "tasks.db")))
+    qtbot.addWidget(window)
+    window.show()
+    prompted = []
+    monkeypatch.setattr(
+        window, "_ask_close_action",
+        lambda _default: prompted.append(True) or (False, True),
+    )
+
+    first = CloseEventStub()
+    window.closeEvent(first)
+    second = CloseEventStub()
+    window.closeEvent(second)
+
+    assert first.accepted is False
+    assert second.accepted is False
+    assert prompted == [True]
+    assert window.isHidden()
+    window._force_exit = True
+
+
+def test_prompt_unchecked_then_cancel_asks_again_next_time(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(TaskService(SQLiteTaskRepository(tmp_path / "tasks.db")))
+    qtbot.addWidget(window)
+    window.show()
+    prompted = []
+    monkeypatch.setattr(
+        window, "_ask_close_action",
+        lambda _default: prompted.append(True) or (False, False),
+    )
+
+    window.closeEvent(CloseEventStub())
+    window.closeEvent(CloseEventStub())
+
+    assert prompted == [True, True]
+    window._force_exit = True
+
+
+def test_close_prompt_has_one_tray_checkbox_and_concise_session_text(
+    qtbot, tmp_path, monkeypatch,
+):
+    window = MainWindow(TaskService(SQLiteTaskRepository(tmp_path / "tasks.db")))
+    qtbot.addWidget(window)
+    captured = {}
+
+    def cancel(box):
+        captured["text"] = box.text()
+        captured["information"] = box.informativeText()
+        captured["checkboxes"] = [
+            checkbox.text() for checkbox in box.findChildren(QCheckBox)
+        ]
+        return QMessageBox.StandardButton.Cancel
+
+    monkeypatch.setattr(QMessageBox, "exec", cancel)
+
+    assert window._ask_close_action(True) == (False, True)
+    assert captured == {
+        "text": "是否最小化到托盘？",
+        "information": "本次不再询问",
+        "checkboxes": ["最小化到托盘"],
+    }
+    window._force_exit = True
+
+
+def test_delete_confirmation_uses_concise_session_text(qtbot, tmp_path, monkeypatch):
+    window = MainWindow(TaskService(SQLiteTaskRepository(tmp_path / "tasks.db")))
+    qtbot.addWidget(window)
+    captured = []
+
+    def cancel(box):
+        captured.append(box.checkBox().text())
+        return QMessageBox.StandardButton.Cancel
+
+    monkeypatch.setattr(QMessageBox, "exec", cancel)
+
+    assert window._confirm_task_deletion("删除任务", "确认删除？", False) is False
+    assert captured == ["本次不再询问"]
+    window._force_exit = True
+
+
+class CloseControllerStub:
+    def __init__(self):
+        self.paused = 0
+        self.stopped = 0
+
+    def pause_all(self):
+        self.paused += 1
+
+    def stop(self):
+        self.stopped += 1
+
+
+def test_prompt_unchecked_then_confirm_pauses_active_tasks_and_exits(
+    qtbot, tmp_path, monkeypatch,
+):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
+    service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/video.m3u8", save_directory=str(tmp_path),
+    ))
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    controller = CloseControllerStub()
+    window.background_controller = controller
+    monkeypatch.setattr(window, "_ask_close_action", lambda _default: (True, False))
+    event = CloseEventStub()
+
+    window.closeEvent(event)
+
+    assert event.accepted is True
+    assert controller.paused == 1
+    assert controller.stopped == 1
+
+
+@pytest.mark.parametrize(("rule", "active", "expected_action"), [
+    ("tray", False, "tray"),
+    ("exit", True, "exit"),
+    ("smart", True, "tray"),
+    ("smart", False, "exit"),
+])
+def test_enabled_close_rule_executes_without_prompt(
+    qtbot, tmp_path, monkeypatch, rule, active, expected_action,
+):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
+    if active:
+        service.create_tasks(CreateTaskRequest(
+            addresses="https://cdn.example/video.m3u8", save_directory=str(tmp_path),
+        ))
+    service.save_app_settings(replace(
+        service.load_app_settings(), close_rule_enabled=True, close_rule=rule,
+    ))
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    applied = []
+    monkeypatch.setattr(
+        window, "_ask_close_action",
+        lambda _default: pytest.fail("启用关闭规则后不应弹窗"),
+    )
+    monkeypatch.setattr(
+        window, "_apply_close_action",
+        lambda action, _event, is_active: applied.append((action, is_active)),
+    )
+
+    window.closeEvent(CloseEventStub())
+
+    assert applied == [(expected_action, active)]
+    window._force_exit = True
 
 
 def test_quick_start_keeps_invalid_address_and_shows_feedback(qtbot, tmp_path):
