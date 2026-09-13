@@ -243,11 +243,13 @@ class DeselectableListWidget(QListWidget):
     def mousePressEvent(self, event) -> None:
         clicked = self.itemAt(event.position().toPoint())
         blank = clicked is None
+        self._preserve_right_click_selection = False
         if (
             event.button() is Qt.MouseButton.RightButton
             and clicked is not None
             and clicked.isSelected()
         ):
+            self._preserve_right_click_selection = True
             self.selectionModel().setCurrentIndex(
                 self.indexFromItem(clicked), QItemSelectionModel.SelectionFlag.NoUpdate,
             )
@@ -257,6 +259,16 @@ class DeselectableListWidget(QListWidget):
         if blank:
             self.clearSelection()
             self.setCurrentItem(None)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if (
+            event.button() is Qt.MouseButton.RightButton
+            and getattr(self, "_preserve_right_click_selection", False)
+        ):
+            self._preserve_right_click_selection = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:
@@ -1931,7 +1943,9 @@ class MainWindow(QMainWindow):
         if not item.isSelected():
             task_list.clearSelection()
             item.setSelected(True)
-        task_list.setCurrentItem(item)
+        task_list.selectionModel().setCurrentIndex(
+            task_list.indexFromItem(item), QItemSelectionModel.SelectionFlag.NoUpdate,
+        )
         task = item.data(Qt.ItemDataRole.UserRole)
         selected_tasks = [
             selected.data(Qt.ItemDataRole.UserRole)

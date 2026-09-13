@@ -304,7 +304,7 @@ def test_parent_lists_support_multi_selection_and_batch_delete_uses_one_prompt(
 
 
 def test_right_clicking_any_selected_parent_keeps_multi_selection_for_batch_actions(
-    qtbot, tmp_path,
+    qtbot, tmp_path, monkeypatch,
 ):
     ids = iter(["one", "two", "three"])
     service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=ids.__next__)
@@ -322,10 +322,35 @@ def test_right_clicking_any_selected_parent_keeps_multi_selection_for_batch_acti
     window._force_exit = True
     first = window.task_list.item(0)
     second = window.task_list.item(1)
-    first.setSelected(True)
-    second.setSelected(True)
-    position = window.task_list.visualItemRect(second).center()
-    assert window.task_list.itemAt(position) is second
+    first_position = window.task_list.visualItemRect(first).center()
+    second_position = window.task_list.visualItemRect(second).center()
+    qtbot.mouseClick(
+        window.task_list.viewport(), Qt.MouseButton.LeftButton, pos=first_position,
+    )
+    qtbot.mouseClick(
+        window.task_list.viewport(), Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ControlModifier, second_position,
+    )
+    assert len(window.task_list.selectedItems()) == 2
+    position = first_position
+    assert window.task_list.itemAt(position) is first
+    class MenuStub:
+        def __init__(self, *_args):
+            pass
+
+        def addSeparator(self):
+            pass
+
+        def addAction(self, *_args):
+            pass
+
+        def addMenu(self, *_args):
+            return self
+
+        def exec(self, *_args):
+            pass
+
+    monkeypatch.setattr("m3u8_downloader.gui_v2.QMenu", MenuStub)
     qtbot.mouseClick(
         window.task_list.viewport(), Qt.MouseButton.RightButton, pos=position,
     )
