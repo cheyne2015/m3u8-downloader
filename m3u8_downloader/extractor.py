@@ -29,6 +29,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 from urllib.parse import urljoin
 
@@ -46,13 +47,7 @@ except ImportError:  # pragma: no cover
 
 
 def _ensure_playwright_browsers_path() -> None:
-    """深度模式启动前确保浏览器目录已设置（用户本机默认 F:\\gadgets\\playwright-browsers）。
-
-    若用户已自行设置 PLAYWRIGHT_BROWSERS_PATH 环境变量则尊重，不覆盖。
-    playwright 会在启动时自动读取该环境变量定位浏览器内核。
-    """
-    if "PLAYWRIGHT_BROWSERS_PATH" not in os.environ:
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = DEFAULT_PLAYWRIGHT_BROWSERS_PATH
+    """保留用户自定义目录；未设置时由 Playwright 使用官方默认缓存目录。"""
 
 
 # 冻结 EXE 未打包 playwright（build.spec 显式 exclude，避免体积爆炸）。
@@ -106,7 +101,7 @@ def _inject_system_playwright() -> bool:
 
     # 2) 用户目录下的 Python 安装（扫描 Lib/site-packages）
     local_programs = os.path.join(
-        os.environ.get("LOCALAPPDATA", r"C:\Users\cheyn\AppData\Local"),
+        os.environ.get("LOCALAPPDATA", ""),
         "Programs", "Python",
     )
     if os.path.isdir(local_programs):
@@ -115,11 +110,10 @@ def _inject_system_playwright() -> bool:
             if os.path.isdir(sp):
                 candidates.append(sp)
 
-    # 3) 兜底硬编码路径
+    # 3) 常见的系统级 Python 安装目录
     for base in (
-        r"C:\Users\cheyn\AppData\Local\Programs\Python\Python313\Lib\site-packages",
-        r"C:\Users\cheyn\AppData\Local\Programs\Python\Python312\Lib\site-packages",
         r"C:\Python313\Lib\site-packages",
+        r"C:\Python312\Lib\site-packages",
     ):
         if os.path.isdir(base):
             candidates.append(base)
@@ -142,6 +136,9 @@ MAX_PAGE_BYTES: int = 5 * 1024 * 1024       # 网页/JS 单文件读取上限，
 DEEP_WAIT_MS: int = 5000                    # 深度模式等待网络静默毫秒数
 DEEP_SUBPROCESS_MARGIN_SEC: int = 60        # 子进程路线在导航超时外预留的启动/收尾时间
 DEEP_WORKER_NAME: str = "deep_worker.py"    # 随包分发的深度模式子进程脚本
+DEEP_RUNTIME_PROTOCOL_VERSION: int = 1
+DEEP_RUNTIME_DIRECTORY: str = "deep-runtime"
+DEEP_RUNTIME_WORKER_NAME: str = "deep-worker.exe"
 
 # 深度模式请求拦截：仅当 media 类型 URL 以这些分片扩展名结尾时才 abort
 _SEGMENT_EXTS = frozenset({".ts", ".mp4", ".m4s", ".m4a", ".aac", ".webm"})
@@ -149,11 +146,11 @@ _SEGMENT_EXTS = frozenset({".ts", ".mp4", ".m4s", ".m4a", ".aac", ".webm"})
 _SETTLE_MS = 2500
 # 至少收集的毫秒数（避免页面刚打开时的瞬间早期请求造成过早停等）
 _MIN_COLLECT_MS = 800
-DEFAULT_PLAYWRIGHT_BROWSERS_PATH: str = r"F:\gadgets\playwright-browsers"
 MAX_CANDIDATE_URL_LEN: int = 512            # 候选 URL 长度上限，防超长脏串
 # 兜底：显式列出的系统 Python 解释器（无任何命令能解析到时使用）
 _FALLBACK_PYTHON_PATHS = (
-    r"C:\Users\cheyn\AppData\Local\Programs\Python\Python313\python.exe",
+    r"C:\Python313\python.exe",
+    r"C:\Python312\python.exe",
 )
 
 # 外链 JS 黑名单关键词：这些基本不可能是播放器逻辑，直接跳过
@@ -744,6 +741,30 @@ def _deep_worker_path() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), DEEP_WORKER_NAME)
 
 
+def _bundled_deep_runtime() -> Optional[Tuple[str, str]]:
+    """返回与当前程序协议兼容的外置深度提取组件。"""
+    if not getattr(sys, "frozen", False):
+        return None
+    runtime = Path(sys.executable).resolve().parent / DEEP_RUNTIME_DIRECTORY
+    worker = runtime / DEEP_RUNTIME_WORKER_NAME
+    manifest = runtime / "runtime.json"
+    browsers = runtime / "browsers"
+    if not worker.is_file() or not manifest.is_file() or not browsers.is_dir():
+        return None
+    try:
+        metadata = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if metadata.get("protocol_version") != DEEP_RUNTIME_PROTOCOL_VERSION:
+        return None
+    if not any(
+        child.is_dir() and child.name.startswith("chromium_headless_shell-")
+        for child in browsers.iterdir()
+    ):
+        return None
+    return str(worker), str(browsers)
+
+
 def _deep_worker_available() -> bool:
     """子进程路线是否具备条件.
 
@@ -753,7 +774,9 @@ def _deep_worker_available() -> bool:
     Returns:
         True 表示可以用系统 Python 跑 worker 完成深度模式.
     """
-    return _find_system_python() is not None and os.path.isfile(_deep_worker_path())
+    return _bundled_deep_runtime() is not None or (
+        _find_system_python() is not None and os.path.isfile(_deep_worker_path())
+    )
 
 
 def _try_import_sync_playwright() -> Optional[Callable]:
@@ -856,29 +879,35 @@ def _deep_extract_subprocess(
     if stop_event is not None and stop_event.is_set():
         raise DeepModeUnavailableError("深度模式已停止")
 
-    python_cmd = _find_system_python()
-    if not python_cmd:
-        raise DeepModeUnavailableError(
-            "深度模式需要一个系统 Python 来运行内置抓取脚本，但未找到可用解释器。\n"
-            "请安装 Python（或确保 py -3.13 / python 在 PATH 中）后重试。"
-        )
-
-    worker = _deep_worker_path()
-    if not os.path.isfile(worker):
-        raise DeepModeUnavailableError(
-            f"深度模式抓取脚本缺失：{worker}\n"
-            "安装包可能已损坏，请重新下载安装本程序。"
-        )
-
-    # 浏览器目录：尊重用户自定义环境变量，未设置时用本机默认目录（setdefault 语义）
-    _ensure_playwright_browsers_path()
-    cmd: List[str] = list(python_cmd) + [
-        worker,
+    bundled = _bundled_deep_runtime()
+    if bundled is not None:
+        worker, browsers_path = bundled
+        cmd: List[str] = [worker]
+        launcher_name = worker
+    else:
+        python_cmd = _find_system_python()
+        if not python_cmd:
+            raise DeepModeUnavailableError(
+                "未找到深度提取组件，也没有可运行抓取脚本的系统 Python。\n"
+                "请下载 deep-runtime 组件并解压到程序目录，或安装 Python 后重试。"
+            )
+        worker = _deep_worker_path()
+        if not os.path.isfile(worker):
+            raise DeepModeUnavailableError(
+                f"深度模式抓取脚本缺失：{worker}\n"
+                "安装包可能已损坏，请重新下载安装本程序。"
+            )
+        _ensure_playwright_browsers_path()
+        browsers_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+        cmd = list(python_cmd) + [worker]
+        launcher_name = " ".join(python_cmd)
+    cmd += [
         "--url", url,
         "--timeout", str(int(timeout)),
         "--wait-ms", str(int(wait_ms)),
-        "--browsers-path", os.environ["PLAYWRIGHT_BROWSERS_PATH"],
     ]
+    if browsers_path:
+        cmd += ["--browsers-path", browsers_path]
     total_timeout = int(timeout) + int(wait_ms) // 1000 + DEEP_SUBPROCESS_MARGIN_SEC
     stream_output = on_candidate is not None or stop_event is not None
     if stream_output:
@@ -909,7 +938,7 @@ def _deep_extract_subprocess(
         )
     except OSError as exc:
         raise DeepModeUnavailableError(
-            f"无法启动系统 Python（{' '.join(python_cmd)}）：{exc}"
+            f"无法启动深度提取进程（{launcher_name}）：{exc}"
         ) from exc
 
     if stream_output:

@@ -21,6 +21,26 @@ from m3u8_downloader.tasking import (
 )
 
 
+def test_batch_queue_move_preserves_selected_relative_order(tmp_path):
+    ids = iter(["one", "two", "three", "four"])
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=ids.__next__)
+    service.create_tasks(CreateTaskRequest(
+        addresses=(
+            "https://cdn.example/one.m3u8\n"
+            "https://cdn.example/two.m3u8\n"
+            "https://cdn.example/three.m3u8\n"
+            "https://cdn.example/four.m3u8"
+        ),
+        save_directory=str(tmp_path),
+    ))
+
+    service.move_tasks(["two", "three"], "back")
+    assert [task.id for task in service.list_tasks()] == ["one", "four", "two", "three"]
+
+    service.move_tasks(["two", "three"], "front")
+    assert [task.id for task in service.list_tasks()] == ["two", "three", "one", "four"]
+
+
 def test_user_can_create_and_restore_page_and_m3u8_tasks(tmp_path):
     """多行新建应去重、识别来源，并从数据库完整恢复父任务。"""
     repository = SQLiteTaskRepository(tmp_path / "tasks.db")

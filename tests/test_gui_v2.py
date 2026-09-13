@@ -4,10 +4,10 @@ from dataclasses import replace
 
 import pytest
 
-from PySide6.QtCore import QPoint, Qt, QTimer
+from PySide6.QtCore import QPoint, QItemSelectionModel, Qt, QTimer
 from PySide6.QtGui import QPalette, QTextCursor
 from PySide6.QtWidgets import (
-    QApplication, QAbstractItemView, QCheckBox, QLabel, QMessageBox,
+    QApplication, QAbstractItemView, QCheckBox, QDialog, QLabel, QMessageBox,
 )
 
 from m3u8_downloader.gui_v2 import MainWindow
@@ -19,6 +19,7 @@ from m3u8_downloader.tasking import (
     ItemStatus,
     SQLiteTaskRepository,
     TaskService,
+    TaskSettings,
 )
 
 
@@ -34,6 +35,254 @@ def test_main_window_first_size_fits_screen_and_uses_desktop_upper_bound(qtbot, 
         assert window.width() <= int(available.width() * 0.9)
     if available.height() >= 640:
         assert window.height() <= int(available.height() * 0.9)
+
+
+def test_navigation_shows_total_parent_task_counts_independent_of_filter(qtbot, tmp_path):
+    ids = iter(["waiting", "failed", "completed"])
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=ids.__next__)
+    waiting, failed, completed = service.create_tasks(CreateTaskRequest(
+        addresses=(
+            "https://site.example/waiting\n"
+            "https://site.example/failed\n"
+            "https://cdn.example/completed.m3u8"
+        ),
+        save_directory=str(tmp_path),
+    ))
+    service.fail_extraction(failed.id, "测试失败")
+    completed_item = service.list_items(completed.id)[0]
+    output = tmp_path / "completed.mp4"
+    output.write_bytes(b"done")
+    service.complete_item(completed.id, completed_item.id, output)
+    service.finish_parent_if_handled(completed.id)
+
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window._force_exit = True
+
+    assert window.downloading_button.countText() == "2"
+    assert window.completed_button.countText() == "1"
+    window.status_filter_combo.setCurrentIndex(window.status_filter_combo.findData("failed"))
+    window.search_edit.setText("不存在的任务")
+    assert window.task_list.count() == 0
+    assert window.downloading_button.countText() == "2"
+    assert window.completed_button.countText() == "1"
+
+
+def test_active_task_cards_keep_same_height_across_extraction_and_download_states(
+    qtbot, tmp_path,
+):
+    ids = iter(["waiting", "running", "failed", "downloading"])
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=ids.__next__)
+    waiting, running, failed, downloading = service.create_tasks(CreateTaskRequest(
+        addresses=(
+            "https://site.example/waiting\n"
+            "https://site.example/running\n"
+            "https://site.example/failed\n"
+            "https://cdn.example/downloading.m3u8"
+        ),
+        save_directory=str(tmp_path),
+    ))
+    service.start_extraction(running.id)
+    service.fail_extraction(failed.id, "测试失败")
+    service.start_item(downloading.id, service.list_items(downloading.id)[0].id)
+
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window._force_exit = True
+
+    heights = [window.task_list.item(row).sizeHint().height() for row in range(4)]
+    assert heights == [88, 88, 88, 88]
+
+
+def test_toolbar_reextracts_every_selected_failed_parent(qtbot, tmp_path):
+    ids = iter(["one", "two", "other"])
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=ids.__next__)
+    one, two, other = service.create_tasks(CreateTaskRequest(
+        addresses=(
+            "https://site.example/one\n"
+            "https://site.example/two\n"
+            "https://site.example/other"
+        ),
+        save_directory=str(tmp_path),
+    ))
+    service.fail_extraction(one.id, "失败一")
+    service.fail_extraction(two.id, "失败二")
+    service.fail_extraction(other.id, "失败三")
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+
+    window.task_list.item(0).setSelected(True)
+    window.task_list.item(1).setSelected(True)
+    window.task_list.setCurrentItem(
+        window.task_list.item(1), QItemSelectionModel.SelectionFlag.NoUpdate,
+    )
+    assert window.stop_extraction_button.text() == "重新提取"
+    qtbot.mouseClick(window.stop_extraction_button, Qt.MouseButton.LeftButton)
+
+    assert service.get_task(one.id).extraction_status is ExtractionStatus.WAITING
+    assert service.get_task(two.id).extraction_status is ExtractionStatus.WAITING
+    assert service.get_task(other.id).extraction_status is ExtractionStatus.FAILED
+
+
+def test_toolbar_pause_and_resume_apply_to_every_selected_parent(qtbot, tmp_path):
+    ids = iter(["one", "two", "other"])
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=ids.__next__)
+    one, two, other = service.create_tasks(CreateTaskRequest(
+        addresses=(
+            "https://cdn.example/one.m3u8\n"
+            "https://cdn.example/two.m3u8\n"
+            "https://cdn.example/other.m3u8"
+        ),
+        save_directory=str(tmp_path),
+    ))
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+    window.task_list.item(0).setSelected(True)
+    window.task_list.item(1).setSelected(True)
+    window.task_list.setCurrentItem(
+        window.task_list.item(1), QItemSelectionModel.SelectionFlag.NoUpdate,
+    )
+
+    qtbot.mouseClick(window.pause_task_button, Qt.MouseButton.LeftButton)
+    assert service.get_task(one.id).download_status is DownloadStatus.PAUSED
+    assert service.get_task(two.id).download_status is DownloadStatus.PAUSED
+    assert service.get_task(other.id).download_status is DownloadStatus.WAITING
+
+    qtbot.mouseClick(window.resume_task_button, Qt.MouseButton.LeftButton)
+    assert service.get_task(one.id).download_status is DownloadStatus.WAITING
+    assert service.get_task(two.id).download_status is DownloadStatus.WAITING
+
+
+def test_multi_selected_failed_tasks_offer_batch_reextract_settings_and_queue(
+    qtbot, tmp_path, monkeypatch,
+):
+    ids = iter(["one", "two"])
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=ids.__next__)
+    one, two = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/one\nhttps://site.example/two",
+        save_directory=str(tmp_path),
+    ))
+    service.fail_extraction(one.id, "失败一")
+    service.fail_extraction(two.id, "失败二")
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+    for row in range(2):
+        window.task_list.item(row).setSelected(True)
+
+    captured = {"labels": [], "callbacks": {}}
+
+    class MenuStub:
+        def __init__(self, *_args):
+            pass
+
+        def addSeparator(self):
+            pass
+
+        def addAction(self, label, callback=None):
+            captured["labels"].append(label)
+            if callback is not None:
+                captured["callbacks"][label] = callback
+
+        def addMenu(self, label):
+            captured["labels"].append(label)
+            return self
+
+        def exec(self, *_args):
+            pass
+
+    monkeypatch.setattr("m3u8_downloader.gui_v2.QMenu", MenuStub)
+    window._show_task_menu(
+        window.task_list, window.task_list.visualItemRect(window.task_list.item(0)).center(),
+    )
+
+    assert "重新提取" in captured["labels"]
+    assert "任务设置" in captured["labels"]
+    assert "调整队列" in captured["labels"]
+    captured["callbacks"]["重新提取"]()
+    assert service.get_task(one.id).extraction_status is ExtractionStatus.WAITING
+    assert service.get_task(two.id).extraction_status is ExtractionStatus.WAITING
+
+
+def test_batch_task_settings_apply_to_every_selected_parent(qtbot, tmp_path, monkeypatch):
+    ids = iter(["one", "two"])
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=ids.__next__)
+    one, two = service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/one\nhttps://site.example/two",
+        save_directory=str(tmp_path),
+    ))
+
+    class DialogStub:
+        def __init__(self, *_args):
+            pass
+
+        def setWindowTitle(self, _title):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def settings(self):
+            return TaskSettings(segment_threads=17, timeout_seconds=75)
+
+    monkeypatch.setattr("m3u8_downloader.gui_v2.TaskSettingsDialog", DialogStub)
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window._force_exit = True
+    window._edit_task_settings_batch([one, two], one)
+
+    assert service.get_task(one.id).settings.segment_threads == 17
+    assert service.get_task(two.id).settings.segment_threads == 17
+    assert service.get_task(one.id).settings.timeout_seconds == 75
+    assert service.get_task(two.id).settings.timeout_seconds == 75
+
+
+def test_multi_selected_completed_tasks_offer_batch_redownload_and_validation(
+    qtbot, tmp_path, monkeypatch,
+):
+    ids = iter(["one", "two"])
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=ids.__next__)
+    tasks = service.create_tasks(CreateTaskRequest(
+        addresses="https://cdn.example/one.m3u8\nhttps://cdn.example/two.m3u8",
+        save_directory=str(tmp_path),
+    ))
+    for task in tasks:
+        item = service.list_items(task.id)[0]
+        output = tmp_path / f"{task.id}.mp4"
+        output.write_bytes(b"done")
+        service.complete_item(task.id, item.id, output)
+        service.finish_parent_if_handled(task.id)
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+    window._switch_view(1)
+    for row in range(2):
+        window.completed_list.item(row).setSelected(True)
+    labels = []
+
+    class MenuStub:
+        def __init__(self, *_args): pass
+        def addSeparator(self): pass
+        def addAction(self, label, callback=None): labels.append(label)
+        def addMenu(self, label): labels.append(label); return self
+        def exec(self, *_args): pass
+
+    monkeypatch.setattr("m3u8_downloader.gui_v2.QMenu", MenuStub)
+    window._show_task_menu(
+        window.completed_list,
+        window.completed_list.visualItemRect(window.completed_list.item(0)).center(),
+    )
+
+    assert "重新下载" in labels
+    assert "校验并修复" in labels
+    assert "删除任务" in labels
+    assert "彻底删除文件" in labels
 
 
 def test_main_window_restores_the_last_user_size(qtbot, tmp_path):

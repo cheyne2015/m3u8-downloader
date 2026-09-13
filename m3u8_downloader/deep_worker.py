@@ -44,10 +44,6 @@ import time
 from typing import Callable, List, Optional, Tuple
 from urllib.parse import urljoin
 
-# 浏览器目录默认值：与 extractor._ensure_playwright_browsers_path() 保持一致，
-# 仅在环境变量与命令行参数都未指定时使用（setdefault 语义，不覆盖用户设置）。
-DEFAULT_BROWSERS_PATH = r"F:\gadgets\playwright-browsers"
-
 EXIT_OK = 0
 EXIT_NO_PLAYWRIGHT = 2
 EXIT_NO_BROWSER = 3
@@ -338,7 +334,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--browsers-path",
         default="",
-        help="playwright 浏览器目录（缺省时用环境变量，再缺省用 F:\\gadgets\\playwright-browsers）",
+        help="playwright 浏览器目录（缺省时使用环境变量或 Playwright 官方缓存目录）",
     )
     parser.add_argument(
         "--proxy",
@@ -368,10 +364,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         except Exception:
             pass
 
-    # setdefault 语义：命令行参数 > 已有环境变量 > 本机默认目录
+    # 命令行参数优先；都未设置时由 Playwright 使用官方默认缓存目录。
     if args.browsers_path:
-        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", args.browsers_path)
-    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", DEFAULT_BROWSERS_PATH)
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = args.browsers_path
 
     # 代理地址：命令行 --proxy > 环境变量 M3U8_DEEP_PROXY（父进程透传）；
     # 父进程在 no_proxy 时已不会设置该环境变量，故此处无需再判 no_proxy。

@@ -165,8 +165,8 @@ def test_deep_extraction_retries_twice_with_fresh_calls_before_succeeding(tmp_pa
     ).run_extraction(task.id)
 
     assert extractor.calls == 3
-    assert 2 <= waits[0] < 2.5
-    assert 5 <= waits[1] < 5.5
+    assert 3 <= waits[0] < 6
+    assert 8 <= waits[1] < 14
     assert finished.extraction_status is ExtractionStatus.COMPLETED
     messages = [entry.message for entry in service.list_logs(task_id=task.id)]
     assert any("第 1 次自动重试" in message for message in messages)

@@ -237,6 +237,29 @@ def _install_button_cursors(root: QWidget) -> None:
         )
 
 
+class NavigationButton(QPushButton):
+    """导航按钮右侧显示分类任务总数，按钮文字仍保留给无障碍接口。"""
+
+    def __init__(self, text: str, parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self._count_label = QLabel("0", self)
+        self._count_label.setObjectName("navCount")
+        self._count_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._count_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+    def setCount(self, count: int) -> None:
+        self._count_label.setText(str(max(0, int(count))))
+
+    def countText(self) -> str:
+        return self._count_label.text()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._count_label.setGeometry(max(0, self.width() - 52), 0, 38, self.height())
+
+
 class DeselectableListWidget(QListWidget):
     """空白点击或 Esc 取消主任务选择。"""
 
@@ -673,11 +696,9 @@ class MainWindow(QMainWindow):
         side.setContentsMargins(12, 18, 12, 14)
         brand = QLabel("M3U8 下载器")
         brand.setStyleSheet("font-size: 17px; font-weight: 700; padding: 8px;")
-        self.downloading_button = self._nav_button("↓  下载中", True)
-        self.completed_button = self._nav_button("✓  已完成")
+        self.downloading_button = self._nav_button("下载中", True, counted=True)
+        self.completed_button = self._nav_button("已完成", counted=True)
         self.settings_button = self._nav_button("⚙  设置")
-        self.downloading_button.setText("下载中")
-        self.completed_button.setText("已完成")
         self.settings_button.setText("设置")
         self.downloading_button.clicked.connect(lambda: self._switch_view(0))
         self.completed_button.clicked.connect(lambda: self._switch_view(1))
@@ -721,8 +742,10 @@ class MainWindow(QMainWindow):
         outer.addWidget(vertical, 1)
 
     @staticmethod
-    def _nav_button(text: str, checked: bool = False) -> QPushButton:
-        button = QPushButton(text)
+    def _nav_button(
+        text: str, checked: bool = False, *, counted: bool = False,
+    ) -> QPushButton:
+        button = NavigationButton(text) if counted else QPushButton(text)
         button.setCheckable(True)
         button.setChecked(checked)
         return button
@@ -1242,6 +1265,8 @@ class MainWindow(QMainWindow):
         active_tasks = [task for task in tasks if task.download_status is not DownloadStatus.COMPLETED]
         active_tasks.sort(key=lambda task: (task.queue_position, task.created_at, task.id))
         completed_tasks = [task for task in tasks if task.download_status is DownloadStatus.COMPLETED]
+        self.downloading_button.setCount(len(active_tasks))
+        self.completed_button.setCount(len(completed_tasks))
         completed_sort = self.completed_sort_combo.currentData()
         if completed_sort == "name":
             completed_tasks.sort(key=lambda task: task.name.casefold())
@@ -1336,11 +1361,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _task_card_height(task: Task, task_items: list) -> int:
-        if task_items:
-            return 88
-        if task.extraction_status in {ExtractionStatus.WAITING, ExtractionStatus.RUNNING}:
-            return 66
-        return 54
+        return 88
 
     def _reconcile_task_list(
         self,
@@ -1437,8 +1458,67 @@ class MainWindow(QMainWindow):
                 current if current is not None and current.isSelected() else selected[-1],
                 None,
             )
+            self._refresh_task_toolbar([
+                item.data(Qt.ItemDataRole.UserRole) for item in selected
+            ])
         else:
             self._clear_task_detail()
+
+    def _selected_active_tasks(self) -> list[Task]:
+        if self.pages.currentIndex() != 0:
+            return []
+        return [
+            item.data(Qt.ItemDataRole.UserRole) for item in self.task_list.selectedItems()
+        ]
+
+    def _refresh_task_toolbar(self, tasks: list[Task]) -> None:
+        can_pause = any(
+            task.extraction_status in {ExtractionStatus.WAITING, ExtractionStatus.RUNNING}
+            or task.download_status in {
+                DownloadStatus.WAITING, DownloadStatus.RUNNING,
+                DownloadStatus.MERGING, DownloadStatus.RETRY_WAIT,
+            }
+            for task in tasks
+        )
+        can_resume = any(
+            task.extraction_status is ExtractionStatus.PAUSED
+            or task.download_status is DownloadStatus.PAUSED
+            for task in tasks
+        )
+        active_extractions = [
+            task for task in tasks
+            if task.source_kind.value == "web_page"
+            and task.extraction_status in {ExtractionStatus.WAITING, ExtractionStatus.RUNNING}
+        ]
+        restartable = [
+            task for task in tasks
+            if task.source_kind.value == "web_page"
+            and task.download_status is not DownloadStatus.COMPLETED
+            and task.extraction_status in {
+                ExtractionStatus.PAUSED, ExtractionStatus.FAILED, ExtractionStatus.COMPLETED,
+            }
+        ]
+        _set_button_enabled(
+            self.pause_task_button, can_pause,
+            f"暂停选中的 {len(tasks)} 个任务" if can_pause else "所选任务没有可暂停的工作",
+        )
+        _set_button_enabled(
+            self.resume_task_button, can_resume,
+            f"继续选中的 {len(tasks)} 个任务" if can_resume else "所选任务没有已暂停的工作",
+        )
+        if active_extractions:
+            self.stop_extraction_button.setText("停止提取")
+            _set_button_enabled(
+                self.stop_extraction_button, True,
+                f"停止所选任务中 {len(active_extractions)} 个正在进行的网页提取",
+            )
+        else:
+            self.stop_extraction_button.setText("重新提取")
+            _set_button_enabled(
+                self.stop_extraction_button, bool(restartable),
+                f"重新提取所选的 {len(restartable)} 个网页任务"
+                if restartable else "所选任务不支持重新提取",
+            )
 
     def _clear_task_detail(self) -> None:
         self._detail_task_id = ""
@@ -1726,82 +1806,131 @@ class MainWindow(QMainWindow):
         self._show_feedback(f"已添加 {len(selected)} 个下载项")
 
     def _pause_current_task(self) -> None:
-        item = self.task_list.currentItem()
-        if item is None:
+        tasks = self._selected_active_tasks()
+        if not tasks:
             self._show_feedback("请先选择一个下载任务")
             return
-        task_id = item.data(Qt.ItemDataRole.UserRole).id
         controller = getattr(self, "background_controller", None)
-        if controller is None:
-            self._service.pause_task(task_id)
-        else:
-            controller.pause_task(task_id)
-        self._after_task_action(task_id, "任务已暂停")
+        affected = 0
+        for task in tasks:
+            if not (
+                task.extraction_status in {ExtractionStatus.WAITING, ExtractionStatus.RUNNING}
+                or task.download_status in {
+                    DownloadStatus.WAITING, DownloadStatus.RUNNING,
+                    DownloadStatus.MERGING, DownloadStatus.RETRY_WAIT,
+                }
+            ):
+                continue
+            (self._service.pause_task if controller is None else controller.pause_task)(task.id)
+            self._service.add_log(task.id, "信息", "任务", "任务已暂停")
+            affected += 1
+        self.refresh_tasks()
+        self._refresh_logs()
+        self._show_feedback(f"已暂停 {affected} 个任务")
 
     def _resume_current_task(self) -> None:
-        item = self.task_list.currentItem()
-        if item is None:
+        tasks = self._selected_active_tasks()
+        if not tasks:
             self._show_feedback("请先选择一个下载任务")
             return
-        task_id = item.data(Qt.ItemDataRole.UserRole).id
         controller = getattr(self, "background_controller", None)
-        if controller is None:
-            self._service.resume_task(task_id)
-        else:
-            controller.resume_task(task_id)
-        self._after_task_action(task_id, "任务已继续")
+        affected = 0
+        for task in tasks:
+            if not (
+                task.extraction_status is ExtractionStatus.PAUSED
+                or task.download_status is DownloadStatus.PAUSED
+            ):
+                continue
+            (self._service.resume_task if controller is None else controller.resume_task)(task.id)
+            self._service.add_log(task.id, "信息", "任务", "任务已继续")
+            affected += 1
+        self.refresh_tasks()
+        self._refresh_logs()
+        self._show_feedback(f"已继续 {affected} 个任务")
 
     def _toggle_current_extraction(self) -> None:
-        item = self.task_list.currentItem()
-        if item is None:
+        tasks = self._selected_active_tasks()
+        if not tasks:
             self._show_feedback("请先选择一个下载任务")
             return
-        task = self._service.get_task(item.data(Qt.ItemDataRole.UserRole).id)
-        if task.extraction_status in {ExtractionStatus.WAITING, ExtractionStatus.RUNNING}:
-            self._stop_current_extraction()
+        active = [
+            task for task in tasks
+            if task.source_kind.value == "web_page"
+            and task.extraction_status in {ExtractionStatus.WAITING, ExtractionStatus.RUNNING}
+        ]
+        if active:
+            self._stop_extractions(active)
         else:
-            self._restart_current_extraction(task.id)
+            restartable = [
+                task for task in tasks
+                if task.source_kind.value == "web_page"
+                and task.download_status is not DownloadStatus.COMPLETED
+                and task.extraction_status in {
+                    ExtractionStatus.PAUSED, ExtractionStatus.FAILED, ExtractionStatus.COMPLETED,
+                }
+            ]
+            self._restart_extractions(restartable)
 
     def _stop_current_extraction(self) -> None:
-        item = self.task_list.currentItem()
-        if item is None:
+        tasks = [
+            task for task in self._selected_active_tasks()
+            if task.extraction_status in {ExtractionStatus.WAITING, ExtractionStatus.RUNNING}
+        ]
+        if not tasks:
             self._show_feedback("请先选择一个下载任务")
             return
-        task_id = item.data(Qt.ItemDataRole.UserRole).id
+        self._stop_extractions(tasks)
+
+    def _stop_extractions(self, tasks: list[Task]) -> None:
         controller = getattr(self, "background_controller", None)
-        if controller is None:
-            self._service.stop_extraction(task_id)
-        else:
-            controller.stop_extraction(task_id)
-        self._service.add_log(task_id, "信息", "提取", "用户停止提取，已应用当前候选")
+        for task in tasks:
+            (self._service.stop_extraction if controller is None else controller.stop_extraction)(
+                task.id
+            )
+            self._service.add_log(
+                task.id, "信息", "提取", "用户停止提取，已应用当前候选"
+            )
         self.refresh_tasks()
-        self._refresh_logs(task_id)
-        self._show_feedback("提取已停止，可随时重新提取")
+        self._refresh_logs()
+        self._show_feedback(f"已停止 {len(tasks)} 个网页提取，可随时重新提取")
 
     def _restart_current_extraction(self, task_id: str) -> None:
+        self._restart_extractions([self._service.get_task(task_id)])
+
+    def _restart_extractions(self, tasks: list[Task]) -> None:
+        if not tasks:
+            self._show_feedback("所选任务不支持重新提取")
+            return
         self.stop_extraction_button.setText("正在启动…")
         _set_button_enabled(self.stop_extraction_button, False)
         controller = getattr(self, "background_controller", None)
-        if controller is None:
-            self._service.retry_extraction(task_id)
-            started = True
-        else:
-            started = controller.retry_extraction(task_id)
-        if not started:
-            self.stop_extraction_button.setText("等待重新提取…")
-            _set_button_enabled(self.stop_extraction_button, False)
-            self._service.add_log(
-                task_id, "信息", "提取", "正在等待旧提取线程结束，随后自动重新提取"
-            )
-            self._refresh_logs(task_id)
-            self._show_feedback("正在结束旧提取，随后自动重新开始")
-            return
-        self._pending_item_checks.pop(task_id, None)
-        self._service.add_log(task_id, "信息", "提取", "用户重新开始网页提取")
+        delayed = 0
+        for task in tasks:
+            if controller is None:
+                self._service.retry_extraction(task.id)
+                started = True
+            else:
+                started = controller.retry_extraction(task.id)
+            if not started:
+                delayed += 1
+                self._service.add_log(
+                    task.id, "信息", "提取", "正在等待旧提取线程结束，随后自动重新提取"
+                )
+            else:
+                self._pending_item_checks.pop(task.id, None)
+                self._service.add_log(task.id, "信息", "提取", "用户重新开始网页提取")
         self.refresh_tasks()
-        self._show_task_by_id(task_id)
-        self._refresh_logs(task_id)
-        self._show_feedback("网页提取已重新开始")
+        self._refresh_logs()
+        if delayed:
+            self._service.add_log(
+                tasks[-1].id, "信息", "提取",
+                f"{delayed} 个任务正在等待旧提取线程结束",
+            )
+        self._show_feedback(
+            f"已重新开始 {len(tasks)} 个网页提取"
+            if not delayed else
+            f"已提交 {len(tasks)} 个网页提取，其中 {delayed} 个正在等待旧线程结束"
+        )
 
     def _refresh_logs(self, task_id: str | None = None) -> None:
         selected_task_id = task_id or getattr(self, "_detail_task_id", "")
@@ -1996,6 +2125,79 @@ class MainWindow(QMainWindow):
             for selected in task_list.selectedItems()
         ]
         menu = QMenu(self)
+        if len(selected_tasks) > 1 and all(
+            selected.download_status is not DownloadStatus.COMPLETED
+            for selected in selected_tasks
+        ):
+            pausable = [
+                selected for selected in selected_tasks
+                if selected.extraction_status in {
+                    ExtractionStatus.WAITING, ExtractionStatus.RUNNING,
+                }
+                or selected.download_status in {
+                    DownloadStatus.WAITING, DownloadStatus.RUNNING,
+                    DownloadStatus.MERGING, DownloadStatus.RETRY_WAIT,
+                }
+            ]
+            resumable = [
+                selected for selected in selected_tasks
+                if selected.extraction_status is ExtractionStatus.PAUSED
+                or selected.download_status is DownloadStatus.PAUSED
+            ]
+            extracting = [
+                selected for selected in selected_tasks
+                if selected.source_kind.value == "web_page"
+                and selected.extraction_status in {
+                    ExtractionStatus.WAITING, ExtractionStatus.RUNNING,
+                }
+            ]
+            restartable = [
+                selected for selected in selected_tasks
+                if selected.source_kind.value == "web_page"
+                and selected.extraction_status in {
+                    ExtractionStatus.PAUSED, ExtractionStatus.FAILED,
+                    ExtractionStatus.COMPLETED,
+                }
+            ]
+            retryable = [
+                selected for selected in selected_tasks
+                if selected.download_status is DownloadStatus.PARTIAL_FAILURE
+            ]
+            if pausable:
+                menu.addAction("暂停", self._pause_current_task)
+            if resumable:
+                menu.addAction("继续", self._resume_current_task)
+            if extracting:
+                menu.addAction("停止提取", lambda: self._stop_extractions(extracting))
+            if restartable:
+                menu.addAction("重新提取", lambda: self._restart_extractions(restartable))
+            if retryable:
+                menu.addAction(
+                    "重试失败项",
+                    lambda: self._retry_failed_tasks(retryable),
+                )
+            menu.addAction(
+                "任务设置", lambda: self._edit_task_settings_batch(selected_tasks, task)
+            )
+            queue_menu = menu.addMenu("调整队列")
+            queue_menu.addAction(
+                "优先下载 / 移到最前",
+                lambda: self._move_tasks(selected_tasks, "front"),
+            )
+            queue_menu.addAction("上移", lambda: self._move_tasks(selected_tasks, "up"))
+            queue_menu.addAction("下移", lambda: self._move_tasks(selected_tasks, "down"))
+            queue_menu.addAction(
+                "移到最后", lambda: self._move_tasks(selected_tasks, "back")
+            )
+            menu.addSeparator()
+        elif len(selected_tasks) > 1:
+            menu.addAction(
+                "重新下载", lambda: self._redownload_tasks(selected_tasks)
+            )
+            menu.addAction(
+                "校验并修复", lambda: self._validate_and_repair_tasks(selected_tasks)
+            )
+            menu.addSeparator()
         if len(selected_tasks) == 1 and task.download_status is not DownloadStatus.COMPLETED:
             menu.addAction("继续", self._resume_current_task)
             menu.addAction("暂停", self._pause_current_task)
@@ -2051,6 +2253,56 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._service.update_task_settings(task.id, dialog.settings())
             self._after_task_action(task.id, "任务设置已保存")
+
+    def _edit_task_settings_batch(self, tasks: list[Task], template: Task) -> None:
+        dialog = TaskSettingsDialog(template, self)
+        dialog.setWindowTitle(f"批量任务设置（{len(tasks)} 个任务）")
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        settings = dialog.settings()
+        for task in tasks:
+            task_settings = settings
+            if hasattr(dialog, "cookie") and not dialog.cookie.text():
+                task_settings = replace(
+                    settings, protected_cookie=task.settings.protected_cookie,
+                )
+            self._service.update_task_settings(task.id, task_settings)
+            self._service.add_log(task.id, "信息", "任务", "批量任务设置已保存")
+        self.refresh_tasks()
+        self._refresh_logs()
+        self._show_feedback(f"已更新 {len(tasks)} 个任务的设置")
+
+    def _move_tasks(self, tasks: list[Task], direction: str) -> None:
+        self._service.move_tasks([task.id for task in tasks], direction)
+        self.refresh_tasks()
+        self._show_feedback(f"已调整 {len(tasks)} 个任务的队列位置")
+
+    def _retry_failed_tasks(self, tasks: list[Task]) -> None:
+        for task in tasks:
+            self._service.retry_failed_items(task.id)
+            self._service.add_log(task.id, "信息", "任务", "失败项已重新加入队列")
+        self.refresh_tasks()
+        self._refresh_logs()
+        self._show_feedback(f"已重试 {len(tasks)} 个任务的失败项")
+
+    def _validate_and_repair_tasks(self, tasks: list[Task]) -> None:
+        started = 0
+        controller = getattr(self, "background_controller", None)
+        if controller is None:
+            self._show_feedback("后台下载服务尚未启动")
+            return
+        for task in tasks:
+            targets = [
+                item.id for item in self._service.list_items(task.id)
+                if item.status.value == "completed" and item.output_path
+            ]
+            if targets and controller.repair_task(task.id, targets):
+                self._service.add_log(
+                    task.id, "信息", "修复", f"开始校验 {len(targets)} 个已完成文件",
+                )
+                started += 1
+        self._refresh_logs()
+        self._show_feedback(f"已开始校验 {started} 个任务")
 
     def _show_item_menu(self, position) -> None:
         row = self.item_table.rowAt(position.y())
@@ -2194,6 +2446,13 @@ class MainWindow(QMainWindow):
         copied = self._service.redownload_task(task_id)
         self._after_task_action(copied.id, "已创建重新下载任务")
         self._switch_view(0)
+
+    def _redownload_tasks(self, tasks: list[Task]) -> None:
+        copies = [self._service.redownload_task(task.id) for task in tasks]
+        for copied in copies:
+            self._service.add_log(copied.id, "信息", "任务", "已创建重新下载任务")
+        self._switch_view(0)
+        self._show_feedback(f"已创建 {len(copies)} 个重新下载任务")
 
     def _rename_item_file(self, task_id: str, item) -> None:
         current_name = Path(item.output_path).stem if item.output_path else item.label

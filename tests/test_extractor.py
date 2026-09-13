@@ -215,10 +215,10 @@ def test_is_deep_mode_available_returns_bool():
 
 # ===== _ensure_playwright_browsers_path =====
 def test_ensure_playwright_browsers_path(monkeypatch):
-    # 用户未设置时，应被设为默认浏览器目录
+    # 用户未设置时，交给 Playwright 使用官方默认缓存目录
     monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
     extractor._ensure_playwright_browsers_path()
-    assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == r"F:\gadgets\playwright-browsers"
+    assert "PLAYWRIGHT_BROWSERS_PATH" not in os.environ
 
 
 def test_ensure_playwright_browsers_path_respects_existing(monkeypatch):

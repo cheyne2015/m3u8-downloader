@@ -1,18 +1,26 @@
-# M3U8 下载器
+<p align="center">
+  <img src="m3u8_downloader/assets/m3u8-downloader.png" width="96" alt="M3U8 下载器图标">
+</p>
 
-面向 Windows 的图形化网页视频与 M3U8 下载工具。程序使用 PySide6 构建任务界面，把一个网页或一条 M3U8 直链作为父任务管理，并把网页中提取到的每条 M3U8 作为独立下载项处理。
+<h1 align="center">M3U8 下载器</h1>
 
-它适合需要批量提取网页视频、选择清晰度、稳定续传以及长期管理下载记录的场景。
+<p align="center">面向 Windows 的网页视频提取、M3U8 下载与任务管理工具。</p>
+
+![M3U8 下载器主界面](docs/images/main-window.png)
+
+程序把一个网页或一条 M3U8 直链作为父任务管理，并把网页中提取到的每条 M3U8 作为独立下载项处理。适合批量提取网页视频、选择清晰度、稳定续传以及长期管理下载记录。
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/cheyne2015/m3u8-downloader/releases/latest) 下载 Windows x64 压缩包，解压后运行：
+从 [GitHub Releases](https://github.com/cheyne2015/m3u8-downloader/releases/latest) 下载 `m3u8-downloader-版本号-windows-x64.zip`，解压后运行：
 
 ```text
 m3u8-downloader\m3u8-dl.exe
 ```
 
 发布版是文件夹程序，`_internal` 中包含 Qt 运行库、程序资源和 ffmpeg。请保留整个文件夹，不要只复制 EXE。
+
+直接 M3U8 下载和普通网页提取不要求用户安装 Python、Qt 或 ffmpeg。需要深度网页提取时，再下载一次 [深度提取组件 1.0.0](https://github.com/cheyne2015/m3u8-downloader/releases/download/v2.0.1/m3u8-downloader-deep-runtime-1.0.0-windows-x64.zip)，把两个压缩包解压到同一位置。以后更新程序时只需替换程序压缩包。
 
 ## 主要功能
 
@@ -24,7 +32,8 @@ m3u8-downloader\m3u8-dl.exe
 - M3U8 分片并发、AES-128 解密、断点续传、HTTP Range 和失败重试。
 - 优先使用发布包内的 ffmpeg 合并为 MP4。
 - 下载中、已完成、任务详情、搜索、状态筛选和完整右键菜单。
-- 主任务支持多选和批量删除；右击任一已选任务会保留整组选中状态。
+- 主任务支持多选；暂停、继续、重新提取、任务设置、队列调整、重新下载、校验和删除均可批量执行。
+- “下载中”和“已完成”右侧显示各自的父任务总数，不受搜索和状态筛选影响。
 - 下载项支持双击打开文件，并记住用户调整后的各列宽度。
 - 深色、浅色和跟随 Windows 三种主题。
 - SQLite 持久化任务、下载项、队列顺序、设置和日志。
@@ -80,7 +89,7 @@ M3U8 直链会直接进入下载队列；网页链接会先进入提取队列。
 | 任务级自动重试 | 1 | 0～5 |
 | 任务重试等待 | 30 秒 | 1～3600 秒 |
 
-父任务并发、网页提取并发和分片线程相互独立。任务级重试等待、待选择和暂停任务不会占用下载槽位。
+父任务并发、网页提取并发和分片线程相互独立。不同网站可以并发提取，同一网站的网页按队列串行提取，减少网站限流和动态接口相互干扰。失败后的两次自动重试会错开时间并重新创建独立提取环境。任务级重试等待、待选择和暂停任务不会占用下载槽位。
 
 下载过程中会显示总体进度、当前速度、已下载大小、总大小和剩余时间。磁盘空间不足时，程序会阻止新任务启动或安全暂停当前任务。
 
@@ -97,14 +106,34 @@ M3U8 直链会直接进入下载队列；网页链接会先进入提取队列。
 
 普通解析会扫描 HTML、媒体标签和页面脚本。SPA 或运行时生成地址的网站需要 Playwright 浏览器监听网络请求。
 
-当前发布包为了控制体积，不内置 Playwright 和 Chromium。需要深度提取的电脑请安装 Python 3.13，然后执行：
+程序包不内置 Playwright 和 Chromium，因此每次更新仍能保持较小体积。第一次使用深度提取时：
+
+1. 下载程序压缩包。
+2. 再下载一次 [深度提取组件 1.0.0](https://github.com/cheyne2015/m3u8-downloader/releases/download/v2.0.1/m3u8-downloader-deep-runtime-1.0.0-windows-x64.zip)。
+3. 把两个压缩包解压到同一位置，确认 `deep-runtime` 与 `m3u8-dl.exe` 同级。
+
+```text
+m3u8-downloader\
+├── m3u8-dl.exe
+├── README.md
+├── _internal\
+└── deep-runtime\
+    ├── deep-worker.exe
+    ├── runtime.json
+    ├── playwright\
+    └── browsers\
+```
+
+深度提取组件包含独立运行环境和 Chromium 无界面内核，不要求安装系统 Python。程序会校验组件协议版本，并优先使用该组件。
+
+源码开发者也可以不下载组件，改用系统 Python：
 
 ```powershell
 py -3.13 -m pip install playwright
 py -3.13 -m playwright install chromium
 ```
 
-程序会自动调用系统 Python 执行发布包内的 `deep_worker.py`。不可用时，界面会区分缺少 Python、Playwright 或浏览器内核，并在智能模式下尝试普通解析。
+外置组件不可用时，程序仍会尝试系统 Python 路线；智能模式还会继续尝试普通解析。
 
 ## 数据目录
 
@@ -150,7 +179,7 @@ py -3.13 -m playwright install chromium
 py -3.13 -m pytest -q
 ```
 
-当前版本发布前验证结果为 `657 passed`，覆盖任务服务、SQLite、调度、网页提取、下载与续传、文件处理、Windows 集成和 PySide6 界面交互。
+当前版本发布前验证覆盖任务服务、SQLite、调度、网页提取、下载与续传、文件处理、Windows 集成和 PySide6 界面交互。
 
 ## 打包 Windows 程序
 
@@ -168,13 +197,21 @@ dist\m3u8-downloader\m3u8-dl.exe
 
 构建配置会收集 PySide6、ffmpeg、深度提取脚本和应用图标。发布前应从最终目录启动 EXE，并验证 SQLite 初始化、ffmpeg、Playwright 浏览器和实际网页提取。
 
+深度提取组件只在 Playwright、Chromium 或组件协议变化时重新构建：
+
+```powershell
+$env:M3U8_PLAYWRIGHT_BROWSERS_PATH = "浏览器目录"
+py -3.13 -m PyInstaller build-deep-runtime.spec --clean --noconfirm
+```
+
 分发 ZIP 解压后只应生成一个程序文件夹，README 放在程序文件夹内部：
 
 ```text
 m3u8-downloader\
 ├── m3u8-dl.exe
 ├── README.md
-└── _internal\
+├── _internal\
+└── deep-runtime\                 # 可选，一次下载后长期复用
 ```
 
 `m3u8-dl.exe` 必须与 `_internal` 保持上述相对位置，不能只复制 EXE 单独运行。

@@ -830,6 +830,10 @@ class TaskService:
         return task
 
     def move_task(self, task_id: str, direction: str) -> List[Task]:
+        return self.move_tasks([task_id], direction)
+
+    def move_tasks(self, task_ids: List[str], direction: str) -> List[Task]:
+        """批量调整未完成父任务，并保持所选任务之间原有的相对顺序。"""
         all_tasks = self._repository.list_tasks()
         completed = [
             task for task in all_tasks
@@ -839,21 +843,29 @@ class TaskService:
             task for task in all_tasks
             if task.download_status is not DownloadStatus.COMPLETED
         ]
-        index = next((i for i, task in enumerate(tasks) if task.id == task_id), None)
-        if index is None:
-            raise KeyError(task_id)
-        task = tasks.pop(index)
+        selected_ids = set(task_ids)
+        if not selected_ids:
+            return all_tasks
+        existing_ids = {task.id for task in tasks}
+        missing = selected_ids - existing_ids
+        if missing:
+            raise KeyError(next(iter(missing)))
+        selected = [task for task in tasks if task.id in selected_ids]
+        remaining = [task for task in tasks if task.id not in selected_ids]
         if direction == "front":
-            target = 0
+            tasks = selected + remaining
         elif direction == "back":
-            target = len(tasks)
+            tasks = remaining + selected
         elif direction == "up":
-            target = max(0, index - 1)
+            for index in range(1, len(tasks)):
+                if tasks[index].id in selected_ids and tasks[index - 1].id not in selected_ids:
+                    tasks[index - 1], tasks[index] = tasks[index], tasks[index - 1]
         elif direction == "down":
-            target = min(len(tasks), index + 1)
+            for index in range(len(tasks) - 2, -1, -1):
+                if tasks[index].id in selected_ids and tasks[index + 1].id not in selected_ids:
+                    tasks[index], tasks[index + 1] = tasks[index + 1], tasks[index]
         else:
             raise ValueError("未知队列移动方式")
-        tasks.insert(target, task)
         now = self._clock()
         reordered = tasks + completed
         reordered = [

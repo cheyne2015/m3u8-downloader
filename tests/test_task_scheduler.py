@@ -20,9 +20,9 @@ def test_download_and_extraction_use_separate_fifo_capacity(tmp_path):
     ]).__next__)
     tasks = service.create_tasks(CreateTaskRequest(
         addresses="\n".join([
-            "https://site.example/active",
-            "https://site.example/both",
-            "https://site.example/wait",
+            "https://active.example/active",
+            "https://both.example/both",
+            "https://wait.example/wait",
             "https://cdn.example/active.m3u8",
             "https://cdn.example/1.m3u8",
             "https://cdn.example/2.m3u8",
@@ -46,6 +46,29 @@ def test_download_and_extraction_use_separate_fifo_capacity(tmp_path):
 
     assert plan.start_extraction == ("extract-wait",)
     assert plan.start_download == ("both", "download-wait-1")
+
+
+def test_same_website_extractions_run_serially_while_other_sites_use_capacity(tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    service = TaskService(repository, id_factory=iter([
+        "same-running", "same-waiting", "other-waiting",
+    ]).__next__)
+    tasks = service.create_tasks(CreateTaskRequest(
+        addresses="\n".join([
+            "https://video.example/watch/1",
+            "https://video.example/watch/2",
+            "https://another.example/watch/3",
+        ]),
+        save_directory=str(tmp_path),
+    ))
+    first_plan = TaskScheduler().plan(tasks, download_limit=3, extraction_limit=3)
+    assert first_plan.start_extraction == ("same-running", "other-waiting")
+
+    tasks = [replace(tasks[0], extraction_status=ExtractionStatus.RUNNING), *tasks[1:]]
+
+    plan = TaskScheduler().plan(tasks, download_limit=3, extraction_limit=3)
+
+    assert plan.start_extraction == ("other-waiting",)
 
 
 def test_move_to_front_persists_and_changes_next_waiting_task(tmp_path):

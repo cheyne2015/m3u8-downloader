@@ -31,8 +31,9 @@ class TaskCoordinator:
 
     @staticmethod
     def _retry_delay(task_id: str, retry_number: int) -> float:
-        base = (2.0, 5.0)[retry_number - 1]
-        jitter = zlib.crc32(f"{task_id}:{retry_number}".encode("utf-8")) % 500
+        base = (3.0, 8.0)[retry_number - 1]
+        spread_ms = (3000, 6000)[retry_number - 1]
+        jitter = zlib.crc32(f"{task_id}:{retry_number}".encode("utf-8")) % spread_ms
         return base + jitter / 1000.0
 
     def run_extraction(self, task_id: str, stop_event=None):

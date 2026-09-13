@@ -175,15 +175,73 @@ def test_deep_worker_path_frozen_mode(monkeypatch, tmp_path):
     assert extractor._deep_worker_available() is True
 
 
+def test_frozen_app_prefers_compatible_bundled_deep_runtime(monkeypatch, tmp_path):
+    runtime = tmp_path / "deep-runtime"
+    browsers = runtime / "browsers" / "chromium_headless_shell-1234"
+    browsers.mkdir(parents=True)
+    worker = runtime / "deep-worker.exe"
+    worker.write_bytes(b"worker")
+    (runtime / "runtime.json").write_text(json.dumps({
+        "runtime_version": "1.0.0",
+        "protocol_version": extractor.DEEP_RUNTIME_PROTOCOL_VERSION,
+        "playwright_version": "1.62.0",
+        "chromium_revision": "1234",
+    }), encoding="utf-8")
+    monkeypatch.setattr(extractor.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(extractor.sys, "executable", str(tmp_path / "m3u8-dl.exe"))
+
+    assert extractor._bundled_deep_runtime() == (str(worker), str(runtime / "browsers"))
+    assert extractor._deep_worker_available() is True
+
+
+def test_bundled_deep_runtime_rejects_incompatible_protocol(monkeypatch, tmp_path):
+    runtime = tmp_path / "deep-runtime"
+    (runtime / "browsers" / "chromium_headless_shell-1234").mkdir(parents=True)
+    (runtime / "deep-worker.exe").write_bytes(b"worker")
+    (runtime / "runtime.json").write_text(json.dumps({
+        "runtime_version": "1.0.0", "protocol_version": 999,
+    }), encoding="utf-8")
+    monkeypatch.setattr(extractor.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(extractor.sys, "executable", str(tmp_path / "m3u8-dl.exe"))
+
+    assert extractor._bundled_deep_runtime() is None
+
+
+def test_deep_subprocess_uses_bundled_worker_without_system_python(
+    force_subprocess, monkeypatch,
+):
+    captured = {}
+    monkeypatch.setattr(
+        extractor, "_bundled_deep_runtime",
+        lambda: (r"C:\app\deep-runtime\deep-worker.exe", r"C:\app\deep-runtime\browsers"),
+    )
+    monkeypatch.setattr(extractor, "_find_system_python", lambda: None)
+
+    def fake_popen(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        return _fake_proc(0, json.dumps({"urls": [], "title": ""}))
+
+    monkeypatch.setattr(extractor.subprocess, "Popen", fake_popen)
+
+    extractor._deep_extract_subprocess(PAGE_URL)
+
+    assert captured["cmd"][0] == r"C:\app\deep-runtime\deep-worker.exe"
+    assert "deep_worker.py" not in captured["cmd"]
+    browser_index = captured["cmd"].index("--browsers-path")
+    assert captured["cmd"][browser_index + 1] == r"C:\app\deep-runtime\browsers"
+
+
 # ===== 4. 子进程路线：错误分支 =====
-def test_deep_extract_no_python_raises(force_subprocess, monkeypatch):
+def test_deep_extract_without_runtime_or_python_explains_both_install_routes(
+    force_subprocess, monkeypatch,
+):
     """找不到系统 Python 解释器 → 报错且提示中含 Python."""
     monkeypatch.setattr(extractor, "_find_system_python", lambda: None)
     with pytest.raises(DeepModeUnavailableError) as excinfo:
         extractor._deep_extract(PAGE_URL)
     message = str(excinfo.value)
     assert "Python" in message
-    assert "py" in message or "python" in message
+    assert "deep-runtime" in message
 
 
 def test_deep_extract_missing_worker_raises(force_subprocess, monkeypatch):
