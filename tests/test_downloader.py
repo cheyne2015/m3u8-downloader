@@ -271,6 +271,53 @@ def test_cancellation_interrupts_retry_backoff(tmp_path):
         )
 
 
+def test_permanent_tls_certificate_failure_is_not_retried_or_hidden(tmp_path):
+    session = FakeSession([
+        requests.exceptions.SSLError(
+            "certificate verify failed: certificate has expired"
+        ),
+    ])
+
+    with pytest.raises(requests.exceptions.SSLError, match="certificate has expired"):
+        _download_with_retry(
+            session,
+            "https://expired.example/seg.m4s",
+            str(tmp_path / "seg.m4s"),
+            max_retries=3,
+            retry_delay=0,
+        )
+
+    assert len(session.calls) == 1
+
+
+def test_segment_batch_stops_early_on_permanent_tls_failure(tmp_path):
+    downloader = M3U8Downloader(
+        "https://cdn.example/index.m3u8",
+        str(tmp_path / "video.mp4"),
+        workers=1,
+    )
+    downloader._tmp_dir = str(tmp_path / "segments")
+    calls = []
+
+    def fail_permanently(segment, _path):
+        calls.append(segment.url)
+        time.sleep(0.02)
+        raise requests.exceptions.SSLError(
+            "certificate verify failed: certificate has expired"
+        )
+
+    downloader._download_one_segment = fail_permanently
+    playlist = M3U8Playlist(segments=[
+        M3U8Segment(f"https://expired.example/{index}.m4s")
+        for index in range(20)
+    ])
+
+    with pytest.raises(RuntimeError, match="certificate has expired"):
+        downloader._download_segments(playlist)
+
+    assert len(calls) <= 2
+
+
 def test_playlist_and_key_requests_retry_transient_failures(tmp_path, monkeypatch):
     playlist_response = FakeResponse([b"#EXTM3U\n#EXTINF:1,\na.ts\n"])
     key_response = FakeResponse([b"0123456789abcdef"])

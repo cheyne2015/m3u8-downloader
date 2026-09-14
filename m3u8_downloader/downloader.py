@@ -97,6 +97,15 @@ _CACHE_JOB_LOCKS: dict[str, _CacheJobLock] = {}
 _CACHE_JOB_LOCKS_GUARD = threading.Lock()
 
 
+def active_cache_job_paths() -> set[str]:
+    """返回当前正在下载或仍在排空网络线程的缓存目录。"""
+    with _CACHE_JOB_LOCKS_GUARD:
+        return {
+            path for path, entry in _CACHE_JOB_LOCKS.items()
+            if entry.users > 0
+        }
+
+
 class DownloadCancelled(RuntimeError):
     """下载被调用方主动停止。"""
 
@@ -112,6 +121,24 @@ class PlaylistFetchError(RuntimeError):
             f"HTTP {status_code}" if status_code is not None else "未知错误"
         )
         super().__init__(f"获取 m3u8 文件失败 ({url}): {detail}")
+
+
+def _is_permanent_request_error(error: Exception) -> bool:
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if (
+        status_code is not None
+        and 400 <= status_code < 500
+        and status_code not in {408, 429}
+    ):
+        return True
+    return (
+        isinstance(error, requests.exceptions.SSLError)
+        and any(token in str(error).casefold() for token in (
+            "certificate verify failed", "certificate has expired",
+            "证书已过期", "证书验证失败",
+        ))
+    )
 
 
 def _wait_before_retry(
@@ -204,6 +231,7 @@ def _download_with_retry(
     os.makedirs(output_dir, exist_ok=True)
     part_path = output_path + ".part"
     attempts = max(0, int(max_retries)) + 1
+    last_error: requests.RequestException | None = None
 
     for attempt in range(attempts):
         if stop_event is not None and stop_event.is_set():
@@ -290,8 +318,11 @@ def _download_with_retry(
         except DownloadCancelled:
             raise
         except requests.RequestException as e:
+            last_error = e
             if stop_event is not None and stop_event.is_set():
                 raise DownloadCancelled("用户停止") from e
+            if _is_permanent_request_error(e):
+                raise
             if attempt < attempts - 1:
                 delay = retry_delay * (backoff_factor ** attempt)
                 _wait_before_retry(delay, stop_event)
@@ -304,7 +335,9 @@ def _download_with_retry(
                 except Exception:
                     pass
 
-    # 所有重试都失败
+    # 所有重试都失败；保留具体网络原因供日志和备用候选判断使用。
+    if last_error is not None:
+        raise last_error
     return False, 0
 
 
@@ -833,6 +866,12 @@ class M3U8Downloader:
                     except Exception as e:
                         fail_count += 1
                         self._log(f"片段 {seg_path} 下载异常: {e}")
+                        if _is_permanent_request_error(e):
+                            for pending in pending_futures:
+                                pending.cancel()
+                            raise RuntimeError(
+                                f"媒体片段无法访问：{e}"
+                            ) from e
 
                     progress.update(1)
                     completed = success_count + fail_count

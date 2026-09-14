@@ -19,6 +19,8 @@ PathFinder 无法接管），因此 :func:`m3u8_downloader.extractor._deep_extra
 * 成功：stdout 输出单行 ``{"urls": [...], "title": "..."}``，退出码 ``0``；
 * ``--stream``：发现链接时先输出 ``{"event": "candidate", "url": "..."}``，
   每行立即刷新，最后仍输出完整结果；默认协议不变。
+* ``--server``：启动一次 Chromium，通过 stdin/stdout 的逐行 JSON 协议处理多个
+  请求；每个请求使用独立浏览器环境，事件均带 ``request_id``。
 * 失败：原因写到 stderr，退出码非 0：
 
   * ``2`` —— 缺少 playwright（``ModuleNotFoundError``）；
@@ -36,6 +38,7 @@ PathFinder 无法接管），因此 :func:`m3u8_downloader.extractor._deep_extra
 """
 
 import argparse
+import asyncio
 import json
 import os
 import re
@@ -58,6 +61,13 @@ _SEGMENT_EXTS = frozenset({".ts", ".mp4", ".m4s", ".m4a", ".aac", ".webm"})
 _SETTLE_MS = 2500
 # 至少收集的毫秒数（避免页面刚打开时的瞬间早期请求造成过早停等）
 _MIN_COLLECT_MS = 800
+_PAGES_PER_BROWSER = 3
+
+
+def required_browser_count(active_pages: int) -> int:
+    """按每三个活动网页一套 Chromium 计算所需浏览器数量。"""
+    pages = max(0, int(active_pages or 0))
+    return 0 if pages == 0 else (pages + _PAGES_PER_BROWSER - 1) // _PAGES_PER_BROWSER
 
 
 # ===== 判定逻辑（优先复用 extractor，回退内联副本） =====
@@ -325,7 +335,12 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="deep_worker.py",
         description="深度模式子进程：用 playwright 抓取页面中的 m3u8 链接（JSON 输出）",
     )
-    parser.add_argument("--url", required=True, help="待抓取的页面 URL")
+    parser.add_argument("--url", help="待抓取的页面 URL；常驻服务模式不需要")
+    parser.add_argument("--server", action="store_true", help="以常驻深度提取服务运行")
+    parser.add_argument(
+        "--max-pages", type=int, default=6,
+        help="常驻服务最多同时打开的页面数（默认 6）",
+    )
     parser.add_argument("--stream", action="store_true", help="逐行输出候选事件，最后输出完整结果")
     parser.add_argument("--timeout", type=int, default=30, help="导航超时秒数（默认 30）")
     parser.add_argument(
@@ -344,6 +359,248 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+async def _safe_abort_async(route) -> None:
+    """异步服务版资源拦截，规则与单次提取保持一致。"""
+    try:
+        resource_type = (route.request.resource_type or "").lower()
+        url_lower = (route.request.url or "").lower()
+    except Exception:
+        resource_type, url_lower = "", ""
+    should_abort = resource_type in ("image", "font", "stylesheet") or (
+        resource_type == "media" and any(url_lower.endswith(ext) for ext in _SEGMENT_EXTS)
+    )
+    try:
+        if should_abort:
+            await route.abort()
+        else:
+            await route.continue_()
+    except Exception:
+        pass
+
+
+async def _collect_urls_async(
+    browser, url: str, timeout: int, wait_ms: int, proxy: str,
+    on_candidate: Callable[[str], None], on_title: Callable[[str], None],
+) -> Tuple[List[str], str]:
+    """在共享浏览器的独立 context 中提取一个网页。"""
+    found: List[str] = []
+    seen: set = set()
+    title = ""
+    last_new = [time.monotonic()]
+
+    def add(raw: str) -> None:
+        try:
+            cleaned = _is_m3u8_like(raw or "")
+            if cleaned:
+                cleaned = urljoin(url, cleaned)
+        except Exception:
+            return
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            found.append(cleaned)
+            last_new[0] = time.monotonic()
+            on_candidate(cleaned)
+
+    context_args = {}
+    if proxy:
+        context_args["proxy"] = {"server": _normalize_proxy(proxy)}
+    context = await browser.new_context(**context_args)
+    content = ""
+    try:
+        page = await context.new_page()
+        try:
+            await page.route("**/*", _safe_abort_async)
+        except Exception:
+            pass
+        page.on("response", lambda response: add(getattr(response, "url", "")))
+        try:
+            await page.goto(url, wait_until="commit", timeout=int(timeout) * 1000)
+        except Exception as goto_exc:
+            _log(f"[deep_worker] 导航未完成，仍返回已收集的候选：{goto_exc}")
+
+        async def try_title() -> None:
+            nonlocal title
+            if title:
+                return
+            try:
+                value = (await page.title()) or ""
+            except Exception:
+                value = ""
+            if value:
+                title = value
+                on_title(value)
+
+        await try_title()
+        deadline = time.monotonic() + int(wait_ms) / 1000.0
+        started = time.monotonic()
+        while time.monotonic() < deadline:
+            await try_title()
+            if (
+                found
+                and (time.monotonic() - last_new[0]) * 1000 >= _SETTLE_MS
+                and (time.monotonic() - started) * 1000 >= _MIN_COLLECT_MS
+            ):
+                break
+            await page.wait_for_timeout(_POLL_INTERVAL_MS)
+        try:
+            content = (await page.content()) or ""
+        except Exception:
+            content = ""
+        await try_title()
+        try:
+            title = (await page.title()) or title
+        except Exception:
+            pass
+    finally:
+        await context.close()
+
+    for match in M3U8_ABS_RE.finditer(content):
+        add(match.group(0))
+    for match in M3U8_QUOTED_RE.finditer(content):
+        add(match.group(1))
+    return found, title
+
+
+def _emit_service(payload: dict) -> None:
+    print(json.dumps(payload, ensure_ascii=False), flush=True)
+
+
+class _BrowserPool:
+    """按需启动 Chromium，每个实例最多承载三个独立网页环境。"""
+
+    def __init__(self, chromium, max_pages: int) -> None:
+        self._chromium = chromium
+        self._max_browsers = required_browser_count(max_pages)
+        self._browsers = []
+        self._active = []
+        self._lock = asyncio.Lock()
+
+    async def start(self) -> None:
+        await self._launch_browser()
+
+    async def _launch_browser(self):
+        browser = await self._chromium.launch(
+            headless=True,
+            args=["--disable-gpu", "--disable-dev-shm-usage", "--disable-extensions", "--no-first-run"],
+        )
+        self._browsers.append(browser)
+        self._active.append(0)
+        return browser
+
+    async def acquire(self):
+        async with self._lock:
+            # 有第二套 Chromium 可用时，优先把并发页面分散开，避免三个页面
+            # 全挤在首个浏览器中。后续页面再分配给当前负载最低的实例。
+            if (
+                len(self._browsers) < self._max_browsers
+                and self._active
+                and min(self._active) >= 1
+            ):
+                browser = await self._launch_browser()
+                index = len(self._browsers) - 1
+                self._active[index] = 1
+                return index, browser
+            available = [
+                (count, index) for index, count in enumerate(self._active)
+                if count < _PAGES_PER_BROWSER
+            ]
+            if available:
+                _count, index = min(available)
+                self._active[index] += 1
+                return index, self._browsers[index]
+        raise RuntimeError("深度提取浏览器池没有可用位置")
+
+    async def release(self, index: int) -> None:
+        async with self._lock:
+            if 0 <= index < len(self._active):
+                self._active[index] = max(0, self._active[index] - 1)
+
+    async def close(self) -> None:
+        for browser in reversed(self._browsers):
+            try:
+                await browser.close()
+            except Exception:
+                pass
+        self._browsers.clear()
+        self._active.clear()
+
+
+async def _run_server(args) -> int:
+    """启动一次 Chromium，通过逐行 JSON 协议并发处理多个提取请求。"""
+    from playwright.async_api import async_playwright  # type: ignore[import-not-found]
+
+    limit = max(1, min(int(args.max_pages or 1), 6))
+    semaphore = asyncio.Semaphore(limit)
+    tasks = {}
+
+    async with async_playwright() as playwright:
+        pool = _BrowserPool(playwright.chromium, limit)
+        await pool.start()
+        _emit_service({"event": "ready", "protocol_version": 2, "max_pages": limit})
+
+        async def extract(request: dict) -> None:
+            request_id = str(request.get("request_id") or "")
+            try:
+                async with semaphore:
+                    browser_index, browser = await pool.acquire()
+                    try:
+                        urls, title = await _collect_urls_async(
+                            browser,
+                            str(request["url"]),
+                            int(request.get("timeout", 30)),
+                            int(request.get("wait_ms", 5000)),
+                            str(request.get("proxy") or ""),
+                            lambda value: _emit_service({
+                                "event": "candidate", "request_id": request_id, "url": value,
+                            }),
+                            lambda value: _emit_service({
+                                "event": "title", "request_id": request_id, "title": value,
+                            }),
+                        )
+                    finally:
+                        await pool.release(browser_index)
+                    _emit_service({
+                        "event": "result", "request_id": request_id,
+                        "urls": urls, "title": title,
+                    })
+            except asyncio.CancelledError:
+                _emit_service({"event": "cancelled", "request_id": request_id})
+                raise
+            except Exception as exc:
+                _emit_service({
+                    "event": "error", "request_id": request_id, "message": str(exc),
+                })
+            finally:
+                tasks.pop(request_id, None)
+
+        try:
+            while True:
+                line = await asyncio.to_thread(sys.stdin.readline)
+                if not line:
+                    break
+                try:
+                    request = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                command = request.get("command")
+                request_id = str(request.get("request_id") or "")
+                if command == "extract" and request_id and request_id not in tasks:
+                    tasks[request_id] = asyncio.create_task(extract(request))
+                elif command == "cancel":
+                    task = tasks.get(request_id)
+                    if task is not None:
+                        task.cancel()
+                elif command == "shutdown":
+                    break
+        finally:
+            for task in list(tasks.values()):
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*list(tasks.values()), return_exceptions=True)
+            await pool.close()
+    return EXIT_OK
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """进程入口.
 
@@ -354,6 +611,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         进程退出码（0 成功 / 2 缺 playwright / 3 缺浏览器内核 / 4 其他失败）.
     """
     args = _build_parser().parse_args(argv if argv is not None else sys.argv[1:])
+
+    if not args.server and not args.url:
+        _build_parser().error("单次提取必须提供 --url")
 
     # 显式 UTF-8：中文 Windows 下 stderr 默认按 GBK 编码，父进程按 UTF-8 解码
     # 会产生乱码（如「执行失败」变成「ִʧܣ」）。放在 main 内而非模块级，
@@ -371,6 +631,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     # 代理地址：命令行 --proxy > 环境变量 M3U8_DEEP_PROXY（父进程透传）；
     # 父进程在 no_proxy 时已不会设置该环境变量，故此处无需再判 no_proxy。
     proxy = (args.proxy or os.environ.get("M3U8_DEEP_PROXY", "")).strip()
+
+    if args.server:
+        try:
+            return asyncio.run(_run_server(args))
+        except ImportError as exc:
+            _log(f"[deep_worker] 缺少 playwright：{exc}")
+            return EXIT_NO_PLAYWRIGHT
+        except Exception as exc:
+            message = str(exc)
+            if "executable doesn't exist" in message.lower():
+                _log(f"[deep_worker] 缺少浏览器内核：{message}")
+                return EXIT_NO_BROWSER
+            _log(f"[deep_worker] 常驻服务执行失败：{exc}")
+            return EXIT_RUNTIME_ERROR
 
     try:
         def emit_candidate(raw: str) -> None:

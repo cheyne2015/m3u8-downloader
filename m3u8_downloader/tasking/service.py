@@ -1056,7 +1056,7 @@ class TaskService:
         ])
         task = replace(
             self._repository.get_task(task_id),
-            download_status=DownloadStatus.PENDING_SELECTION,
+            download_status=DownloadStatus.PENDING_REVIEW,
             last_error=f"疑似重复内容:{existing_task_id}",
             updated_at=self._clock(),
         )

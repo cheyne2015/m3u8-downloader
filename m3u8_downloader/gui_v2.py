@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 import sys
 from urllib.parse import urlsplit
 
-from PySide6.QtCore import QByteArray, QItemSelectionModel, QSignalBlocker, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QIcon, QIntValidator, QTextCursor
+from PySide6.QtCore import (
+    QByteArray, QItemSelectionModel, QObject, QRunnable, QSignalBlocker, QSize,
+    Qt, QThreadPool, QTimer, QUrl, Signal,
+)
+from PySide6.QtGui import QDesktopServices, QFont, QIcon, QIntValidator, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -58,10 +62,15 @@ from .tasking import (
     TaskSettings,
 )
 from .secrets_v2 import protect_secret
+from . import __version__
+from .temp_files import TempFileManager, TempScan
+from .update_checker import UpdateChecker, is_newer_version, should_check_for_updates
 
 
 _STYLE = """
 QWidget { background: #111418; color: #e8ebef; font-family: "Microsoft YaHei UI"; font-size: 13px; }
+QLabel, QCheckBox, QRadioButton { background: transparent; }
+QMessageBox { background: #15191e; }
 QMainWindow { background: #0d1014; }
 #sidebar { background: #171b20; border-right: 1px solid #292e35; }
 #sidebarTitle { color: #8c96a3; font-size: 12px; padding: 8px 10px; }
@@ -106,6 +115,8 @@ QDialog { background: #15191e; }
 
 _LIGHT_STYLE = """
 QWidget { background: #f5f7fa; color: #20242a; font-family: "Microsoft YaHei UI"; font-size: 13px; }
+QLabel, QCheckBox, QRadioButton { background: transparent; }
+QMessageBox { background: #f5f7fa; }
 QMainWindow { background: #eef1f5; }
 #sidebar { background: #ffffff; border-right: 1px solid #d8dde5; }
 #sidebarTitle, #muted { color: #687383; }
@@ -147,6 +158,26 @@ QProgressBar::chunk { background: #3478f6; border-radius: 3px; }
 """
 
 
+class _BackgroundCallSignals(QObject):
+    finished = Signal(object, str)
+
+
+class _BackgroundCall(QRunnable):
+    def __init__(self, operation) -> None:
+        super().__init__()
+        self.operation = operation
+        self.signals = _BackgroundCallSignals()
+
+    def run(self) -> None:
+        try:
+            result = self.operation()
+            error = ""
+        except Exception as exc:
+            result = None
+            error = str(exc)
+        self.signals.finished.emit(result, error)
+
+
 def _asset_path(name: str) -> Path:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
     if getattr(sys, "frozen", False):
@@ -166,6 +197,8 @@ QSpinBox::down-arrow {{ image: url(\"{down}\"); width: 12px; height: 8px; }}
 
 
 def _task_status(task: Task) -> str:
+    if task.last_error.startswith("疑似重复内容:"):
+        return "待处理"
     extraction = {
         ExtractionStatus.WAITING: "等待提取",
         ExtractionStatus.RUNNING: "提取中",
@@ -175,6 +208,7 @@ def _task_status(task: Task) -> str:
     download = {
         DownloadStatus.NOT_READY: None,
         DownloadStatus.PENDING_SELECTION: "待选择",
+        DownloadStatus.PENDING_REVIEW: "待处理",
         DownloadStatus.WAITING: "等待下载",
         DownloadStatus.RUNNING: "下载中",
         DownloadStatus.MERGING: "合并中",
@@ -435,16 +469,18 @@ def _ask_content_duplicate_action(parent: QWidget, existing_name: str) -> str:
     box.setWindowTitle("发现疑似重复内容")
     box.setIcon(QMessageBox.Icon.Warning)
     box.setText(f"该任务与已有任务“{existing_name}”的标题和媒体结构高度相似。")
-    box.setInformativeText("任务已暂停，请选择如何处理。")
+    box.setInformativeText("任务已转为待处理，请选择如何处理。")
     locate = box.addButton("定位已有任务", QMessageBox.ButtonRole.ActionRole)
     download = box.addButton("仍然下载", QMessageBox.ButtonRole.AcceptRole)
-    box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+    cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
     box.exec()
     if box.clickedButton() is locate:
         return "locate"
     if box.clickedButton() is download:
         return "download"
-    return "cancel"
+    if box.clickedButton() is cancel:
+        return "delete"
+    return "dismiss"
 
 
 class NewTaskDialog(QDialog):
@@ -661,6 +697,10 @@ class MainWindow(QMainWindow):
         self._shown_content_duplicates: set[str] = set()
         self._updating_item_table = False
         self._detail_render_state = None
+        self._temp_manager = TempFileManager()
+        self._last_temp_scan = TempScan()
+        self._update_checker = UpdateChecker()
+        self._background_calls: set[_BackgroundCall] = set()
         self.new_task_dialog: NewTaskDialog | None = None
         self.setWindowTitle("m3u8 下载器")
         icon = QIcon(str(_asset_path("m3u8-downloader.ico")))
@@ -874,7 +914,8 @@ class MainWindow(QMainWindow):
         self.status_filter_combo = QComboBox()
         for text, value in [
             ("全部状态", "all"), ("提取中", "extracting"), ("下载中", "downloading"),
-            ("待选择", "selection"), ("已暂停", "paused"), ("失败", "failed"),
+            ("待选择", "selection"), ("待处理", "review"),
+            ("已暂停", "paused"), ("失败", "failed"),
         ]:
             self.status_filter_combo.addItem(text, value)
         self.status_filter_combo.currentIndexChanged.connect(self.refresh_tasks)
@@ -997,12 +1038,45 @@ class MainWindow(QMainWindow):
         appearance_form.addRow("主题", self.theme_combo)
         appearance_form.addRow("日志保留", self.log_days_spin)
 
+        temporary = QGroupBox("临时文件管理")
+        temporary_layout = QVBoxLayout(temporary)
+        self.temp_status_label = QLabel("尚未扫描")
+        self.temp_status_label.setWordWrap(True)
+        temp_actions = QHBoxLayout()
+        self.scan_temp_button = QPushButton("扫描")
+        self.clean_temp_button = QPushButton("安全清理")
+        self.clean_temp_button.setEnabled(False)
+        self.scan_temp_button.clicked.connect(self._scan_temp_files)
+        self.clean_temp_button.clicked.connect(self._clean_temp_files)
+        temp_actions.addWidget(self.scan_temp_button)
+        temp_actions.addWidget(self.clean_temp_button)
+        temp_actions.addStretch()
+        temporary_layout.addWidget(self.temp_status_label)
+        temporary_layout.addLayout(temp_actions)
+
+        update = QGroupBox("软件更新")
+        update_layout = QVBoxLayout(update)
+        self.update_status_label = QLabel(f"当前版本：{__version__}")
+        self.auto_update_check = QCheckBox("启动时自动检查新版本")
+        self.check_update_button = QPushButton("检查更新")
+        self.check_update_button.clicked.connect(
+            lambda: self._start_update_check(manual=True)
+        )
+        update_actions = QHBoxLayout()
+        update_actions.addWidget(self.check_update_button)
+        update_actions.addStretch()
+        update_layout.addWidget(self.update_status_label)
+        update_layout.addWidget(self.auto_update_check)
+        update_layout.addLayout(update_actions)
+
         self.save_settings_button = QPushButton("保存设置")
         self.save_settings_button.setObjectName("newTask")
         self.save_settings_button.clicked.connect(self._save_settings)
         root.addWidget(concurrency)
         root.addWidget(behavior)
         root.addWidget(appearance)
+        root.addWidget(temporary)
+        root.addWidget(update)
         root.addStretch()
         root.addWidget(self.save_settings_button, 0, Qt.AlignmentFlag.AlignRight)
         self._load_settings_controls()
@@ -1029,6 +1103,7 @@ class MainWindow(QMainWindow):
         self.log_days_spin.setValue(settings.log_retention_days)
         index = self.theme_combo.findData(settings.theme)
         self.theme_combo.setCurrentIndex(max(0, index))
+        self.auto_update_check.setChecked(settings.check_updates_on_startup)
 
     def _save_settings(self) -> None:
         settings = replace(
@@ -1047,6 +1122,7 @@ class MainWindow(QMainWindow):
             close_rule=self.close_rule_combo.currentData(),
             log_retention_days=self.log_days_spin.value(),
             theme=self.theme_combo.currentData(),
+            check_updates_on_startup=self.auto_update_check.isChecked(),
         )
         self._service.save_app_settings(settings)
         speed_callback = getattr(self, "global_speed_limit_changed", None)
@@ -1055,6 +1131,139 @@ class MainWindow(QMainWindow):
         self._apply_theme(settings.theme)
         self.log_view.appendPlainText("设置已保存")
         self._show_feedback("设置已保存")
+
+    def _run_in_background(self, operation, callback) -> None:
+        worker = _BackgroundCall(operation)
+        self._background_calls.add(worker)
+
+        def finished(result, error, worker=worker):
+            self._background_calls.discard(worker)
+            callback(result, error)
+
+        worker.signals.finished.connect(finished)
+        QThreadPool.globalInstance().start(worker)
+
+    def _temp_context(self):
+        tasks = self._service.list_tasks()
+        return tasks, {task.id: self._service.list_items(task.id) for task in tasks}
+
+    def _scan_temp_files(self) -> None:
+        self.scan_temp_button.setEnabled(False)
+        self.clean_temp_button.setEnabled(False)
+        self.temp_status_label.setText("正在扫描……")
+        tasks, items = self._temp_context()
+        self._run_in_background(
+            lambda: self._temp_manager.scan(tasks, items),
+            self._temp_scan_finished,
+        )
+
+    def _temp_scan_finished(self, result, error: str) -> None:
+        self.scan_temp_button.setEnabled(True)
+        if error:
+            self.temp_status_label.setText(f"扫描失败：{error}")
+            self._show_feedback("临时文件扫描失败")
+            return
+        self._last_temp_scan = result
+        self.temp_status_label.setText(
+            f"共 {_format_bytes(result.total_bytes)}（{result.file_count} 个文件），"
+            f"可安全清理 {_format_bytes(result.cleanable_bytes)}；"
+            f"续传保留 {_format_bytes(result.protected_bytes)}"
+        )
+        self.clean_temp_button.setEnabled(bool(result.cleanable_jobs))
+        self._show_feedback("临时文件扫描完成")
+
+    def _clean_temp_files(self) -> None:
+        scan = self._last_temp_scan
+        if not scan.cleanable_jobs:
+            self._show_feedback("没有可安全清理的临时文件")
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("清理临时文件")
+        box.setText(f"清理 {_format_bytes(scan.cleanable_bytes)} 临时文件？")
+        box.setInformativeText("未完成任务的断点续传文件会保留。")
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        )
+        box.button(QMessageBox.StandardButton.Yes).setText("清理")
+        box.button(QMessageBox.StandardButton.Cancel).setText("取消")
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
+        self.scan_temp_button.setEnabled(False)
+        self.clean_temp_button.setEnabled(False)
+        self.temp_status_label.setText("正在清理……")
+        tasks, items = self._temp_context()
+
+        def clean_current_snapshot():
+            current = self._temp_manager.scan(tasks, items)
+            return self._temp_manager.cleanup(current)
+
+        self._run_in_background(clean_current_snapshot, self._temp_cleanup_finished)
+
+    def _temp_cleanup_finished(self, result, error: str) -> None:
+        if error:
+            self.scan_temp_button.setEnabled(True)
+            self.temp_status_label.setText(f"清理失败：{error}")
+            self._show_feedback("临时文件清理失败")
+            return
+        self._show_feedback(
+            f"已清理 {_format_bytes(result.removed_bytes)}，"
+            f"{result.failed_jobs} 项未能删除"
+            if result.failed_jobs else
+            f"已清理 {_format_bytes(result.removed_bytes)}"
+        )
+        self._scan_temp_files()
+
+    def maybe_check_for_updates(self) -> None:
+        settings = self._service.load_app_settings()
+        if (
+            settings.check_updates_on_startup
+            and should_check_for_updates(settings.last_update_check_at)
+        ):
+            self._start_update_check(manual=False)
+
+    def _start_update_check(self, *, manual: bool) -> None:
+        if not self.check_update_button.isEnabled():
+            return
+        self.check_update_button.setEnabled(False)
+        self.update_status_label.setText("正在检查新版本……")
+        self._run_in_background(
+            self._update_checker.fetch_latest,
+            lambda result, error: self._update_check_finished(result, error, manual),
+        )
+
+    def _update_check_finished(self, release, error: str, manual: bool) -> None:
+        self.check_update_button.setEnabled(True)
+        if error:
+            self.update_status_label.setText(f"当前版本：{__version__}（检查失败）")
+            if manual:
+                QMessageBox.warning(self, "检查更新", error)
+            else:
+                self.log_view.appendPlainText(f"[警告] [更新] {error}")
+            return
+
+        settings = self._service.load_app_settings()
+        self._service.save_app_settings(replace(
+            settings,
+            last_update_check_at=datetime.now(timezone.utc).isoformat(),
+        ))
+        if is_newer_version(release.version, __version__):
+            self.update_status_label.setText(
+                f"发现新版本：{release.version}（当前 {__version__}）"
+            )
+            box = QMessageBox(self)
+            box.setWindowTitle("发现新版本")
+            box.setText(f"发现 m3u8 下载器 {release.version}")
+            box.setInformativeText(f"当前版本：{__version__}")
+            open_release = box.addButton("打开下载页面", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton("稍后", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() is open_release:
+                QDesktopServices.openUrl(QUrl(release.url))
+        else:
+            self.update_status_label.setText(f"当前版本：{__version__}（已是最新）")
+            if manual:
+                QMessageBox.information(self, "检查更新", "当前已经是最新版本。")
 
     def _apply_theme(self, theme: str) -> None:
         if theme == "system":
@@ -1379,8 +1588,17 @@ class MainWindow(QMainWindow):
             self.refresh_tasks()
             self._show_task_by_id(task_id)
             self._show_feedback("任务已恢复下载")
+        elif action == "delete":
+            controller = getattr(self, "background_controller", None)
+            if controller is not None:
+                controller.delete_task(task_id, delete_outputs=False)
+            else:
+                self._service.delete_task(task_id, delete_outputs=False)
+            self.refresh_tasks()
+            self._refresh_logs()
+            self._show_feedback("已删除新的疑似重复任务")
         else:
-            self._show_feedback("任务保持暂停，稍后可在任务详情中继续")
+            self._show_feedback("任务保持待处理，稍后可在任务详情中继续")
         return action
 
     @staticmethod
@@ -1451,6 +1669,7 @@ class MainWindow(QMainWindow):
             return "提取中"
         waiting_statuses = {
             DownloadStatus.PENDING_SELECTION,
+            DownloadStatus.PENDING_REVIEW,
             DownloadStatus.WAITING,
             DownloadStatus.MERGING,
             DownloadStatus.RETRY_WAIT,
@@ -1763,18 +1982,27 @@ class MainWindow(QMainWindow):
             self.select_all_checkbox.setCheckState(master_state)
         task_selected = bool(getattr(self, "_detail_task_id", ""))
         can_select = task_selected and bool(selectable)
+        extracting_without_candidates = False
+        if task_selected and not selectable:
+            task = self._service.get_task(self._detail_task_id)
+            extracting_without_candidates = task.extraction_status in {
+                ExtractionStatus.WAITING, ExtractionStatus.RUNNING,
+            }
         self.select_all_checkbox.setEnabled(can_select)
         self.select_all_checkbox.setCursor(
             Qt.CursorShape.PointingHandCursor if can_select else Qt.CursorShape.ArrowCursor
         )
         self.select_all_checkbox.setToolTip(
             "选择或取消全部可下载项目"
-            if can_select else "当前任务没有可选择的下载项"
+            if can_select else "正在提取网页，发现下载项后会显示在这里"
+            if extracting_without_candidates else "当前任务没有可选择的下载项"
             if task_selected else "请先选择一个主任务"
         )
         has_checked = checked_count > 0
         if not task_selected:
             tooltip = "请先选择一个主任务"
+        elif extracting_without_candidates:
+            tooltip = "正在提取网页，发现下载项后即可选择下载"
         elif not has_checked:
             tooltip = "请先勾选要下载的项目"
         else:
@@ -1809,7 +2037,15 @@ class MainWindow(QMainWindow):
         if value == "downloading":
             return task.download_status in {DownloadStatus.WAITING, DownloadStatus.RUNNING, DownloadStatus.MERGING}
         if value == "selection":
-            return task.download_status is DownloadStatus.PENDING_SELECTION
+            return (
+                task.download_status is DownloadStatus.PENDING_SELECTION
+                and not task.last_error.startswith("疑似重复内容:")
+            )
+        if value == "review":
+            return (
+                task.download_status is DownloadStatus.PENDING_REVIEW
+                or task.last_error.startswith("疑似重复内容:")
+            )
         if value == "paused":
             return task.extraction_status is ExtractionStatus.PAUSED or task.download_status is DownloadStatus.PAUSED
         return task.extraction_status is ExtractionStatus.FAILED or task.download_status is DownloadStatus.PARTIAL_FAILURE
@@ -2074,8 +2310,8 @@ class MainWindow(QMainWindow):
             task.download_status is not DownloadStatus.COMPLETED
             for task in self._service.list_tasks()
         )
-        if self._session_close_action == "tray":
-            self._apply_close_action("tray", event, active)
+        if self._session_close_action in {"tray", "exit"}:
+            self._apply_close_action(self._session_close_action, event, active)
             return
         if settings.close_rule_enabled:
             self._apply_close_action(
@@ -2083,15 +2319,13 @@ class MainWindow(QMainWindow):
             )
             return
         default_action = self._close_action_for_rule(settings.close_rule, active)
-        confirmed, minimize_to_tray = self._ask_close_action(default_action == "tray")
-        if minimize_to_tray:
-            self._session_close_action = "tray"
-        if not confirmed:
+        action, remember = self._ask_close_action(default_action == "tray")
+        if action is None:
             event.ignore()
             return
-        self._apply_close_action(
-            "tray" if minimize_to_tray else "exit", event, active,
-        )
+        if remember:
+            self._session_close_action = action
+        self._apply_close_action(action, event, active)
 
     @staticmethod
     def _close_action_for_rule(rule: str, active: bool) -> str:
@@ -2099,22 +2333,36 @@ class MainWindow(QMainWindow):
             return "tray" if active else "exit"
         return rule
 
-    def _ask_close_action(self, default_to_tray: bool) -> tuple[bool, bool]:
+    def _ask_close_action(self, default_to_tray: bool) -> tuple[str | None, bool]:
         box = QMessageBox(self)
         box.setWindowTitle("关闭程序")
         box.setText("是否最小化到托盘？")
-        box.setInformativeText("本次不再询问")
+        box.setMinimumSize(360, 190)
+        message_label = box.findChild(QLabel, "qt_msgbox_label")
+        if message_label is not None:
+            message_label.setMinimumWidth(260)
         box.setStandardButtons(
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No
+            | QMessageBox.StandardButton.Cancel
         )
-        box.button(QMessageBox.StandardButton.Ok).setText("确认")
-        box.button(QMessageBox.StandardButton.Cancel).setText("取消")
-        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
-        minimize_check = QCheckBox("最小化到托盘", box)
-        minimize_check.setChecked(default_to_tray)
-        box.setCheckBox(minimize_check)
-        confirmed = box.exec() == QMessageBox.StandardButton.Ok
-        return confirmed, minimize_check.isChecked()
+        yes_button = box.button(QMessageBox.StandardButton.Yes)
+        no_button = box.button(QMessageBox.StandardButton.No)
+        cancel_button = box.button(QMessageBox.StandardButton.Cancel)
+        yes_button.setText("是")
+        no_button.setText("否")
+        cancel_button.hide()
+        box.setDefaultButton(yes_button if default_to_tray else no_button)
+        box.setEscapeButton(cancel_button)
+        remember_check = QCheckBox("本次不再询问", box)
+        remember_check.setChecked(True)
+        box.setCheckBox(remember_check)
+        result = box.exec()
+        if result == QMessageBox.StandardButton.Yes:
+            return "tray", remember_check.isChecked()
+        if result == QMessageBox.StandardButton.No:
+            return "exit", remember_check.isChecked()
+        return None, False
 
     def _apply_close_action(self, action: str, event, active: bool) -> None:
         if action == "tray":
@@ -2752,5 +3000,6 @@ def run_gui_v2(service: TaskService) -> int:
     window.single_instance_guard = guard
     tray.show()
     window.show()
+    QTimer.singleShot(1200, window.maybe_check_for_updates)
     controller.start()
     return app.exec()

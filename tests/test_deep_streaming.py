@@ -397,6 +397,44 @@ def test_stop_interrupts_navigation_promptly(video_page):
         thread.join(timeout=10)
 
 
+def test_parallel_deep_requests_share_worker_and_keep_results_isolated(video_page):
+    """并行任务共用一个 worker/Chromium，但候选和标题不能串到其他任务。"""
+    from m3u8_downloader.deep_service import service as deep_service
+    from m3u8_downloader.extractor import deep_service_status
+
+    deep_service.shutdown()
+    starts_before = deep_service_status()["process_starts"]
+    results = {}
+    failures = []
+
+    def extract(name, url):
+        try:
+            candidates, title = extract_m3u8_from_page_with_title(
+                url, deep=True, estimate=False, no_proxy=True,
+                stop_event=threading.Event(), on_candidate=lambda _candidate: None,
+            )
+            results[name] = ([candidate.url for candidate in candidates], title)
+        except Exception as exc:
+            failures.append(exc)
+
+    threads = [
+        threading.Thread(target=extract, args=("first", video_page)),
+        threading.Thread(target=extract, args=("third", video_page + "?third")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+
+    assert not failures
+    assert all(not thread.is_alive() for thread in threads)
+    assert deep_service_status()["process_starts"] == starts_before + 1
+    assert results["first"] == ([
+        video_page + "first.m3u8", video_page + "second.m3u8",
+    ], "Streaming test")
+    assert results["third"] == ([video_page + "third.m3u8"], "Third episode")
+
+
 def test_stop_during_slow_estimate_returns_existing_candidates_promptly(video_page):
     import requests
     stopped = threading.Event()

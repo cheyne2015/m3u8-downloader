@@ -93,10 +93,10 @@ class TaskCoordinator:
                             self._service.add_log(
                                 task_id, "警告", "任务",
                                 (
-                                    f"媒体抽样一致，发现疑似重复内容，已暂停；"
+                                    f"媒体抽样一致，发现疑似重复内容，已转为待处理；"
                                     f"已有任务：{duplicate.name}"
                                     if match is True else
-                                    f"媒体抽样不可用，按媒体结构发现疑似重复内容，已暂停；"
+                                    f"媒体抽样不可用，按媒体结构发现疑似重复内容，已转为待处理；"
                                     f"已有任务：{duplicate.name}"
                                 ),
                             )

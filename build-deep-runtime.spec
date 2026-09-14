@@ -62,8 +62,9 @@ runtime = COLLECT(
 )
 
 manifest = {
-    "runtime_version": "1.0.0",
+    "runtime_version": "1.1.1",
     "protocol_version": 1,
+    "service_protocol_version": 2,
     "playwright_version": version("playwright"),
     "chromium_revision": chromium_revision,
 }

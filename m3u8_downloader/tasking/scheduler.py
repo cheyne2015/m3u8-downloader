@@ -2,8 +2,6 @@
 
 from dataclasses import dataclass
 from typing import Iterable
-from urllib.parse import urlsplit
-
 from .models import DownloadStatus, ExtractionStatus, Task
 
 
@@ -33,21 +31,11 @@ class TaskScheduler:
         )
         extraction_slots = max(0, extraction_limit - active_extraction)
         download_slots = max(0, download_limit - active_download)
-        active_hosts = {
-            (urlsplit(task.source_url).hostname or "").casefold()
-            for task in ordered
-            if task.extraction_status is ExtractionStatus.RUNNING
-        }
         extraction_ids = []
         for task in ordered:
             if task.extraction_status is not ExtractionStatus.WAITING:
                 continue
-            host = (urlsplit(task.source_url).hostname or "").casefold()
-            if host and host in active_hosts:
-                continue
             extraction_ids.append(task.id)
-            if host:
-                active_hosts.add(host)
             if len(extraction_ids) >= extraction_slots:
                 break
         extraction = tuple(extraction_ids)

@@ -23,6 +23,7 @@ class ExtractionStatus(str, Enum):
 class DownloadStatus(str, Enum):
     NOT_READY = "not_ready"
     PENDING_SELECTION = "pending_selection"
+    PENDING_REVIEW = "pending_review"
     WAITING = "waiting"
     RUNNING = "running"
     MERGING = "merging"
@@ -69,6 +70,8 @@ class AppSettings:
     window_width: int = 0
     window_height: int = 0
     item_table_header_state: str = ""
+    check_updates_on_startup: bool = True
+    last_update_check_at: str = ""
 
     def __post_init__(self) -> None:
         ranges = {

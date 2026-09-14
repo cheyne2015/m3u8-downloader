@@ -20,6 +20,8 @@ def test_app_settings_have_confirmed_defaults_and_persist(tmp_path):
     assert defaults.completion_notification is False
     assert defaults.close_rule_enabled is False
     assert defaults.close_rule == "tray"
+    assert defaults.check_updates_on_startup is True
+    assert defaults.last_update_check_at == ""
 
     changed = replace(
         defaults,
@@ -28,6 +30,7 @@ def test_app_settings_have_confirmed_defaults_and_persist(tmp_path):
         extraction_mode="deep",
         theme="system",
         completion_notification=True,
+        check_updates_on_startup=False,
     )
     repository.save_app_settings(changed)
     assert SQLiteTaskRepository(tmp_path / "tasks.db").load_app_settings() == changed

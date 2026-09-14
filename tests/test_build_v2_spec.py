@@ -30,5 +30,6 @@ def test_deep_runtime_build_is_self_contained_and_writes_compatibility_manifest(
     assert 'contents_directory="."' in spec
     assert 'prefix=f"browsers/{headless.name}"' in spec
     assert '"protocol_version": 1' in spec
-    assert '"runtime_version": "1.0.0"' in spec
+    assert '"runtime_version": "1.1.1"' in spec
+    assert '"service_protocol_version": 2' in spec
     assert '"runtime.json"' in spec

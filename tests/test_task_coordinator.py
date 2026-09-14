@@ -209,7 +209,7 @@ def test_extraction_pauses_before_download_when_content_matches_another_link(tmp
         content_verifier=type("Verifier", (), {"matches": lambda *_args: True})(),
     ).run_extraction(new_task.id)
 
-    assert result.download_status is DownloadStatus.PENDING_SELECTION
+    assert result.download_status is DownloadStatus.PENDING_REVIEW
     assert result.last_error == f"疑似重复内容:{existing.id}"
     assert service.list_items(new_task.id)[0].status.value == "unselected"
 

@@ -36,6 +36,7 @@ from urllib.parse import urljoin
 import requests
 
 from m3u8_downloader import utils
+from m3u8_downloader.deep_service import DeepServiceError, service as _deep_service
 from m3u8_downloader.estimator import MAX_ESTIMATE_WORKERS, SizeEstimate, estimate_many, ESTIMATE_TIMEOUT
 from m3u8_downloader.utils import format_duration, format_file_size
 
@@ -779,6 +780,25 @@ def _deep_worker_available() -> bool:
     )
 
 
+def _deep_worker_service_available(bundled: Optional[Tuple[str, str]]) -> bool:
+    """当前 worker 是否支持一个进程复用同一个 Chromium。"""
+    if bundled is None:
+        return os.path.abspath(_deep_worker_path()) == os.path.abspath(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), DEEP_WORKER_NAME)
+        )
+    try:
+        manifest = Path(bundled[0]).resolve().parent / "runtime.json"
+        metadata = json.loads(manifest.read_text(encoding="utf-8"))
+        return int(metadata.get("service_protocol_version", 0)) == 2
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def deep_service_status() -> dict:
+    """返回常驻深度组件状态，供运行验证与诊断使用。"""
+    return _deep_service.status()
+
+
 def _try_import_sync_playwright() -> Optional[Callable]:
     """尝试导入 ``playwright.sync_api.sync_playwright``.
 
@@ -901,6 +921,7 @@ def _deep_extract_subprocess(
         browsers_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
         cmd = list(python_cmd) + [worker]
         launcher_name = " ".join(python_cmd)
+    launcher_cmd = list(cmd)
     cmd += [
         "--url", url,
         "--timeout", str(int(timeout)),
@@ -922,6 +943,33 @@ def _deep_extract_subprocess(
         env["M3U8_DEEP_PROXY"] = utils._normalize_proxy(proxy)
     else:
         env.pop("M3U8_DEEP_PROXY", None)
+
+    # GUI 的深度提取始终携带 stop_event，因此会优先进入常驻服务路径。
+    # 一个 deep-worker 只启动一个 Chromium，每个请求由 worker 创建独立 context。
+    if stream_output and _deep_worker_service_available(bundled):
+        service_cmd = launcher_cmd + ["--server", "--max-pages", "6"]
+        if browsers_path:
+            service_cmd += ["--browsers-path", browsers_path]
+
+        def report_raw(raw: str) -> None:
+            normalized = _normalize_candidate_url(raw, url)
+            if normalized and on_candidate:
+                on_candidate(_new_candidate(normalized, "deep"))
+
+        try:
+            raw_urls, title = _deep_service.extract(
+                service_cmd, env, url=url, timeout=timeout, wait_ms=wait_ms,
+                proxy=utils._normalize_proxy(proxy) if proxy else "",
+                stop_event=stop_event, on_candidate=report_raw, on_title=on_title,
+            )
+        except DeepServiceError as exc:
+            raise DeepModeUnavailableError(str(exc)) from exc
+        candidates = []
+        for raw in raw_urls:
+            normalized = _normalize_candidate_url(raw, url)
+            if normalized:
+                candidates.append(_new_candidate(normalized, "deep"))
+        return _dedupe(candidates), title
 
     try:
         proc = subprocess.Popen(

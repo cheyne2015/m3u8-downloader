@@ -10,7 +10,9 @@ from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QCheckBox, QDialog, QLabel, QMessageBox,
 )
 
-from m3u8_downloader.gui_v2 import MainWindow
+from m3u8_downloader.gui_v2 import MainWindow, _task_status
+from m3u8_downloader.temp_files import TempScan
+from m3u8_downloader.update_checker import ReleaseInfo
 from m3u8_downloader.tasking import (
     Candidate,
     CreateTaskRequest,
@@ -66,6 +68,66 @@ def test_navigation_shows_total_parent_task_counts_independent_of_filter(qtbot, 
     assert window.task_list.count() == 0
     assert window.downloading_button.countText() == "2"
     assert window.completed_button.countText() == "1"
+
+
+def test_settings_expose_temp_management_and_update_check(qtbot, tmp_path):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window._force_exit = True
+
+    assert window.temp_status_label.text() == "尚未扫描"
+    assert window.scan_temp_button.text() == "扫描"
+    assert window.clean_temp_button.text() == "安全清理"
+    assert window.clean_temp_button.isEnabled() is False
+    assert window.update_status_label.text().startswith("当前版本：")
+    assert window.auto_update_check.isChecked() is True
+    assert window.check_update_button.text() == "检查更新"
+    window.auto_update_check.setChecked(False)
+    qtbot.mouseClick(window.save_settings_button, Qt.MouseButton.LeftButton)
+    assert service.load_app_settings().check_updates_on_startup is False
+
+
+def test_temp_scan_result_reports_cleanable_and_protected_sizes(qtbot, tmp_path):
+    window = MainWindow(TaskService(SQLiteTaskRepository(tmp_path / "tasks.db")))
+    qtbot.addWidget(window)
+    window._force_exit = True
+
+    window._temp_scan_finished(TempScan(
+        total_bytes=3072,
+        cleanable_bytes=2048,
+        protected_bytes=1024,
+        file_count=3,
+        cleanable_jobs=(tmp_path / ".tmp" / ("job-" + "a" * 16 + "-" + "b" * 8),),
+    ), "")
+
+    assert "3.0 KB" in window.temp_status_label.text()
+    assert "可安全清理 2.0 KB" in window.temp_status_label.text()
+    assert "续传保留 1.0 KB" in window.temp_status_label.text()
+    assert window.clean_temp_button.isEnabled() is True
+
+
+def test_successful_update_check_records_time_and_reports_current_version(
+    qtbot, tmp_path, monkeypatch,
+):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window._force_exit = True
+    messages = []
+    monkeypatch.setattr(
+        QMessageBox, "information",
+        lambda _parent, title, message: messages.append((title, message)),
+    )
+
+    window._update_check_finished(ReleaseInfo(
+        version="2.0.2",
+        url="https://github.com/cheyne2015/m3u8-downloader/releases/tag/v2.0.2",
+    ), "", True)
+
+    assert service.load_app_settings().last_update_check_at
+    assert window.update_status_label.text().endswith("（已是最新）")
+    assert messages == [("检查更新", "当前已经是最新版本。")]
 
 
 def test_navigation_count_color_follows_button_state_in_both_themes(qtbot, tmp_path):
@@ -1210,6 +1272,22 @@ def test_select_all_tracks_none_partial_and_all_candidate_checks(qtbot, tmp_path
     assert not window.download_selected_button.isEnabled()
 
 
+def test_empty_candidate_panel_explains_that_extraction_is_still_running(qtbot, tmp_path):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
+    service.create_tasks(CreateTaskRequest(
+        addresses="https://site.example/watch/42",
+        save_directory=str(tmp_path),
+    ))
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window.show()
+    window._force_exit = True
+    window.task_list.setCurrentRow(0)
+
+    assert "正在提取" in window.select_all_checkbox.toolTip()
+    assert "正在提取" in window.download_selected_button.toolTip()
+
+
 def test_quick_start_from_completed_view_creates_and_selects_task(qtbot, tmp_path):
     repository = SQLiteTaskRepository(tmp_path / "tasks.db")
     identifiers = iter(["seed", "quick"])
@@ -1297,14 +1375,14 @@ class CloseEventStub:
         self.accepted = False
 
 
-def test_prompt_checked_then_cancel_remembers_tray_for_this_process(qtbot, tmp_path, monkeypatch):
+def test_prompt_yes_with_remember_uses_tray_without_asking_again(qtbot, tmp_path, monkeypatch):
     window = MainWindow(TaskService(SQLiteTaskRepository(tmp_path / "tasks.db")))
     qtbot.addWidget(window)
     window.show()
     prompted = []
     monkeypatch.setattr(
         window, "_ask_close_action",
-        lambda _default: prompted.append(True) or (False, True),
+        lambda _default: prompted.append(True) or ("tray", True),
     )
 
     first = CloseEventStub()
@@ -1319,14 +1397,14 @@ def test_prompt_checked_then_cancel_remembers_tray_for_this_process(qtbot, tmp_p
     window._force_exit = True
 
 
-def test_prompt_unchecked_then_cancel_asks_again_next_time(qtbot, tmp_path, monkeypatch):
+def test_prompt_window_close_cancels_and_asks_again_next_time(qtbot, tmp_path, monkeypatch):
     window = MainWindow(TaskService(SQLiteTaskRepository(tmp_path / "tasks.db")))
     qtbot.addWidget(window)
     window.show()
     prompted = []
     monkeypatch.setattr(
         window, "_ask_close_action",
-        lambda _default: prompted.append(True) or (False, False),
+        lambda _default: prompted.append(True) or (None, False),
     )
 
     window.closeEvent(CloseEventStub())
@@ -1346,19 +1424,56 @@ def test_close_prompt_has_one_tray_checkbox_and_concise_session_text(
     def cancel(box):
         captured["text"] = box.text()
         captured["information"] = box.informativeText()
+        captured["minimum_size"] = (box.minimumWidth(), box.minimumHeight())
+        captured["message_minimum_width"] = box.findChild(
+            QLabel, "qt_msgbox_label"
+        ).minimumWidth()
         captured["checkboxes"] = [
             checkbox.text() for checkbox in box.findChildren(QCheckBox)
         ]
+        captured["checked"] = box.checkBox().isChecked()
+        captured["buttons"] = {
+            box.button(QMessageBox.StandardButton.Yes).text(),
+            box.button(QMessageBox.StandardButton.No).text(),
+        }
+        captured["hidden_cancel"] = box.button(
+            QMessageBox.StandardButton.Cancel
+        ).isHidden()
         return QMessageBox.StandardButton.Cancel
 
     monkeypatch.setattr(QMessageBox, "exec", cancel)
 
-    assert window._ask_close_action(True) == (False, True)
+    assert window._ask_close_action(True) == (None, False)
     assert captured == {
         "text": "是否最小化到托盘？",
-        "information": "本次不再询问",
-        "checkboxes": ["最小化到托盘"],
+        "information": "",
+        "minimum_size": (360, 190),
+        "message_minimum_width": 260,
+        "checkboxes": ["本次不再询问"],
+        "checked": True,
+        "buttons": {"是", "否"},
+        "hidden_cancel": True,
     }
+    window._force_exit = True
+
+
+@pytest.mark.parametrize(("button", "expected"), [
+    (QMessageBox.StandardButton.Yes, "tray"),
+    (QMessageBox.StandardButton.No, "exit"),
+])
+def test_close_prompt_maps_yes_to_tray_and_no_to_exit(
+    qtbot, tmp_path, monkeypatch, button, expected,
+):
+    window = MainWindow(TaskService(SQLiteTaskRepository(tmp_path / "tasks.db")))
+    qtbot.addWidget(window)
+
+    def choose(box):
+        box.checkBox().setChecked(True)
+        return button
+
+    monkeypatch.setattr(QMessageBox, "exec", choose)
+
+    assert window._ask_close_action(False) == (expected, True)
     window._force_exit = True
 
 
@@ -1390,7 +1505,7 @@ class CloseControllerStub:
         self.stopped += 1
 
 
-def test_prompt_unchecked_then_confirm_pauses_active_tasks_and_exits(
+def test_prompt_no_pauses_active_tasks_and_exits(
     qtbot, tmp_path, monkeypatch,
 ):
     service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
@@ -1401,7 +1516,7 @@ def test_prompt_unchecked_then_confirm_pauses_active_tasks_and_exits(
     qtbot.addWidget(window)
     controller = CloseControllerStub()
     window.background_controller = controller
-    monkeypatch.setattr(window, "_ask_close_action", lambda _default: (True, False))
+    monkeypatch.setattr(window, "_ask_close_action", lambda _default: ("exit", False))
     event = CloseEventStub()
 
     window.closeEvent(event)
@@ -1600,6 +1715,80 @@ def test_content_duplicate_prompt_can_resume_the_paused_task(
     }]
     assert service.get_task(new.id).download_status is DownloadStatus.WAITING
     assert service.get_task(new.id).last_error == ""
+
+
+def test_content_duplicate_is_shown_as_pending_review(qtbot, tmp_path, monkeypatch):
+    service = TaskService(
+        SQLiteTaskRepository(tmp_path / "tasks.db"),
+        id_factory=iter(["existing", "new"]).__next__,
+    )
+    existing, new = service.create_tasks(CreateTaskRequest(
+        addresses="https://first.example/1\nhttps://second.example/2",
+        save_directory=str(tmp_path),
+    ))
+    service.hold_for_content_duplicate(new.id, existing.id)
+    monkeypatch.setattr(QMessageBox, "exec", lambda _box: 0)
+
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window._force_exit = True
+
+    held = service.get_task(new.id)
+    assert held.download_status is DownloadStatus.PENDING_REVIEW
+    assert _task_status(held) == "待处理"
+    legacy_held = replace(held, download_status=DownloadStatus.PENDING_SELECTION)
+    assert _task_status(legacy_held) == "待处理"
+
+
+def test_content_duplicate_cancel_deletes_new_task(qtbot, tmp_path, monkeypatch):
+    service = TaskService(
+        SQLiteTaskRepository(tmp_path / "tasks.db"),
+        id_factory=iter(["existing", "new"]).__next__,
+    )
+    existing, new = service.create_tasks(CreateTaskRequest(
+        addresses="https://first.example/1\nhttps://second.example/2",
+        save_directory=str(tmp_path),
+    ))
+    service.hold_for_content_duplicate(new.id, existing.id)
+
+    def cancel(box):
+        next(button for button in box.buttons() if button.text() == "取消").click()
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", cancel)
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window._force_exit = True
+    qtbot.waitUntil(lambda: len(service.list_tasks()) == 1)
+
+    assert [task.id for task in service.list_tasks()] == [existing.id]
+
+
+def test_content_duplicate_locate_keeps_new_task_pending_review(
+    qtbot, tmp_path, monkeypatch,
+):
+    service = TaskService(
+        SQLiteTaskRepository(tmp_path / "tasks.db"),
+        id_factory=iter(["existing", "new"]).__next__,
+    )
+    existing, new = service.create_tasks(CreateTaskRequest(
+        addresses="https://first.example/1\nhttps://second.example/2",
+        save_directory=str(tmp_path),
+    ))
+    service.hold_for_content_duplicate(new.id, existing.id)
+
+    def locate(box):
+        next(button for button in box.buttons() if button.text() == "定位已有任务").click()
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", locate)
+    window = MainWindow(service)
+    qtbot.addWidget(window)
+    window._force_exit = True
+    qtbot.waitUntil(lambda: window.task_list.currentItem() is not None)
+
+    assert service.get_task(new.id).download_status is DownloadStatus.PENDING_REVIEW
+    assert window.task_list.currentItem().data(Qt.ItemDataRole.UserRole).id == existing.id
 
 
 def test_completed_task_detail_can_start_background_validation_and_repair(

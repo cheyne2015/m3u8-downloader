@@ -6,6 +6,7 @@ extractor，只能走内联副本，故必须用断言锁死两份逻辑不漂�
 """
 
 import json
+import asyncio
 import os
 import subprocess
 import sys
@@ -123,6 +124,51 @@ def test_worker_cli_help_exits_zero():
     )
     assert proc.returncode == 0, proc.stderr
     assert "--browsers-path" in proc.stdout
+
+
+def test_worker_cli_exposes_persistent_service_mode():
+    """深度组件应提供常驻服务，并在内部限制并发页面数。"""
+    args = deep_worker._build_parser().parse_args(["--server", "--max-pages", "3"])
+
+    assert args.server is True
+    assert args.max_pages == 3
+
+
+@pytest.mark.parametrize(("pages", "browsers"), [
+    (1, 1), (3, 1), (4, 2), (6, 2),
+])
+def test_one_chromium_is_allocated_for_each_three_active_pages(pages, browsers):
+    assert deep_worker.required_browser_count(pages) == browsers
+
+
+def test_browser_pool_balances_concurrent_pages_across_two_chromiums():
+    launched = []
+
+    class Browser:
+        async def close(self):
+            return None
+
+    class Chromium:
+        async def launch(self, **_kwargs):
+            browser = Browser()
+            launched.append(browser)
+            return browser
+
+    async def exercise():
+        pool = deep_worker._BrowserPool(Chromium(), max_pages=6)
+        await pool.start()
+        assignments = [await pool.acquire() for _ in range(3)]
+        try:
+            assert len(launched) == 2
+            assert [browser for _, browser in assignments] == [
+                launched[0], launched[1], launched[0],
+            ]
+        finally:
+            for index, _browser in assignments:
+                await pool.release(index)
+            await pool.close()
+
+    asyncio.run(exercise())
 
 
 # ===== 3. 子进程路线：路径解析 =====
