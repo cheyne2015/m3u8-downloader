@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QCheckBox, QDialog, QLabel, QMessageBox,
 )
 
-from m3u8_downloader.gui_v2 import MainWindow, _task_status
+from m3u8_downloader.gui_v2 import MainWindow, TaskSettingsDialog, _task_status
 from m3u8_downloader.temp_files import TempScan
 from m3u8_downloader.update_checker import ReleaseInfo
 from m3u8_downloader.tasking import (
@@ -23,6 +23,32 @@ from m3u8_downloader.tasking import (
     TaskService,
     TaskSettings,
 )
+
+
+def test_site_features_are_visible_and_site_learning_is_automatic(qtbot, tmp_path):
+    service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
+    task = service.create_tasks(CreateTaskRequest(
+        addresses="https://video.example/watch/1", save_directory=str(tmp_path),
+    ))[0]
+    service.save_site_profile(
+        task.source_url, replace(task.settings, extraction_mode="deep", timeout_seconds=45)
+    )
+    service.record_site_extraction(
+        task.id, success=True, effective_mode="deep", elapsed_seconds=2,
+        candidate_count=2,
+    )
+
+    window = MainWindow(service)
+    qtbot.addWidget(window); window._force_exit = True
+    assert window.site_profile_table.rowCount() == 1
+    assert window.site_profile_table.item(0, 0).text() == "video.example"
+    assert window.site_compatibility_table.rowCount() == 1
+    assert "CPU" in window.statistics_label.text()
+
+    dialog = TaskSettingsDialog(task)
+    qtbot.addWidget(dialog)
+    assert not hasattr(dialog, "save_site_profile_check")
+    assert dialog.extraction_mode.count() == 3
 
 
 def test_main_window_first_size_fits_screen_and_uses_desktop_upper_bound(qtbot, tmp_path):

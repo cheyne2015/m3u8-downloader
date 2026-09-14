@@ -25,6 +25,7 @@ from .models import (
     ExtractionStatus,
     ItemStatus,
     SelectionMode,
+    SiteExtractionProfile,
     SourceKind,
     Task,
 )
@@ -82,6 +83,19 @@ class TaskService:
         for offset, address in enumerate(addresses):
             source_kind = self._source_kind(address)
             direct = source_kind is SourceKind.DIRECT_M3U8
+            settings = request.settings
+            if not direct:
+                profile = self._repository.get_site_profile(self._site_hostname(address))
+                if profile is not None:
+                    settings = replace(
+                        settings, extraction_mode=profile.extraction_mode,
+                        preferred_extraction_mode=profile.preferred_extraction_mode,
+                        proxy=profile.proxy, referer=profile.referer,
+                        user_agent=profile.user_agent,
+                        protected_cookie=profile.protected_cookie,
+                        timeout_seconds=profile.timeout_seconds,
+                        request_retries=profile.request_retries,
+                    )
             tasks.append(Task(
                 id=self._id_factory(),
                 source_url=address,
@@ -95,7 +109,7 @@ class TaskService:
                 queue_position=position + offset,
                 created_at=now,
                 updated_at=now,
-                settings=request.settings,
+                settings=settings,
             ))
         direct_items = [DownloadItem(
             id=self._item_id_factory(),
@@ -106,6 +120,15 @@ class TaskService:
             status=ItemStatus.WAITING,
         ) for task in tasks if task.source_kind is SourceKind.DIRECT_M3U8]
         self._repository.add_bundle(tasks, direct_items)
+        for task in tasks:
+            if (
+                task.source_kind is SourceKind.WEB_PAGE
+                and self._repository.get_site_profile(self._site_hostname(task.source_url))
+            ):
+                self.add_log(
+                    task.id, "信息", "提取",
+                    f"已应用 {self._site_hostname(task.source_url)} 的网站提取配置",
+                )
         return tasks
 
     def list_tasks(self) -> List[Task]:
@@ -128,6 +151,61 @@ class TaskService:
 
     def save_app_settings(self, settings: AppSettings) -> None:
         self._repository.save_app_settings(settings)
+
+    @staticmethod
+    def _site_hostname(url: str) -> str:
+        return (urlsplit(url).hostname or "").casefold().rstrip(".")
+
+    def save_site_profile(
+        self, url: str, settings, *, preferred_mode: str = "",
+    ) -> SiteExtractionProfile:
+        hostname = self._site_hostname(url)
+        if not hostname:
+            raise ValueError("无法识别网站域名")
+        profile = SiteExtractionProfile(
+            hostname=hostname, extraction_mode=settings.extraction_mode,
+            preferred_extraction_mode=preferred_mode,
+            proxy=settings.proxy, referer=settings.referer,
+            user_agent=settings.user_agent, protected_cookie=settings.protected_cookie,
+            timeout_seconds=settings.timeout_seconds,
+            request_retries=settings.request_retries, updated_at=self._clock(),
+        )
+        self._repository.save_site_profile(profile)
+        return profile
+
+    def list_site_profiles(self):
+        return self._repository.list_site_profiles()
+
+    def delete_site_profile(self, hostname: str) -> None:
+        self._repository.delete_site_profile(hostname)
+
+    def record_site_extraction(
+        self, task_id: str, *, success: bool, effective_mode: str,
+        elapsed_seconds: float, candidate_count: int, error: str = "",
+    ) -> None:
+        task = self.get_task(task_id)
+        if task.source_kind is SourceKind.DIRECT_M3U8:
+            return
+        self._repository.record_site_compatibility(
+            self._site_hostname(task.source_url), success=success, mode=effective_mode,
+            elapsed_seconds=elapsed_seconds, candidate_count=candidate_count,
+            error=error, updated_at=self._clock(),
+        )
+        if success:
+            profile = self.save_site_profile(
+                task.source_url, task.settings, preferred_mode=effective_mode,
+            )
+            preference = "深度模式" if effective_mode == "deep" else "普通模式"
+            self.add_log(
+                task.id, "信息", "提取",
+                f"已自动学习 {profile.hostname} 的成功配置，下次优先使用{preference}",
+            )
+
+    def list_site_compatibility(self):
+        return self._repository.list_site_compatibility()
+
+    def clear_site_compatibility(self) -> None:
+        self._repository.clear_site_compatibility()
 
     def add_log(self, task_id: str, level: str, category: str, message: str) -> None:
         self._repository.append_log(

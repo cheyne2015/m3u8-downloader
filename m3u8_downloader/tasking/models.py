@@ -105,6 +105,7 @@ class AppSettings:
 class TaskSettings:
     auto_download_threshold: int = 3
     extraction_mode: str = "smart"
+    preferred_extraction_mode: str = ""
     proxy: str = ""
     referer: str = ""
     user_agent: str = ""
@@ -133,6 +134,46 @@ class TaskSettings:
                 raise ValueError(f"{name} 必须在 {minimum}～{maximum} 之间")
         if self.extraction_mode not in {"smart", "deep", "normal"}:
             raise ValueError("extraction_mode 必须是 smart、deep 或 normal")
+        if self.preferred_extraction_mode not in {"", "deep", "normal"}:
+            raise ValueError("preferred_extraction_mode 必须为空、deep 或 normal")
+
+
+@dataclass(frozen=True)
+class SiteExtractionProfile:
+    hostname: str
+    extraction_mode: str
+    preferred_extraction_mode: str
+    proxy: str
+    referer: str
+    user_agent: str
+    protected_cookie: str
+    timeout_seconds: int
+    request_retries: int
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class SiteCompatibilityRecord:
+    hostname: str
+    attempts: int
+    successes: int
+    failures: int
+    deep_successes: int
+    normal_successes: int
+    total_elapsed_seconds: float
+    last_result: str
+    last_mode: str
+    last_candidate_count: int
+    last_error: str
+    updated_at: datetime
+
+    @property
+    def success_rate(self) -> float:
+        return self.successes / self.attempts if self.attempts else 0.0
+
+    @property
+    def average_elapsed_seconds(self) -> float:
+        return self.total_elapsed_seconds / self.attempts if self.attempts else 0.0
 
 
 @dataclass(frozen=True)

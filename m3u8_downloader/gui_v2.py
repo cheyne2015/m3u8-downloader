@@ -65,6 +65,7 @@ from .secrets_v2 import protect_secret
 from . import __version__
 from .temp_files import TempFileManager, TempScan
 from .update_checker import UpdateChecker, is_newer_version, should_check_for_updates
+from .resource_stats import RuntimeStatisticsTracker
 
 
 _STYLE = """
@@ -624,8 +625,9 @@ class TaskSettingsDialog(QDialog):
     def __init__(self, task: Task, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("任务设置")
-        self.resize(480, 420)
+        self.resize(500, 500)
         self._original = task.settings
+        self._task = task
         root = QVBoxLayout(self)
         form = QFormLayout()
         self.threshold = QSpinBox(); self.threshold.setRange(1, 20)
@@ -640,6 +642,13 @@ class TaskSettingsDialog(QDialog):
         self.retry_delay.setValue(task.settings.retry_delay_seconds); self.retry_delay.setSuffix(" 秒")
         self.timeout = QSpinBox(); self.timeout.setRange(1, 3600)
         self.timeout.setValue(task.settings.timeout_seconds); self.timeout.setSuffix(" 秒")
+        self.extraction_mode = QComboBox()
+        self.extraction_mode.addItem("智能模式（深度优先）", "smart")
+        self.extraction_mode.addItem("仅深度模式", "deep")
+        self.extraction_mode.addItem("仅普通模式", "normal")
+        self.extraction_mode.setCurrentIndex(max(
+            0, self.extraction_mode.findData(task.settings.extraction_mode)
+        ))
         self.speed = QSpinBox(); self.speed.setRange(0, 102400)
         self.speed.setValue(task.settings.speed_limit // 1024 // 1024)
         self.speed.setSuffix(" MB/秒（0 为不限速）")
@@ -649,6 +658,7 @@ class TaskSettingsDialog(QDialog):
         self.cookie = QLineEdit(); self.cookie.setEchoMode(QLineEdit.EchoMode.Password)
         self.cookie.setPlaceholderText("留空则保持原登录信息")
         for label, widget in [
+            ("网页提取模式", self.extraction_mode),
             ("自动下载候选阈值", self.threshold), ("分片线程", self.threads),
             ("网络请求重试", self.request_retries), ("任务级重试", self.task_retries),
             ("重试等待", self.retry_delay), ("请求超时", self.timeout),
@@ -670,6 +680,7 @@ class TaskSettingsDialog(QDialog):
             protected_cookie = protect_secret(self.cookie.text())
         return replace(
             self._original,
+            extraction_mode=self.extraction_mode.currentData(),
             auto_download_threshold=self.threshold.value(),
             segment_threads=self.threads.value(),
             request_retries=self.request_retries.value(),
@@ -680,7 +691,6 @@ class TaskSettingsDialog(QDialog):
             proxy=self.proxy.text().strip(), referer=self.referer.text().strip(),
             user_agent=self.user_agent.text().strip(), protected_cookie=protected_cookie,
         )
-
 
 class MainWindow(QMainWindow):
     def __init__(self, service: TaskService, parent=None) -> None:
@@ -700,6 +710,7 @@ class MainWindow(QMainWindow):
         self._temp_manager = TempFileManager()
         self._last_temp_scan = TempScan()
         self._update_checker = UpdateChecker()
+        self._stats_tracker = RuntimeStatisticsTracker()
         self._background_calls: set[_BackgroundCall] = set()
         self.new_task_dialog: NewTaskDialog | None = None
         self.setWindowTitle("m3u8 下载器")
@@ -809,6 +820,11 @@ class MainWindow(QMainWindow):
         return button
 
     def _build_feedback_area(self) -> None:
+        self.statistics_label = QLabel(
+            "速度 0 B/秒 · 本次 0 B · 下载 0 · 提取 0 · CPU 0% · 内存 0 B"
+        )
+        self.statistics_label.setObjectName("muted")
+        self.statusBar().addWidget(self.statistics_label, 1)
         self.feedback_label = QLabel()
         self.feedback_label.setObjectName("feedback")
         self.feedback_label.hide()
@@ -1038,6 +1054,34 @@ class MainWindow(QMainWindow):
         appearance_form.addRow("主题", self.theme_combo)
         appearance_form.addRow("日志保留", self.log_days_spin)
 
+        site_profiles = QGroupBox("按网站保存提取配置")
+        site_profiles_layout = QVBoxLayout(site_profiles)
+        self.site_profile_table = QTableWidget(0, 4)
+        self.site_profile_table.setHorizontalHeaderLabels(["网站", "模式", "超时", "代理"])
+        self.site_profile_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.site_profile_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.site_profile_table.horizontalHeader().setStretchLastSection(True)
+        self.site_profile_table.setMaximumHeight(170)
+        delete_profile = QPushButton("删除选中配置")
+        delete_profile.clicked.connect(self._delete_selected_site_profile)
+        site_profiles_layout.addWidget(QLabel("网页提取成功后自动学习，同站新任务自动复用。"))
+        site_profiles_layout.addWidget(self.site_profile_table)
+        site_profiles_layout.addWidget(delete_profile, 0, Qt.AlignmentFlag.AlignRight)
+
+        compatibility = QGroupBox("站点兼容性记录")
+        compatibility_layout = QVBoxLayout(compatibility)
+        self.site_compatibility_table = QTableWidget(0, 6)
+        self.site_compatibility_table.setHorizontalHeaderLabels(
+            ["网站", "成功率", "次数", "最近模式", "候选", "平均耗时"]
+        )
+        self.site_compatibility_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.site_compatibility_table.horizontalHeader().setStretchLastSection(True)
+        self.site_compatibility_table.setMaximumHeight(190)
+        clear_compatibility = QPushButton("清空兼容性记录")
+        clear_compatibility.clicked.connect(self._clear_site_compatibility)
+        compatibility_layout.addWidget(self.site_compatibility_table)
+        compatibility_layout.addWidget(clear_compatibility, 0, Qt.AlignmentFlag.AlignRight)
+
         temporary = QGroupBox("临时文件管理")
         temporary_layout = QVBoxLayout(temporary)
         self.temp_status_label = QLabel("尚未扫描")
@@ -1075,6 +1119,8 @@ class MainWindow(QMainWindow):
         root.addWidget(concurrency)
         root.addWidget(behavior)
         root.addWidget(appearance)
+        root.addWidget(site_profiles)
+        root.addWidget(compatibility)
         root.addWidget(temporary)
         root.addWidget(update)
         root.addStretch()
@@ -1104,6 +1150,54 @@ class MainWindow(QMainWindow):
         index = self.theme_combo.findData(settings.theme)
         self.theme_combo.setCurrentIndex(max(0, index))
         self.auto_update_check.setChecked(settings.check_updates_on_startup)
+        self._refresh_site_tables()
+
+    def _refresh_site_tables(self) -> None:
+        if not hasattr(self, "site_profile_table"):
+            return
+        modes = {"smart": "智能", "deep": "深度", "normal": "普通"}
+        profiles = self._service.list_site_profiles()
+        self.site_profile_table.setRowCount(len(profiles))
+        for row, profile in enumerate(profiles):
+            values = [
+                profile.hostname,
+                (
+                    f"智能（优先{modes.get(profile.preferred_extraction_mode, '深度')}）"
+                    if profile.extraction_mode == "smart" else
+                    modes.get(profile.extraction_mode, profile.extraction_mode)
+                ),
+                f"{profile.timeout_seconds} 秒", profile.proxy or "跟随系统",
+            ]
+            for column, value in enumerate(values):
+                self.site_profile_table.setItem(row, column, QTableWidgetItem(value))
+        records = self._service.list_site_compatibility()
+        self.site_compatibility_table.setRowCount(len(records))
+        for row, record in enumerate(records):
+            values = [
+                record.hostname, f"{record.success_rate * 100:.0f}%",
+                str(record.attempts), modes.get(record.last_mode, record.last_mode),
+                str(record.last_candidate_count), f"{record.average_elapsed_seconds:.1f} 秒",
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column == 0:
+                    item.setToolTip(record.last_error or record.last_result)
+                self.site_compatibility_table.setItem(row, column, item)
+
+    def _delete_selected_site_profile(self) -> None:
+        row = self.site_profile_table.currentRow()
+        if row < 0:
+            self._show_feedback("请先选择一个网站配置")
+            return
+        hostname = self.site_profile_table.item(row, 0).text()
+        self._service.delete_site_profile(hostname)
+        self._refresh_site_tables()
+        self._show_feedback(f"已删除 {hostname} 的提取配置")
+
+    def _clear_site_compatibility(self) -> None:
+        self._service.clear_site_compatibility()
+        self._refresh_site_tables()
+        self._show_feedback("兼容性记录已清空")
 
     def _save_settings(self) -> None:
         settings = replace(
@@ -1382,6 +1476,7 @@ class MainWindow(QMainWindow):
         self.completed_sort_combo.setVisible(index == 1)
         self.refresh_tasks()
         if index == 2:
+            self._refresh_site_tables()
             self._clear_task_detail()
 
     def open_new_task_dialog(self) -> None:
@@ -1495,6 +1590,26 @@ class MainWindow(QMainWindow):
         task_items_by_id = {
             task.id: self._service.list_items(task.id) for task in tasks
         }
+        all_items = [item for items in task_items_by_id.values() for item in items]
+        statistics = self._stats_tracker.update(
+            total_downloaded_bytes=sum(item.downloaded_bytes for item in all_items),
+            speed_bps=sum(
+                item.speed_bps for item in all_items
+                if item.status is ItemStatus.DOWNLOADING
+            ),
+            active_downloads=sum(
+                task.download_status is DownloadStatus.RUNNING for task in tasks
+            ),
+            active_extractions=sum(
+                task.extraction_status is ExtractionStatus.RUNNING for task in tasks
+            ),
+        )
+        self.statistics_label.setText(
+            f"速度 {_format_bytes(statistics.speed_bps)}/秒 · "
+            f"本次 {_format_bytes(statistics.session_downloaded_bytes)} · "
+            f"下载 {statistics.active_downloads} · 提取 {statistics.active_extractions} · "
+            f"CPU {statistics.cpu_percent:.1f}% · 内存 {_format_bytes(statistics.memory_bytes)}"
+        )
         active_tasks = [task for task in tasks if task.download_status is not DownloadStatus.COMPLETED]
         active_tasks.sort(key=lambda task: (task.queue_position, task.created_at, task.id))
         completed_tasks = [task for task in tasks if task.download_status is DownloadStatus.COMPLETED]
@@ -2587,6 +2702,7 @@ class MainWindow(QMainWindow):
                 )
             self._service.update_task_settings(task.id, task_settings)
             self._service.add_log(task.id, "信息", "任务", "批量任务设置已保存")
+        self._refresh_site_tables()
         self.refresh_tasks()
         self._refresh_logs()
         self._show_feedback(f"已更新 {len(tasks)} 个任务的设置")

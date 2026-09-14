@@ -15,6 +15,8 @@ from .models import (
     ItemStatus,
     LogEntry,
     SelectionMode,
+    SiteCompatibilityRecord,
+    SiteExtractionProfile,
     SourceKind,
     Task,
     TaskSettings,
@@ -129,6 +131,29 @@ class SQLiteTaskRepository:
                 "CREATE INDEX IF NOT EXISTS idx_task_logs_task_time "
                 "ON task_logs(task_id, created_at)"
             )
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS site_profiles (
+                    hostname TEXT PRIMARY KEY,
+                    settings_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS site_compatibility (
+                    hostname TEXT PRIMARY KEY,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    successes INTEGER NOT NULL DEFAULT 0,
+                    failures INTEGER NOT NULL DEFAULT 0,
+                    deep_successes INTEGER NOT NULL DEFAULT 0,
+                    normal_successes INTEGER NOT NULL DEFAULT 0,
+                    total_elapsed_seconds REAL NOT NULL DEFAULT 0,
+                    last_result TEXT NOT NULL DEFAULT '',
+                    last_mode TEXT NOT NULL DEFAULT '',
+                    last_candidate_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                )
+            """)
 
     @staticmethod
     def _ensure_task_column(connection: sqlite3.Connection, name: str, definition: str) -> None:
@@ -169,6 +194,96 @@ class SQLiteTaskRepository:
                 INSERT INTO app_settings(singleton, settings_json) VALUES(1, ?)
                 ON CONFLICT(singleton) DO UPDATE SET settings_json = excluded.settings_json
             """, (payload,))
+
+    def save_site_profile(self, profile: SiteExtractionProfile) -> None:
+        payload = json.dumps({
+            "extraction_mode": profile.extraction_mode, "proxy": profile.proxy,
+            "preferred_extraction_mode": profile.preferred_extraction_mode,
+            "referer": profile.referer, "user_agent": profile.user_agent,
+            "protected_cookie": profile.protected_cookie,
+            "timeout_seconds": profile.timeout_seconds,
+            "request_retries": profile.request_retries,
+        }, ensure_ascii=False, separators=(",", ":"))
+        with self._connect() as connection:
+            connection.execute("""
+                INSERT INTO site_profiles(hostname, settings_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(hostname) DO UPDATE SET
+                    settings_json=excluded.settings_json, updated_at=excluded.updated_at
+            """, (profile.hostname, payload, profile.updated_at.isoformat()))
+
+    def get_site_profile(self, hostname: str) -> SiteExtractionProfile | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM site_profiles WHERE hostname = ?", (hostname,)
+            ).fetchone()
+        return None if row is None else self._site_profile_from_row(row)
+
+    def list_site_profiles(self) -> List[SiteExtractionProfile]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM site_profiles ORDER BY hostname").fetchall()
+        return [self._site_profile_from_row(row) for row in rows]
+
+    def delete_site_profile(self, hostname: str) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM site_profiles WHERE hostname = ?", (hostname,))
+
+    @staticmethod
+    def _site_profile_from_row(row) -> SiteExtractionProfile:
+        values = json.loads(row["settings_json"])
+        values.setdefault("preferred_extraction_mode", "")
+        return SiteExtractionProfile(
+            hostname=row["hostname"], updated_at=datetime.fromisoformat(row["updated_at"]),
+            **values,
+        )
+
+    def record_site_compatibility(
+        self, hostname: str, *, success: bool, mode: str, elapsed_seconds: float,
+        candidate_count: int, error: str, updated_at: datetime,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute("""
+                INSERT INTO site_compatibility(
+                    hostname, attempts, successes, failures, deep_successes,
+                    normal_successes, total_elapsed_seconds, last_result,
+                    last_mode, last_candidate_count, last_error, updated_at
+                ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(hostname) DO UPDATE SET
+                    attempts=attempts+1, successes=successes+excluded.successes,
+                    failures=failures+excluded.failures,
+                    deep_successes=deep_successes+excluded.deep_successes,
+                    normal_successes=normal_successes+excluded.normal_successes,
+                    total_elapsed_seconds=total_elapsed_seconds+excluded.total_elapsed_seconds,
+                    last_result=excluded.last_result, last_mode=excluded.last_mode,
+                    last_candidate_count=excluded.last_candidate_count,
+                    last_error=excluded.last_error, updated_at=excluded.updated_at
+            """, (
+                hostname, int(success), int(not success), int(success and mode == "deep"),
+                int(success and mode == "normal"), max(0.0, float(elapsed_seconds)),
+                "成功" if success else "失败", mode, max(0, int(candidate_count)),
+                str(error), updated_at.isoformat(),
+            ))
+
+    def list_site_compatibility(self) -> List[SiteCompatibilityRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM site_compatibility ORDER BY updated_at DESC, hostname"
+            ).fetchall()
+        return [SiteCompatibilityRecord(
+            hostname=row["hostname"], attempts=int(row["attempts"]),
+            successes=int(row["successes"]), failures=int(row["failures"]),
+            deep_successes=int(row["deep_successes"]),
+            normal_successes=int(row["normal_successes"]),
+            total_elapsed_seconds=float(row["total_elapsed_seconds"]),
+            last_result=row["last_result"], last_mode=row["last_mode"],
+            last_candidate_count=int(row["last_candidate_count"]),
+            last_error=row["last_error"],
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        ) for row in rows]
+
+    def clear_site_compatibility(self) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM site_compatibility")
 
     def add_many(self, tasks: Iterable[Task]) -> None:
         rows = [(

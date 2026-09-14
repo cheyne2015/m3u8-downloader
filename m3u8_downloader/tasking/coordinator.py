@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import zlib
 
 from .models import Candidate
@@ -40,6 +41,22 @@ class TaskCoordinator:
         """同步执行一次提取；图形界面负责把本方法放入工作线程。"""
         stop_event = stop_event or threading.Event()
         task = self._service.start_extraction(task_id)
+        started_at = time.monotonic()
+        recorded = False
+
+        def record_result(success: bool, mode: str, error: str = "") -> None:
+            nonlocal recorded
+            if recorded or stop_event.is_set():
+                return
+            recorded = True
+            candidate_count = sum(
+                1 for item in self._service.list_items(task_id) if item.valid
+            )
+            self._service.record_site_extraction(
+                task_id, success=success, effective_mode=mode,
+                elapsed_seconds=time.monotonic() - started_at,
+                candidate_count=candidate_count, error=error,
+            )
 
         def on_candidate(candidate: Candidate) -> None:
             self._service.add_candidates(task_id, [candidate])
@@ -48,9 +65,13 @@ class TaskCoordinator:
             self._service.apply_page_title(task_id, title)
 
         mode = task.settings.extraction_mode
-        attempts = [True, False] if mode == "smart" else [mode == "deep"]
+        if mode == "smart":
+            preferred = task.settings.preferred_extraction_mode
+            attempts = [False, True] if preferred == "normal" else [True, False]
+        else:
+            attempts = [mode == "deep"]
         last_error = None
-        for deep in attempts:
+        for mode_index, deep in enumerate(attempts):
             attempt_name = "深度模式" if deep else "普通模式"
             self._service.add_log(
                 task_id, "信息", "提取", f"正在使用{attempt_name}提取网页",
@@ -69,6 +90,7 @@ class TaskCoordinator:
                         return self._service.get_task(task_id)
                     if any(item.valid for item in self._service.list_items(task_id)):
                         self._service.finish_extraction(task_id)
+                        record_result(True, "deep" if deep else "normal")
                         self._service.record_content_identity(task_id)
                         if task.settings.allow_content_duplicate:
                             self._service.add_log(
@@ -123,10 +145,11 @@ class TaskCoordinator:
                     continue
                 break
 
-            if deep and mode == "smart":
+            if mode == "smart" and mode_index < len(attempts) - 1:
+                next_name = "深度模式" if attempts[mode_index + 1] else "普通模式"
                 self._service.add_log(
                     task_id, "警告", "提取",
-                    f"深度模式未完成：{last_error}；自动尝试普通模式",
+                    f"{attempt_name}未完成：{last_error}；自动尝试{next_name}",
                 )
                 continue
             message = str(last_error or "提取失败")
@@ -136,9 +159,11 @@ class TaskCoordinator:
                     "该网页可能不使用 m3u8，或需要登录、Referer、Cookie。"
                 )
             self._service.fail_extraction(task_id, message)
+            record_result(False, "deep" if mode == "deep" else "normal", message)
             raise RuntimeError(message) from last_error
         message = str(last_error or "提取失败")
         if mode == "smart":
             message = "智能模式提取失败（已依次尝试深度模式和普通模式）"
         self._service.fail_extraction(task_id, message)
+        record_result(False, "deep" if mode == "deep" else "normal", message)
         raise RuntimeError(message)
