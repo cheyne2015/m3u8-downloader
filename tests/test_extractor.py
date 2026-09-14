@@ -229,32 +229,18 @@ def test_ensure_playwright_browsers_path_respects_existing(monkeypatch):
 
 
 # ===== 冻结 EXE 从本机注入 playwright =====
-def test_inject_system_playwright_finds_installed(monkeypatch):
-    """模拟冻结 EXE（playwright 不在 sys.path）：应从本机系统 Python 注入并可用。
-
-    本机未安装 playwright 时跳过（不视为失败）。
-    """
+def test_inject_system_playwright_finds_installed(monkeypatch, tmp_path):
+    """模拟冻结 EXE：应从用户 Python 目录注入已安装的 playwright。"""
     import sys as _sys
-    import shutil as _shutil
-    import subprocess as _sp
 
-    py = _shutil.which("py") or _shutil.which("py.exe")
-    have_system = False
-    if py:
-        try:
-            out = _sp.run(
-                [
-                    py, "-3.13", "-c",
-                    "import pathlib,playwright; "
-                    "print(pathlib.Path(playwright.__file__).resolve().parent.parent)",
-                ],
-                capture_output=True, text=True, timeout=15,
-            ).stdout.strip()
-            have_system = bool(out) and os.path.isdir(os.path.join(out, "playwright"))
-        except Exception:
-            have_system = False
-    if not have_system:
-        pytest.skip("本机未安装 system playwright，跳过注入验证")
+    site_packages = (
+        tmp_path / "Programs" / "Python" / "Python313" / "Lib" / "site-packages"
+    )
+    package = site_packages / "playwright"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr("shutil.which", lambda _name: None)
 
     monkeypatch.setattr(extractor, "_SYSTEM_PLAYWRIGHT_INJECTED", False)
     saved = list(_sys.path)
@@ -262,7 +248,7 @@ def test_inject_system_playwright_finds_installed(monkeypatch):
         name: module for name, module in _sys.modules.items()
         if name == "playwright" or name.startswith("playwright.")
     }
-    # 模拟冻结：移除所有含 playwright 包的站点目录
+    # 模拟冻结：移除当前解释器中含 playwright 包的站点目录，只保留上面的用户安装。
     _sys.path[:] = [p for p in _sys.path if not os.path.isdir(os.path.join(p, "playwright"))]
     for name in saved_playwright_modules:
         _sys.modules.pop(name, None)
