@@ -73,6 +73,32 @@ def test_same_website_extractions_share_global_parallel_capacity(tmp_path):
     assert plan.start_extraction == ("same-waiting", "other-waiting")
 
 
+def test_full_extraction_capacity_does_not_start_an_extra_waiting_task(tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / "tasks.db")
+    service = TaskService(
+        repository,
+        id_factory=iter(["one", "two", "three", "four"]).__next__,
+    )
+    tasks = service.create_tasks(CreateTaskRequest(
+        addresses="\n".join([
+            "https://site.example/1",
+            "https://site.example/2",
+            "https://site.example/3",
+            "https://site.example/4",
+        ]),
+        save_directory=str(tmp_path),
+    ))
+    tasks = [
+        replace(task, extraction_status=ExtractionStatus.RUNNING)
+        if index < 3 else task
+        for index, task in enumerate(tasks)
+    ]
+
+    plan = TaskScheduler().plan(tasks, download_limit=3, extraction_limit=3)
+
+    assert plan.start_extraction == ()
+
+
 def test_move_to_front_persists_and_changes_next_waiting_task(tmp_path):
     repository = SQLiteTaskRepository(tmp_path / "tasks.db")
     service = TaskService(repository, id_factory=iter(["one", "two", "three"]).__next__)

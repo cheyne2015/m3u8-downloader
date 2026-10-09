@@ -1253,8 +1253,8 @@ def _deep_extract_inprocess(
             except Exception:
                 pass
 
-            def _on_response_cb(resp) -> None:
-                normalized = _normalize_candidate_url(resp.url or "", url)
+            def _add_url(raw) -> None:
+                normalized = _normalize_candidate_url(raw or "", url)
                 if normalized and normalized not in seen:
                     seen.add(normalized)
                     collected.append(normalized)
@@ -1262,7 +1262,14 @@ def _deep_extract_inprocess(
                     if on_candidate:
                         on_candidate(_new_candidate(normalized, "deep"))
 
+            def _on_response_cb(resp) -> None:
+                _add_url(resp.url)
+
             page.on("response", _on_response_cb)
+            pending_requests = []
+            page.on("request", lambda request: pending_requests.append(request.url)
+                    if _is_m3u8_like(request.url) else None)
+            from .deep_worker import VIDEO_DISCOVERY_SCRIPT
             # 用 commit 而非 domcontentloaded：更早着手收集；导航失败也不直接抛异常，
             # 带着已收集的候选返回，尽可能多给结果。
             try:
@@ -1295,6 +1302,13 @@ def _deep_extract_inprocess(
                 if stop_event is not None and stop_event.is_set():
                     break  # 被停止：提前结束静默等待
                 _try_emit_title()
+                while pending_requests:
+                    _add_url(pending_requests.pop(0))
+                for frame in getattr(page, "frames", []):
+                    try:
+                        frame.evaluate(VIDEO_DISCOVERY_SCRIPT)
+                    except Exception:
+                        continue
                 quiet_ms = (time.time() - _last_new[0]) * 1000
                 if (
                     collected
@@ -1310,6 +1324,15 @@ def _deep_extract_inprocess(
                 content = page.content() or ""
             except Exception:
                 content = ""
+            for frame in getattr(page, "frames", []):
+                try:
+                    frame_content = frame.content() or ""
+                    for matcher in (M3U8_ABS_RE, M3U8_QUOTED_RE):
+                        for match in matcher.finditer(frame_content):
+                            raw = match.group(1) if matcher is M3U8_QUOTED_RE else match.group(0)
+                            _add_url(urljoin(frame.url, raw))
+                except Exception:
+                    continue
             _try_emit_title()
             try:
                 title = page.title() or title

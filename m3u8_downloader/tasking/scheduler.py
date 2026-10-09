@@ -31,14 +31,10 @@ class TaskScheduler:
         )
         extraction_slots = max(0, extraction_limit - active_extraction)
         download_slots = max(0, download_limit - active_download)
-        extraction_ids = []
-        for task in ordered:
-            if task.extraction_status is not ExtractionStatus.WAITING:
-                continue
-            extraction_ids.append(task.id)
-            if len(extraction_ids) >= extraction_slots:
-                break
-        extraction = tuple(extraction_ids)
+        extraction = tuple(
+            task.id for task in ordered
+            if task.extraction_status is ExtractionStatus.WAITING
+        )[:extraction_slots]
         download = tuple(
             task.id for task in ordered
             if task.download_status is DownloadStatus.WAITING

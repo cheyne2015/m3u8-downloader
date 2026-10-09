@@ -188,10 +188,16 @@ class TaskBackgroundController(QObject):
             download_limit=settings.download_task_limit,
             extraction_limit=settings.extraction_task_limit,
         )
+        extraction_slots = max(
+            0, settings.extraction_task_limit - len(self._extracting)
+        )
         for task_id in plan.start_extraction:
+            if extraction_slots <= 0:
+                break
             if task_id in self._extracting:
                 continue
             self._extracting.add(task_id)
+            extraction_slots -= 1
             event = threading.Event()
             self._extract_events[task_id] = event
             self._submit(
@@ -201,10 +207,16 @@ class TaskBackgroundController(QObject):
                     task_id, stop_event=event
                 ),
             )
+        download_slots = max(
+            0, settings.download_task_limit - len(self._downloading)
+        )
         for task_id in plan.start_download:
+            if download_slots <= 0:
+                break
             if task_id in self._downloading:
                 continue
             self._downloading.add(task_id)
+            download_slots -= 1
             event = threading.Event()
             self._download_events[task_id] = event
             self._submit(

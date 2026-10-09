@@ -137,6 +137,9 @@ class TaskService:
     def list_items(self, task_id: str) -> List[DownloadItem]:
         return self._repository.list_items(task_id)
 
+    def list_all_items(self) -> dict[str, List[DownloadItem]]:
+        return self._repository.list_all_items()
+
     def get_item(self, task_id: str, item_id: str) -> DownloadItem:
         for item in self._repository.list_items(task_id):
             if item.id == item_id:

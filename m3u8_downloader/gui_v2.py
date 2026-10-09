@@ -1587,8 +1587,9 @@ class MainWindow(QMainWindow):
         }
         query = self.search_edit.text().strip().lower() if hasattr(self, "search_edit") else ""
         tasks = self._service.list_tasks()
+        all_task_items = self._service.list_all_items()
         task_items_by_id = {
-            task.id: self._service.list_items(task.id) for task in tasks
+            task.id: all_task_items.get(task.id, []) for task in tasks
         }
         all_items = [item for items in task_items_by_id.values() for item in items]
         statistics = self._stats_tracker.update(

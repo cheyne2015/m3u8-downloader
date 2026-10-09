@@ -63,6 +63,21 @@ _SETTLE_MS = 2500
 _MIN_COLLECT_MS = 800
 _PAGES_PER_BROWSER = 3
 
+# 每个视频元素只尝试一次静音播放，不点击网页按钮。
+VIDEO_DISCOVERY_SCRIPT = """() => {
+    const key = Symbol.for('m3u8-downloader.discovery.videos');
+    const attempted = window[key] || (window[key] = new WeakSet());
+    for (const video of document.querySelectorAll('video')) {
+        if (attempted.has(video)) continue;
+        attempted.add(video);
+        try {
+            video.muted = true;
+            const result = video.play();
+            if (result && typeof result.catch === 'function') result.catch(() => {});
+        } catch (_) {}
+    }
+}"""
+
 
 def required_browser_count(active_pages: int) -> int:
     """按每三个活动网页一套 Chromium 计算所需浏览器数量。"""
@@ -265,6 +280,9 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "",
                     pass
 
             page.on("response", _on_response)
+            pending_requests = []
+            page.on("request", lambda request: pending_requests.append(request.url)
+                    if _is_m3u8_like(request.url) else None)
             # 用 commit 而非 domcontentloaded：只要浏览器开始加载页面即着手收集，
             # 更早拿到首屏发起的 m3u8 请求；导航失败（404/超时/无网）也不直接抛
             # 异常，而是带着已收集到的候选返回，尽可能多给结果。
@@ -295,6 +313,13 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "",
             start = time.time()
             while time.time() < deadline:
                 _try_emit_title()
+                while pending_requests:
+                    _add(pending_requests.pop(0))
+                for frame in getattr(page, "frames", []):
+                    try:
+                        frame.evaluate(VIDEO_DISCOVERY_SCRIPT)
+                    except Exception:
+                        continue
                 quiet_ms = (time.time() - _last_new[0]) * 1000
                 if (
                     found
@@ -310,6 +335,15 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "",
                 content = page.content() or ""
             except Exception:
                 content = ""
+            for frame in getattr(page, "frames", []):
+                try:
+                    frame_content = frame.content() or ""
+                    for matcher in (M3U8_ABS_RE, M3U8_QUOTED_RE):
+                        for match in matcher.finditer(frame_content):
+                            raw = match.group(1) if matcher is M3U8_QUOTED_RE else match.group(0)
+                            _add(urljoin(frame.url, raw))
+                except Exception:
+                    continue
             _try_emit_title()
             try:
                 title = page.title() or title
@@ -413,6 +447,9 @@ async def _collect_urls_async(
         except Exception:
             pass
         page.on("response", lambda response: add(getattr(response, "url", "")))
+        pending_requests = []
+        context.on("request", lambda request: pending_requests.append(request.url)
+                   if _is_m3u8_like(request.url) else None)
         try:
             await page.goto(url, wait_until="commit", timeout=int(timeout) * 1000)
         except Exception as goto_exc:
@@ -435,6 +472,13 @@ async def _collect_urls_async(
         started = time.monotonic()
         while time.monotonic() < deadline:
             await try_title()
+            while pending_requests:
+                add(pending_requests.pop(0))
+            for frame in page.frames:
+                try:
+                    await frame.evaluate(VIDEO_DISCOVERY_SCRIPT)
+                except Exception:
+                    continue
             if (
                 found
                 and (time.monotonic() - last_new[0]) * 1000 >= _SETTLE_MS
@@ -446,6 +490,15 @@ async def _collect_urls_async(
             content = (await page.content()) or ""
         except Exception:
             content = ""
+        for frame in page.frames:
+            try:
+                frame_content = (await frame.content()) or ""
+                for matcher in (M3U8_ABS_RE, M3U8_QUOTED_RE):
+                    for match in matcher.finditer(frame_content):
+                        raw = match.group(1) if matcher is M3U8_QUOTED_RE else match.group(0)
+                        add(urljoin(frame.url, raw))
+            except Exception:
+                continue
         await try_title()
         try:
             title = (await page.title()) or title

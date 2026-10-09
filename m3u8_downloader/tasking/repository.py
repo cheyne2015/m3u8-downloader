@@ -5,7 +5,7 @@ import sqlite3
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List
+from typing import Dict, Iterable, List
 
 from .models import (
     AppSettings,
@@ -455,7 +455,23 @@ class SQLiteTaskRepository:
                 SELECT * FROM download_items WHERE task_id = ?
                 ORDER BY output_index, id
             """, (task_id,)).fetchall()
-        return [DownloadItem(
+        return [self._item_from_row(row) for row in rows]
+
+    def list_all_items(self) -> Dict[str, List[DownloadItem]]:
+        """一次查询返回全部任务的下载项，供界面周期刷新使用。"""
+        with self._connect() as connection:
+            rows = connection.execute("""
+                SELECT * FROM download_items
+                ORDER BY task_id, output_index, id
+            """).fetchall()
+        grouped: Dict[str, List[DownloadItem]] = {}
+        for row in rows:
+            grouped.setdefault(row["task_id"], []).append(self._item_from_row(row))
+        return grouped
+
+    @staticmethod
+    def _item_from_row(row) -> DownloadItem:
+        return DownloadItem(
             id=row["id"], task_id=row["task_id"], source_url=row["source_url"],
             label=row["label"], output_index=int(row["output_index"]),
             status=ItemStatus(row["status"]),
@@ -471,7 +487,7 @@ class SQLiteTaskRepository:
             progress_percent=float(row["progress_percent"]),
             speed_bps=float(row["speed_bps"]),
             eta_seconds=float(row["eta_seconds"]),
-        ) for row in rows]
+        )
 
     def save_items(self, items: Iterable[DownloadItem]) -> None:
         rows = [(

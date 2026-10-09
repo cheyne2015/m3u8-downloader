@@ -20,7 +20,19 @@ m3u8-downloader\m3u8-dl.exe
 
 发布版是文件夹程序，`_internal` 中包含 Qt 运行库、程序资源和 ffmpeg。请保留整个文件夹，不要只复制 EXE。
 
-直接 M3U8 下载和普通网页提取不要求用户安装 Python、Qt 或 ffmpeg。需要深度网页提取时，再下载一次 [深度提取组件 1.1.1](https://github.com/cheyne2015/m3u8-downloader/releases/download/v2.1.0/m3u8-downloader-deep-runtime-1.1.1-windows-x64.zip)，把两个压缩包解压到同一位置。以后更新程序时只需替换程序压缩包。
+直接 M3U8 下载和普通网页提取不要求用户安装 Python、Qt 或 ffmpeg。需要深度网页提取时，下载 [深度提取组件 1.1.2](https://github.com/cheyne2015/m3u8-downloader/releases/download/v2.2.1/m3u8-downloader-deep-runtime-1.1.2-windows-x64.zip)，把两个压缩包解压到同一位置。
+
+**升级到 2.2.1 时，请同时更新深度组件到 1.1.2。** 本次识别改进位于深度组件内，单独替换主程序不会生效。后续仅更新主程序的版本可保留已有深度组件，是否需要升级组件以发布说明为准。
+
+### 2.2.1 更新
+
+- 深度提取同时监听请求和响应，补充 XMLHttpRequest、fetch 请求未收到响应时的地址发现。
+- 扫描已加载的内嵌播放器页面，并按各页面地址解析相对链接。
+- 在原有收集预算内尝试静音启动视频元素，捕获播放后才生成的链接。
+- 修复提取槽位已满时仍启动额外任务的问题；提取与下载分别遵守设置中的并发上限。
+- 界面周期刷新改为批量读取下载项，降低大量历史任务带来的数据库查询开销。
+
+上述改进不保证所有网站均能识别；登录限制、自定义播放按钮和超出收集预算的延迟加载仍可能影响结果。
 
 ## 主要功能
 
@@ -135,7 +147,7 @@ M3U8 直链会直接进入下载队列；网页链接会先进入提取队列。
 程序包不内置 Playwright 和 Chromium，因此每次更新仍能保持较小体积。第一次使用深度提取时：
 
 1. 下载程序压缩包。
-2. 再下载一次 [深度提取组件 1.1.1](https://github.com/cheyne2015/m3u8-downloader/releases/download/v2.1.0/m3u8-downloader-deep-runtime-1.1.1-windows-x64.zip)。
+2. 下载 [深度提取组件 1.1.2](https://github.com/cheyne2015/m3u8-downloader/releases/download/v2.2.1/m3u8-downloader-deep-runtime-1.1.2-windows-x64.zip)。
 3. 把两个压缩包解压到同一位置，确认 `deep-runtime` 与 `m3u8-dl.exe` 同级。
 
 ```text

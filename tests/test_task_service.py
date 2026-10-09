@@ -83,6 +83,26 @@ def test_user_can_create_and_restore_page_and_m3u8_tasks(tmp_path):
     assert restored == created
 
 
+def test_list_all_items_returns_one_group_for_each_task_with_items(tmp_path):
+    service = TaskService(
+        SQLiteTaskRepository(tmp_path / "tasks.db"),
+        id_factory=iter(["one", "two"]).__next__,
+    )
+    tasks = service.create_tasks(CreateTaskRequest(
+        addresses=(
+            "https://cdn.example/one.m3u8\n"
+            "https://cdn.example/two.m3u8"
+        ),
+        save_directory=str(tmp_path),
+    ))
+
+    grouped = service.list_all_items()
+
+    assert set(grouped) == {tasks[0].id, tasks[1].id}
+    assert grouped[tasks[0].id] == service.list_items(tasks[0].id)
+    assert grouped[tasks[1].id] == service.list_items(tasks[1].id)
+
+
 def test_page_title_before_site_separator_becomes_automatic_task_name(tmp_path):
     service = TaskService(
         SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=lambda: "page",
