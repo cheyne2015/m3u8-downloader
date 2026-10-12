@@ -17,6 +17,10 @@ class DeepServiceError(RuntimeError):
     """常驻深度服务启动或通信失败。"""
 
 
+class _VerifiedPlaylistURL(str):
+    verified_playlist = True
+
+
 @dataclass
 class _Request:
     messages: queue.Queue = field(default_factory=queue.Queue)
@@ -183,6 +187,8 @@ class DeepWorkerService:
                 event = payload.get("event")
                 if event == "candidate":
                     value = str(payload.get("url") or "")
+                    if payload.get("verified_playlist"):
+                        value = _VerifiedPlaylistURL(value)
                     if value and value not in found:
                         found[value] = None
                         if on_candidate:
@@ -192,8 +198,11 @@ class DeepWorkerService:
                     if title and on_title:
                         on_title(title)
                 elif event == "result":
+                    verified = set(payload.get("verified_urls") or [])
                     for value in payload.get("urls") or []:
                         value = str(value)
+                        if value in verified:
+                            value = _VerifiedPlaylistURL(value)
                         if value and value not in found:
                             found[value] = None
                             if on_candidate:

@@ -43,6 +43,7 @@ class TaskCoordinator:
         task = self._service.start_extraction(task_id)
         started_at = time.monotonic()
         recorded = False
+        observed_urls: set[str] = set()
 
         def record_result(success: bool, mode: str, error: str = "") -> None:
             nonlocal recorded
@@ -59,6 +60,7 @@ class TaskCoordinator:
             )
 
         def on_candidate(candidate: Candidate) -> None:
+            observed_urls.add(candidate.url)
             self._service.add_candidates(task_id, [candidate])
 
         def on_title(title: str) -> None:
@@ -77,19 +79,38 @@ class TaskCoordinator:
                 task_id, "信息", "提取", f"正在使用{attempt_name}提取网页",
             )
             for attempt_index in range(3):
+                observed_urls.clear()
+                attempt_started = time.monotonic()
                 try:
-                    candidates = self._extractor.extract(
-                        task,
-                        deep=deep,
-                        on_candidate=on_candidate,
-                        on_title=on_title,
-                        stop_event=stop_event,
-                    )
-                    self._service.add_candidates(task_id, list(candidates or []))
+                    try:
+                        candidates = list(self._extractor.extract(
+                            task,
+                            deep=deep,
+                            on_candidate=on_candidate,
+                            on_title=on_title,
+                            stop_event=stop_event,
+                        ) or [])
+                        observed_urls.update(candidate.url for candidate in candidates)
+                        self._service.add_candidates(task_id, candidates)
+                    finally:
+                        items = self._service.list_items(task_id)
+                        self._service.add_log(
+                            task_id, "信息", "提取",
+                            f"{attempt_name}第 {attempt_index + 1} 次尝试："
+                            f"回传地址 {len(observed_urls)} 个，"
+                            f"任务记录 {len(items)} 个，标记有效 {sum(item.valid for item in items)} 个，"
+                            f"耗时 {time.monotonic() - attempt_started:.1f} 秒",
+                        )
                     if stop_event.is_set():
                         return self._service.get_task(task_id)
                     if any(item.valid for item in self._service.list_items(task_id)):
                         self._service.finish_extraction(task_id)
+                        finalized_items = self._service.list_items(task_id)
+                        self._service.add_log(
+                            task_id, "信息", "提取",
+                            f"候选处理完成：有效候选 {sum(item.valid for item in finalized_items)} 个，"
+                            f"同等时长备用 {sum(item.duration_backup for item in finalized_items)} 个",
+                        )
                         record_result(True, "deep" if deep else "normal")
                         self._service.record_content_identity(task_id)
                         if task.settings.allow_content_duplicate:

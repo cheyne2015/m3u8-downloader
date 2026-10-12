@@ -32,6 +32,31 @@ def _no_retry_delay(_event, _delay):
     return False
 
 
+def test_extraction_logs_distinguish_discovery_from_same_duration_selection(tmp_path):
+    class FourCandidates:
+        def extract(self, task, *, deep, on_candidate, on_title, stop_event):
+            candidates = [
+                Candidate('https://cdn.example/a.m3u8?token=private', duration_seconds=10.4, estimated_bytes=200),
+                Candidate('https://cdn.example/b.m3u8', duration_seconds=10.8, estimated_bytes=100),
+                Candidate('https://cdn.example/c.m3u8', duration_seconds=20.4, estimated_bytes=400),
+                Candidate('https://cdn.example/d.m3u8', duration_seconds=20.8, estimated_bytes=300),
+            ]
+            for candidate in candidates:
+                on_candidate(candidate)
+            return candidates
+
+    service = TaskService(SQLiteTaskRepository(tmp_path / 'tasks.db'), id_factory=lambda: 'page')
+    task = service.create_tasks(CreateTaskRequest(
+        addresses='https://site.example/four', save_directory=str(tmp_path),
+        settings=TaskSettings(extraction_mode='deep'),
+    ))[0]
+    TaskCoordinator(service, extractor=FourCandidates()).run_extraction(task.id)
+    messages = [entry.message for entry in service.list_logs(task_id=task.id)]
+    assert any('回传地址 4 个' in message for message in messages)
+    assert any('有效候选 2 个，同等时长备用 2 个' in message for message in messages)
+    assert all('private' not in message for message in messages)
+
+
 def test_smart_extraction_falls_back_streams_results_and_applies_threshold(tmp_path):
     repository = SQLiteTaskRepository(tmp_path / "tasks.db")
     service = TaskService(repository, id_factory=lambda: "parent")

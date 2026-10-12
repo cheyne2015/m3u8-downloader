@@ -47,6 +47,72 @@ import time
 from typing import Callable, List, Optional, Tuple
 from urllib.parse import urljoin
 
+# 只检查已完成的小型文本响应，不额外请求接口或读取媒体分片。
+_PLAYLIST_MIMES = frozenset({"application/vnd.apple.mpegurl", "application/x-mpegurl", "audio/mpegurl", "audio/x-mpegurl", "application/m3u8", "video/mpegurl", "video/x-mpegurl"})
+_SNIFF_MIMES = frozenset({"text/plain", "application/octet-stream"})
+_MAX_SNIFF_BYTES = 256 * 1024
+_MAX_SNIFF_RESPONSES = 32
+
+
+class _VerifiedPlaylistURL(str):
+    verified_playlist = True
+
+
+def _verified_urls(urls):
+    return [value for value in urls if getattr(value, "verified_playlist", False)]
+
+
+def _playlist_response_kind(response) -> str:
+    if not 200 <= response.status < 300:
+        return ""
+    headers = response.headers
+    mime = headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if mime in _PLAYLIST_MIMES:
+        return "typed"
+    if mime in _SNIFF_MIMES and response.request.resource_type in ("xhr", "fetch"):
+        try:
+            size = int(headers.get("content-length", ""))
+        except (ValueError, TypeError):
+            return ""
+        # 压缩后大小不能约束解压后的 body，因此不检查压缩响应。
+        if 0 < size <= _MAX_SNIFF_BYTES and headers.get("content-encoding", "identity").lower() == "identity":
+            return "sniff"
+    return ""
+
+
+def _has_playlist_header(body: bytes) -> bool:
+    if len(body) > _MAX_SNIFF_BYTES:
+        return False
+    body = body.removeprefix(b"\xef\xbb\xbf").lstrip()
+    return body.startswith(b"#EXTM3U") and (len(body) == 7 or body[7:8] in (b"\r", b"\n"))
+
+
+def _inspect_finished_playlist(request, add, sniffed: set) -> None:
+    try:
+        response = request.response()
+        if response is None:
+            return
+        kind = _playlist_response_kind(response)
+        if kind == "typed":
+            add(response.url, verified=True)
+        elif kind == "sniff" and response.url not in sniffed and len(sniffed) < _MAX_SNIFF_RESPONSES:
+            sniffed.add(response.url)
+            if _has_playlist_header(response.body()):
+                add(response.url, verified=True)
+    except Exception:
+        pass
+
+
+def _observe_playlist_response(response, add) -> None:
+    """明确的播放列表类型在响应头到达时就回传，不等待正文。"""
+    try:
+        if _playlist_response_kind(response) == "typed":
+            add(response.url, verified=True)
+        else:
+            add(response.url)
+    except Exception:
+        add(getattr(response, "url", ""))
+
 EXIT_OK = 0
 EXIT_NO_PLAYWRIGHT = 2
 EXIT_NO_BROWSER = 3
@@ -172,7 +238,7 @@ def _normalize_proxy(proxy: str) -> str:
 def _safe_abort(route) -> None:
     """「安全」请求拦截：只拦无助于 m3u8 发现的静态资源与分片，其余放行.
 
-    仅 abort ``image`` / ``font`` / ``stylesheet``；对 ``media`` 类型只在 URL 以常见
+    仅 abort ``image`` / ``font``；对 ``media`` 类型只在 URL 以常见
     分片扩展名（.ts/.mp4/.m4s/.m4a/.aac/.webm）结尾时才拦截，避免误杀没有 ``.m3u8``
     后缀的播放列表（有些站点用 /playlist/xxxx 这种地址提供 m3u8）。
     """
@@ -180,7 +246,7 @@ def _safe_abort(route) -> None:
         resource_type = (route.request.resource_type or "").lower()
     except Exception:
         resource_type = ""
-    if resource_type in ("image", "font", "stylesheet"):
+    if resource_type in ("image", "font"):
         try:
             route.abort()
         except Exception:
@@ -236,15 +302,17 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "",
     # 最近一次「新发现 m3u8」的时间戳（静默窗口判定用），用列表包一层便于闭包改写。
     _last_new: List[float] = [time.time()]
 
-    def _add(raw: str) -> None:
+    def _add(raw: str, verified: bool = False) -> None:
         """加入一条命中（清洗 + 去重），回调里抛异常会被 playwright 吞掉."""
         try:
-            cleaned = _is_m3u8_like(raw or "")
+            cleaned = raw if verified and len(raw) <= _MAX_URL_LEN and raw.startswith(("http://", "https://")) else _is_m3u8_like(raw or "")
             if cleaned:
                 cleaned = urljoin(url, cleaned)
         except Exception:
             return
         if cleaned and cleaned not in seen:
+            if verified:
+                cleaned = _VerifiedPlaylistURL(cleaned)
             seen.add(cleaned)
             found.append(cleaned)
             _last_new[0] = time.time()
@@ -275,11 +343,13 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "",
 
             def _on_response(resp) -> None:
                 try:
-                    _add(resp.url or "")
+                    _observe_playlist_response(resp, _add)
                 except Exception:
                     pass
 
             page.on("response", _on_response)
+            sniffed = set()
+            page.on("requestfinished", lambda request: _inspect_finished_playlist(request, _add, sniffed))
             pending_requests = []
             page.on("request", lambda request: pending_requests.append(request.url)
                     if _is_m3u8_like(request.url) else None)
@@ -400,7 +470,7 @@ async def _safe_abort_async(route) -> None:
         url_lower = (route.request.url or "").lower()
     except Exception:
         resource_type, url_lower = "", ""
-    should_abort = resource_type in ("image", "font", "stylesheet") or (
+    should_abort = resource_type in ("image", "font") or (
         resource_type == "media" and any(url_lower.endswith(ext) for ext in _SEGMENT_EXTS)
     )
     try:
@@ -422,14 +492,16 @@ async def _collect_urls_async(
     title = ""
     last_new = [time.monotonic()]
 
-    def add(raw: str) -> None:
+    def add(raw: str, verified: bool = False) -> None:
         try:
-            cleaned = _is_m3u8_like(raw or "")
+            cleaned = raw if verified and len(raw) <= _MAX_URL_LEN and raw.startswith(("http://", "https://")) else _is_m3u8_like(raw or "")
             if cleaned:
                 cleaned = urljoin(url, cleaned)
         except Exception:
             return
         if cleaned and cleaned not in seen:
+            if verified:
+                cleaned = _VerifiedPlaylistURL(cleaned)
             seen.add(cleaned)
             found.append(cleaned)
             last_new[0] = time.monotonic()
@@ -440,13 +512,37 @@ async def _collect_urls_async(
         context_args["proxy"] = {"server": _normalize_proxy(proxy)}
     context = await browser.new_context(**context_args)
     content = ""
+    inspections = set()
+    sniffed = set()
+
+    async def inspect_finished(request):
+        try:
+            response = await request.response()
+            if response is None:
+                return
+            kind = _playlist_response_kind(response)
+            if kind == "typed":
+                add(response.url, verified=True)
+            elif kind == "sniff" and response.url not in sniffed and len(sniffed) < _MAX_SNIFF_RESPONSES:
+                sniffed.add(response.url)
+                if _has_playlist_header(await response.body()):
+                    add(response.url, verified=True)
+        except Exception:
+            pass
+
+    def schedule_inspection(request):
+        task = asyncio.create_task(inspect_finished(request))
+        inspections.add(task)
+        task.add_done_callback(inspections.discard)
+
     try:
         page = await context.new_page()
         try:
             await page.route("**/*", _safe_abort_async)
         except Exception:
             pass
-        page.on("response", lambda response: add(getattr(response, "url", "")))
+        context.on("response", lambda response: _observe_playlist_response(response, add))
+        context.on("requestfinished", schedule_inspection)
         pending_requests = []
         context.on("request", lambda request: pending_requests.append(request.url)
                    if _is_m3u8_like(request.url) else None)
@@ -505,6 +601,11 @@ async def _collect_urls_async(
         except Exception:
             pass
     finally:
+        context.remove_listener("requestfinished", schedule_inspection)
+        for task in inspections:
+            task.cancel()
+        if inspections:
+            await asyncio.gather(*inspections, return_exceptions=True)
         await context.close()
 
     for match in M3U8_ABS_RE.finditer(content):
@@ -605,6 +706,7 @@ async def _run_server(args) -> int:
                             str(request.get("proxy") or ""),
                             lambda value: _emit_service({
                                 "event": "candidate", "request_id": request_id, "url": value,
+                                **({"verified_playlist": True} if getattr(value, "verified_playlist", False) else {}),
                             }),
                             lambda value: _emit_service({
                                 "event": "title", "request_id": request_id, "title": value,
@@ -614,7 +716,7 @@ async def _run_server(args) -> int:
                         await pool.release(browser_index)
                     _emit_service({
                         "event": "result", "request_id": request_id,
-                        "urls": urls, "title": title,
+                        "urls": urls, "title": title, "verified_urls": _verified_urls(urls),
                     })
             except asyncio.CancelledError:
                 _emit_service({"event": "cancelled", "request_id": request_id})
@@ -701,7 +803,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         def emit_candidate(raw: str) -> None:
-            print(json.dumps({"event": "candidate", "url": raw}, ensure_ascii=False), flush=True)
+            print(json.dumps({"event": "candidate", "url": raw,
+                              **({"verified_playlist": True} if getattr(raw, "verified_playlist", False) else {})}, ensure_ascii=False), flush=True)
 
         def emit_title(t: str) -> None:
             print(json.dumps({"event": "title", "title": t}, ensure_ascii=False), flush=True)
@@ -724,7 +827,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return EXIT_RUNTIME_ERROR
 
     # 默认保持单个 JSON 的旧协议；--stream 时前面可以有逐行候选事件。
-    print(json.dumps({"urls": urls, "title": title}, ensure_ascii=False), flush=True)
+    print(json.dumps({"urls": urls, "title": title, "verified_urls": _verified_urls(urls)}, ensure_ascii=False), flush=True)
     return EXIT_OK
 
 

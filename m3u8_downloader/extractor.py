@@ -294,17 +294,18 @@ def _is_m3u8_like(raw: str) -> Optional[str]:
     return cleaned
 
 
-def _normalize_candidate_url(raw: str, base_url: str) -> Optional[str]:
+def _normalize_candidate_url(raw: str, base_url: str, *, verified: bool = False) -> Optional[str]:
     """把原始命中（可能是相对/协议相对路径）归一化为绝对 http(s) URL.
 
     Args:
         raw: 正则命中到的原始字符串.
         base_url: 用于 ``urljoin`` 的基准（页面 URL 或 JS 自身 URL）.
+        verified: 深度组件已由响应类型或正文确认是播放列表，允许没有扩展名。
 
     Returns:
-        归一化后的绝对 URL；不符合规范（非 http/https、超长、非 .m3u8）返回 None.
+        归一化后的绝对 URL；非 http/https、超长或未确认的非 .m3u8 返回 None.
     """
-    cleaned = _is_m3u8_like(raw)
+    cleaned = raw.strip() if verified and raw and len(raw) <= MAX_CANDIDATE_URL_LEN else _is_m3u8_like(raw)
     if cleaned is None:
         return None
     joined = urljoin(base_url, cleaned) if base_url else cleaned
@@ -952,7 +953,7 @@ def _deep_extract_subprocess(
             service_cmd += ["--browsers-path", browsers_path]
 
         def report_raw(raw: str) -> None:
-            normalized = _normalize_candidate_url(raw, url)
+            normalized = _normalize_candidate_url(raw, url, verified=bool(getattr(raw, "verified_playlist", False)))
             if normalized and on_candidate:
                 on_candidate(_new_candidate(normalized, "deep"))
 
@@ -966,7 +967,7 @@ def _deep_extract_subprocess(
             raise DeepModeUnavailableError(str(exc)) from exc
         candidates = []
         for raw in raw_urls:
-            normalized = _normalize_candidate_url(raw, url)
+            normalized = _normalize_candidate_url(raw, url, verified=bool(getattr(raw, "verified_playlist", False)))
             if normalized:
                 candidates.append(_new_candidate(normalized, "deep"))
         return _dedupe(candidates), title
@@ -1015,6 +1016,7 @@ def _deep_extract_subprocess(
         )
 
     raw_urls: List[str] = []
+    verified_urls = set()
     title = ""
     try:
         parsed = json.loads(stdout.strip() or "[]")
@@ -1024,6 +1026,7 @@ def _deep_extract_subprocess(
         elif isinstance(parsed, dict):
             raw_urls = [str(item) for item in (parsed.get("urls") or [])]
             title = str(parsed.get("title") or "").strip()
+            verified_urls = set(parsed.get("verified_urls") or [])
     except (ValueError, TypeError) as exc:
         raise DeepModeUnavailableError(
             "深度模式抓取脚本返回了无法解析的输出（可能版本不匹配）：\n"
@@ -1032,7 +1035,7 @@ def _deep_extract_subprocess(
 
     candidates: List[Candidate] = []
     for raw in raw_urls:
-        normalized = _normalize_candidate_url(raw, url)
+        normalized = _normalize_candidate_url(raw, url, verified=raw in verified_urls)
         if normalized:
             candidates.append(_new_candidate(normalized, "deep"))
     return _dedupe(candidates), title
@@ -1084,6 +1087,7 @@ def _read_deep_stream(
                 payload = json.loads(line)
                 if payload.get("event") == "candidate":
                     urls = [payload["url"]]
+                    verified_urls = set(urls) if payload.get("verified_playlist") else set()
                 elif payload.get("event") == "title":
                     # 标题事件：标题早于候选到达，立即回传（不改变候选列表）
                     title = str(payload.get("title") or "")
@@ -1092,10 +1096,11 @@ def _read_deep_stream(
                     continue
                 else:
                     urls = payload["urls"]
+                    verified_urls = set(payload.get("verified_urls") or [])
                     title = str(payload.get("title") or "")
                     final_seen = True
                 for raw in urls:
-                    normalized = _normalize_candidate_url(raw, page_url)
+                    normalized = _normalize_candidate_url(raw, page_url, verified=raw in verified_urls)
                     if normalized and normalized not in found:
                         candidate = _new_candidate(normalized, "deep")
                         found[normalized] = candidate
@@ -1165,7 +1170,7 @@ def _on_response(resp, collected: List[str]) -> None:
 def _safe_abort(route) -> None:
     """「安全」请求拦截：只拦无助于 m3u8 发现的静态资源与分片，其余放行.
 
-    仅 abort ``image`` / ``font`` / ``stylesheet``；对 ``media`` 类型只在 URL 以常见
+    仅 abort ``image`` / ``font``；对 ``media`` 类型只在 URL 以常见
     分片扩展名（.ts/.mp4/.m4s/.m4a/.aac/.webm）结尾时才拦截，避免误杀没有 ``.m3u8``
     后缀的播放列表（有些站点用 /playlist/xxxx 这种地址提供 m3u8）。
     """
@@ -1173,7 +1178,7 @@ def _safe_abort(route) -> None:
         resource_type = (route.request.resource_type or "").lower()
     except Exception:
         resource_type = ""
-    if resource_type in ("image", "font", "stylesheet"):
+    if resource_type in ("image", "font"):
         try:
             route.abort()
         except Exception:
@@ -1253,8 +1258,8 @@ def _deep_extract_inprocess(
             except Exception:
                 pass
 
-            def _add_url(raw) -> None:
-                normalized = _normalize_candidate_url(raw or "", url)
+            def _add_url(raw, verified: bool = False) -> None:
+                normalized = _normalize_candidate_url(raw or "", url, verified=verified)
                 if normalized and normalized not in seen:
                     seen.add(normalized)
                     collected.append(normalized)
@@ -1263,13 +1268,15 @@ def _deep_extract_inprocess(
                         on_candidate(_new_candidate(normalized, "deep"))
 
             def _on_response_cb(resp) -> None:
-                _add_url(resp.url)
+                _observe_playlist_response(resp, _add_url)
 
             page.on("response", _on_response_cb)
             pending_requests = []
             page.on("request", lambda request: pending_requests.append(request.url)
                     if _is_m3u8_like(request.url) else None)
-            from .deep_worker import VIDEO_DISCOVERY_SCRIPT
+            from .deep_worker import VIDEO_DISCOVERY_SCRIPT, _inspect_finished_playlist, _observe_playlist_response
+            sniffed = set()
+            page.on("requestfinished", lambda request: _inspect_finished_playlist(request, _add_url, sniffed))
             # 用 commit 而非 domcontentloaded：更早着手收集；导航失败也不直接抛异常，
             # 带着已收集的候选返回，尽可能多给结果。
             try:
@@ -1346,7 +1353,7 @@ def _deep_extract_inprocess(
         ) from exc
 
     for raw in collected:
-        u = _normalize_candidate_url(raw, url)
+        u = _normalize_candidate_url(raw, url, verified=True)
         if u:
             candidates.append(_new_candidate(u, "deep"))
 

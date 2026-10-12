@@ -20,9 +20,20 @@ m3u8-downloader\m3u8-dl.exe
 
 发布版是文件夹程序，`_internal` 中包含 Qt 运行库、程序资源和 ffmpeg。请保留整个文件夹，不要只复制 EXE。
 
-直接 M3U8 下载和普通网页提取不要求用户安装 Python、Qt 或 ffmpeg。需要深度网页提取时，下载 [深度提取组件 1.1.2](https://github.com/cheyne2015/m3u8-downloader/releases/download/v2.2.1/m3u8-downloader-deep-runtime-1.1.2-windows-x64.zip)，把两个压缩包解压到同一位置。
+直接 M3U8 下载和普通网页提取不要求用户安装 Python、Qt 或 ffmpeg。需要深度网页提取时，下载 [深度提取组件 1.1.3](https://github.com/cheyne2015/m3u8-downloader/releases/download/v2.2.2/m3u8-downloader-deep-runtime-1.1.3-windows-x64.zip)，把两个压缩包解压到同一位置。
 
-**升级到 2.2.1 时，请同时更新深度组件到 1.1.2。** 本次识别改进位于深度组件内，单独替换主程序不会生效。后续仅更新主程序的版本可保留已有深度组件，是否需要升级组件以发布说明为准。
+**升级到 2.2.2 时，请同时更新深度组件到 1.1.3。** 本次识别改进位于深度组件内，单独替换主程序不会生效。后续仅更新主程序的版本可保留已有深度组件，是否需要升级组件以发布说明为准。
+
+### 2.2.2 更新
+
+- 根据响应类型识别播放列表，补充没有 `.m3u8` 扩展名的接口。
+- 明确的播放列表响应头到达时即可回传，无需等正文加载完成。
+- 对已完成的小型文本响应检查播放列表内容标记，并限制检查大小和数量。
+- 放行播放器初始化需要的样式文件，保留图片、字体及媒体分片的资源限制。
+- 修复已确认的无扩展名候选在组件回传后被主程序再次过滤的问题。
+- 提取日志补充每次尝试的回传数量、有效候选及同等时长备用数量，便于定位漏识别阶段。
+
+本次使用普通本地页面验证，不保证所有网站均能兼容；原有等待预算与并发设置保持不变。
 
 ### 2.2.1 更新
 
@@ -147,7 +158,7 @@ M3U8 直链会直接进入下载队列；网页链接会先进入提取队列。
 程序包不内置 Playwright 和 Chromium，因此每次更新仍能保持较小体积。第一次使用深度提取时：
 
 1. 下载程序压缩包。
-2. 下载 [深度提取组件 1.1.2](https://github.com/cheyne2015/m3u8-downloader/releases/download/v2.2.1/m3u8-downloader-deep-runtime-1.1.2-windows-x64.zip)。
+2. 下载 [深度提取组件 1.1.3](https://github.com/cheyne2015/m3u8-downloader/releases/download/v2.2.2/m3u8-downloader-deep-runtime-1.1.3-windows-x64.zip)。
 3. 把两个压缩包解压到同一位置，确认 `deep-runtime` 与 `m3u8-dl.exe` 同级。
 
 ```text
