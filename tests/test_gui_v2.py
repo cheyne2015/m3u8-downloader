@@ -310,7 +310,8 @@ def test_multi_selected_failed_tasks_offer_batch_reextract_settings_and_queue(
 
     assert "重新提取" in captured["labels"]
     assert "任务设置" in captured["labels"]
-    assert "调整队列" in captured["labels"]
+    assert "更多操作" in captured["labels"]
+    assert "移到最前" in captured["labels"]
     captured["callbacks"]["重新提取"]()
     assert service.get_task(one.id).extraction_status is ExtractionStatus.WAITING
     assert service.get_task(two.id).extraction_status is ExtractionStatus.WAITING

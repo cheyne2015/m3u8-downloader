@@ -2533,147 +2533,112 @@ class MainWindow(QMainWindow):
             selected.data(Qt.ItemDataRole.UserRole)
             for selected in task_list.selectedItems()
         ]
-        menu = QMenu(self)
-        if len(selected_tasks) > 1 and all(
-            selected.download_status is not DownloadStatus.COMPLETED
-            for selected in selected_tasks
-        ):
-            pausable = [
-                selected for selected in selected_tasks
-                if selected.extraction_status in {
-                    ExtractionStatus.WAITING, ExtractionStatus.RUNNING,
-                }
-                or selected.download_status in {
-                    DownloadStatus.WAITING, DownloadStatus.RUNNING,
-                    DownloadStatus.MERGING, DownloadStatus.RETRY_WAIT,
-                }
-            ]
-            resumable = [
-                selected for selected in selected_tasks
-                if selected.extraction_status is ExtractionStatus.PAUSED
-                or selected.download_status is DownloadStatus.PAUSED
-            ]
-            extracting = [
-                selected for selected in selected_tasks
-                if selected.source_kind.value == "web_page"
-                and selected.extraction_status in {
-                    ExtractionStatus.WAITING, ExtractionStatus.RUNNING,
-                }
-            ]
-            restartable = [
-                selected for selected in selected_tasks
-                if selected.source_kind.value == "web_page"
-                and (
-                    selected.extraction_status in {
-                        ExtractionStatus.PAUSED, ExtractionStatus.FAILED,
-                        ExtractionStatus.COMPLETED,
-                    }
-                    or (
-                        selected.extraction_status is ExtractionStatus.NOT_REQUIRED
-                        and selected.download_status is DownloadStatus.PARTIAL_FAILURE
-                    )
-                )
-            ]
-            retryable = [
-                selected for selected in selected_tasks
-                if selected.download_status is DownloadStatus.PARTIAL_FAILURE
-            ]
-            if pausable:
-                menu.addAction("暂停", self._pause_current_task)
-            if resumable:
-                menu.addAction("继续", self._resume_current_task)
-            if extracting:
-                menu.addAction("停止提取", lambda: self._stop_extractions(extracting))
+        # 单选和多选共用能力判断，批量回调只接收适用的任务。
+        active = [selected for selected in selected_tasks
+                  if selected.download_status is not DownloadStatus.COMPLETED]
+        completed = [selected for selected in selected_tasks
+                     if selected.download_status is DownloadStatus.COMPLETED]
+        pausable = [selected for selected in active
+                    if selected.extraction_status in {
+                        ExtractionStatus.WAITING, ExtractionStatus.RUNNING,
+                    } or selected.download_status in {
+                        DownloadStatus.WAITING, DownloadStatus.RUNNING,
+                        DownloadStatus.MERGING, DownloadStatus.RETRY_WAIT,
+                    }]
+        resumable = [selected for selected in active
+                     if selected.extraction_status is ExtractionStatus.PAUSED
+                     or selected.download_status is DownloadStatus.PAUSED]
+        extracting = [selected for selected in active
+                      if selected.source_kind.value == "web_page"
+                      and selected.extraction_status in {
+                          ExtractionStatus.WAITING, ExtractionStatus.RUNNING,
+                      }]
+        restartable = [selected for selected in active
+                       if selected.source_kind.value == "web_page" and (
+                           selected.extraction_status in {
+                               ExtractionStatus.PAUSED, ExtractionStatus.FAILED,
+                               ExtractionStatus.COMPLETED,
+                           } or (
+                               selected.extraction_status is ExtractionStatus.NOT_REQUIRED
+                               and selected.download_status is DownloadStatus.PARTIAL_FAILURE
+                           )
+                       )]
+        completed_web = [selected for selected in completed
+                         if selected.source_kind.value == "web_page"]
+        retryable = [selected for selected in active
+                     if selected.download_status is DownloadStatus.PARTIAL_FAILURE]
+
+        def reextract() -> None:
             if restartable:
-                menu.addAction("重新提取", lambda: self._restart_extractions(restartable))
-            if retryable:
-                menu.addAction(
-                    "重试失败项",
-                    lambda: self._retry_failed_tasks(retryable),
-                )
-            menu.addAction(
-                "任务设置", lambda: self._edit_task_settings_batch(selected_tasks, task)
-            )
-            queue_menu = menu.addMenu("调整队列")
-            queue_menu.addAction(
-                "优先下载 / 移到最前",
-                lambda: self._move_tasks(selected_tasks, "front"),
-            )
-            queue_menu.addAction("上移", lambda: self._move_tasks(selected_tasks, "up"))
-            queue_menu.addAction("下移", lambda: self._move_tasks(selected_tasks, "down"))
-            queue_menu.addAction(
-                "移到最后", lambda: self._move_tasks(selected_tasks, "back")
-            )
-            menu.addSeparator()
-        elif len(selected_tasks) > 1:
-            menu.addAction(
-                "重新下载", lambda: self._redownload_tasks(selected_tasks)
-            )
-            web_tasks = [
-                selected for selected in selected_tasks
-                if selected.source_kind.value == "web_page"
-            ]
-            if web_tasks:
-                menu.addAction(
-                    "重新提取", lambda: self._reextract_task_copies(web_tasks)
-                )
-            menu.addAction(
-                "校验并修复", lambda: self._validate_and_repair_tasks(selected_tasks)
-            )
-            menu.addSeparator()
-        if len(selected_tasks) == 1 and task.download_status is not DownloadStatus.COMPLETED:
-            menu.addAction("继续", self._resume_current_task)
+                self._restart_extractions(restartable)
+            if completed_web:
+                if len(completed_web) == 1:
+                    self._reextract_task_copy(completed_web[0].id)
+                else:
+                    self._reextract_task_copies(completed_web)
+
+        menu = QMenu(self)
+        if pausable:
             menu.addAction("暂停", self._pause_current_task)
-            if task.extraction_status in {ExtractionStatus.WAITING, ExtractionStatus.RUNNING}:
-                menu.addAction("停止提取", self._stop_current_extraction)
-            if task.source_kind.value == "web_page" and (
-                task.extraction_status in {
-                    ExtractionStatus.FAILED, ExtractionStatus.COMPLETED,
-                }
-                or (
-                    task.extraction_status is ExtractionStatus.NOT_REQUIRED
-                    and task.download_status is DownloadStatus.PARTIAL_FAILURE
-                )
-            ):
-                menu.addAction("重新提取", lambda: self._retry_extraction(task.id))
-            if task.download_status is DownloadStatus.PARTIAL_FAILURE:
-                menu.addAction("重试失败项", lambda: self._retry_failed_items(task.id))
-            menu.addAction("任务设置", lambda: self._edit_task_settings(task))
-            queue_menu = menu.addMenu("调整队列")
-            queue_menu.addAction("优先下载 / 移到最前", lambda: self._move_task(task.id, "front"))
-            queue_menu.addAction("上移", lambda: self._move_task(task.id, "up"))
-            queue_menu.addAction("下移", lambda: self._move_task(task.id, "down"))
-            queue_menu.addAction("移到最后", lambda: self._move_task(task.id, "back"))
-            menu.addSeparator()
-        elif len(selected_tasks) == 1:
-            menu.addAction("重新下载", lambda: self._redownload_task(task.id))
-            if task.source_kind.value == "web_page":
-                menu.addAction("重新提取", lambda: self._reextract_task_copy(task.id))
-            completed_items = [
-                candidate for candidate in self._service.list_items(task.id)
-                if candidate.status.value == "completed"
-            ]
-            menu.addAction("查看下载项", lambda: self.detail_tabs.setCurrentIndex(0))
+        if resumable:
+            menu.addAction("继续", self._resume_current_task)
+        if extracting:
+            menu.addAction("停止提取", lambda: self._stop_extractions(extracting))
+        if restartable or completed_web:
+            menu.addAction("重新提取", reextract)
+        if retryable:
+            menu.addAction("重试失败项", lambda: self._retry_failed_tasks(retryable))
+        if completed:
             menu.addAction(
-                "校验并修复", lambda: self._validate_and_repair_task(task.id)
+                "重新下载",
+                lambda: self._redownload_task(completed[0].id)
+                if len(completed) == 1 else self._redownload_tasks(completed),
             )
-            if len(completed_items) == 1:
-                completed_item = completed_items[0]
-                if completed_item.output_path and Path(completed_item.output_path).is_file():
-                    menu.addAction("打开文件", lambda: self._open_item_file(completed_item))
-                    menu.addAction("定位文件", lambda: self._locate_item_file(completed_item))
-                    menu.addAction(
-                        "重命名文件",
-                        lambda: self._rename_item_file(task.id, completed_item),
-                    )
+        if pausable or resumable or extracting or restartable or completed_web or retryable or completed:
+            menu.addSeparator()
         if len(selected_tasks) == 1:
-            menu.addAction("查看详情", lambda: self.detail_tabs.setCurrentIndex(1))
-            menu.addAction("打开保存位置", lambda: self._open_task_directory(task))
+            menu.addAction("定位文件", lambda: self._locate_task_output(task))
             menu.addAction("重命名任务", lambda: self._rename_task(task))
             menu.addAction(
                 "复制原始链接",
                 lambda: self._copy_text(task.source_url, "原始链接已复制"),
             )
+        else:
+            menu.addAction(
+                "复制全部原始链接",
+                lambda: self._copy_text(
+                    "\n".join(selected.source_url for selected in selected_tasks),
+                    f"已复制 {len(selected_tasks)} 个任务的原始链接",
+                ),
+            )
+
+        repairable = [selected for selected in selected_tasks
+                      if any(candidate.status is ItemStatus.COMPLETED and candidate.output_path
+                             for candidate in self._service.list_items(selected.id))]
+        if active or repairable:
+            more = menu.addMenu("更多操作")
+            if active:
+                if len(selected_tasks) == 1:
+                    more.addAction("任务设置", lambda: self._edit_task_settings(task))
+                else:
+                    more.addAction(
+                        "任务设置", lambda: self._edit_task_settings_batch(active, active[0]),
+                    )
+                more.addSeparator()
+                for label, direction in (
+                    ("移到最前", "front"), ("上移", "up"),
+                    ("下移", "down"), ("移到最后", "back"),
+                ):
+                    more.addAction(
+                        label, lambda _checked=False, direction=direction:
+                        self._move_tasks(active, direction),
+                    )
+            if repairable:
+                if active:
+                    more.addSeparator()
+                more.addAction(
+                    "校验并修复", lambda: self._validate_and_repair_tasks(repairable),
+                )
         menu.addSeparator()
         menu.addAction("删除任务", lambda: self._delete_tasks(selected_tasks, False))
         menu.addAction("彻底删除文件", lambda: self._delete_tasks(selected_tasks, True))
@@ -2749,30 +2714,113 @@ class MainWindow(QMainWindow):
         item_id = self.item_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
         item = self._service.get_item(task_id, item_id)
         menu = QMenu(self)
-        if item.status.value in {"unselected", "paused"}:
-            menu.addAction("下载 / 继续", lambda: self._resume_or_queue_item(task_id, item.id))
-        if item.status.value in {"waiting", "downloading", "retry_wait"}:
+        has_controls = False
+        if item.status in {ItemStatus.UNSELECTED, ItemStatus.PAUSED}:
+            label = "继续" if item.status is ItemStatus.PAUSED else "下载"
+            menu.addAction(label, lambda: self._resume_or_queue_item(task_id, item.id))
+            has_controls = True
+        elif item.status in {ItemStatus.WAITING, ItemStatus.DOWNLOADING, ItemStatus.RETRY_WAIT}:
             menu.addAction("暂停", lambda: self._pause_item(task_id, item.id))
-            menu.addAction("跳过", lambda: self._skip_item(task_id, item.id))
-        if item.status.value in {"failed", "skipped"}:
+            has_controls = True
+        elif item.status in {ItemStatus.FAILED, ItemStatus.SKIPPED}:
             menu.addAction("重试", lambda: self._retry_item(task_id, item.id))
-        if item.status.value == "completed":
-            if item.output_path and Path(item.output_path).is_file():
-                menu.addAction("打开文件", lambda: self._open_item_file(item))
-                menu.addAction("定位文件", lambda: self._locate_item_file(item))
-            else:
-                menu.addAction("重新关联文件", lambda: self._relink_item_file(task_id, item))
-            menu.addAction("重命名文件", lambda: self._rename_item_file(task_id, item))
-            menu.addAction(
-                "校验并修复",
-                lambda: self._validate_and_repair_task(task_id, [item.id]),
-            )
+            has_controls = True
+        elif item.status is ItemStatus.COMPLETED:
             menu.addAction("重新下载", lambda: self._redownload_item(task_id, item.id))
+            has_controls = True
+        if has_controls:
+            menu.addSeparator()
+
+        file_exists = bool(item.output_path and Path(item.output_path).is_file())
+        if file_exists:
+            menu.addAction("打开文件", lambda: self._open_item_file(item))
+            menu.addAction("定位文件", lambda: self._locate_item_file(item))
+            # 下载中的输出可能仍被后台持有，仅完成的文件允许重命名。
+            if item.status is ItemStatus.COMPLETED:
+                menu.addAction("重命名文件", lambda: self._rename_item_file(task_id, item))
+        elif item.status is ItemStatus.COMPLETED:
+            menu.addAction("重新关联文件", lambda: self._relink_item_file(task_id, item))
+
+        can_skip = item.status in {ItemStatus.WAITING, ItemStatus.DOWNLOADING, ItemStatus.RETRY_WAIT}
+        can_export = item.status is ItemStatus.FAILED and bool(item.output_path)
+        can_repair = item.status is ItemStatus.COMPLETED
+        if can_skip or can_export or can_repair:
+            more = menu.addMenu("更多操作")
+            if can_skip:
+                more.addAction("跳过", lambda: self._skip_item(task_id, item.id))
+            if can_export:
+                more.addAction(
+                    "合并已下载片段", lambda: self._preview_partial_item(task_id, item.id),
+                )
+            if can_repair:
+                more.addAction(
+                    "校验并修复", lambda: self._validate_and_repair_task(task_id, [item.id]),
+                )
+        if file_exists or item.status is ItemStatus.COMPLETED or can_skip or can_export:
+            menu.addSeparator()
         menu.addAction(
             "复制 m3u8 链接",
             lambda: self._copy_text(item.source_url, "m3u8 链接已复制"),
         )
         menu.exec(self.item_table.viewport().mapToGlobal(position))
+
+    def _preview_partial_item(self, task_id, item_id):
+        controller = getattr(self, 'background_controller', None)
+        if controller is None:
+            self._show_feedback('后台下载服务尚未启动')
+            return
+        if getattr(self, '_partial_controller', None) is not controller:
+            controller.partial_preview_ready.connect(self._confirm_partial_export)
+            controller.partial_exported.connect(self._partial_export_finished)
+            self._partial_controller = controller
+        if controller.inspect_partial(task_id, item_id):
+            self._show_feedback('正在检查已有分片，完成后会显示导出确认')
+        else:
+            self._show_feedback('任务正在执行其他操作，或下载/导出槽位已满，请稍后重试')
+
+    def _confirm_partial_export(self, task_id, item_id, preview):
+        from .utils import format_duration
+        available = format_duration(preview.available_duration) if preview.available_duration is not None else '未知'
+        missing = format_duration(preview.missing_duration) if preview.missing_duration is not None else '未知'
+        ratio = preview.available_segments / preview.total_segments * 100
+        box = QMessageBox(self)
+        box.setWindowTitle('合并已下载片段')
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setText(
+            f'已下载完整分片：{preview.available_segments} / {preview.total_segments}（{ratio:.1f}%）\n'
+            f'可合并时长约 {available}，缺失时长约 {missing}\n\n'
+            '导出文件名将标注“内容不完整”，同名文件自动编号。\n'
+            '缺失片段可能造成画面跳跃、声音断续。\n'
+            '原任务保持失败状态，缓存保留，仍可继续重试补齐。\n\n是否导出？'
+        )
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.button(QMessageBox.StandardButton.Yes).setText('导出')
+        box.button(QMessageBox.StandardButton.No).setText('取消')
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        if box.exec() == QMessageBox.StandardButton.Yes:
+            controller = getattr(self, 'background_controller', None)
+            if controller is not None and controller.export_partial(task_id, item_id, preview):
+                self._show_feedback('正在后台合并已有片段，原任务仍可在导出后补齐')
+            else:
+                self._show_feedback('任务状态已变化或下载/导出槽位已满，请稍后重试')
+
+    def _partial_export_finished(self, task_id, item_id, output):
+        self._refresh_logs()
+        self._show_feedback('内容不完整文件已导出，分片缓存已保留')
+        box = QMessageBox(self)
+        box.setWindowTitle('不完整文件已导出')
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setText(f'已导出：\n{output}\n\n原任务仍可重试补齐，分片缓存已保留。')
+        box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        box.button(QMessageBox.StandardButton.Ok).setText('确定')
+        item = replace(self._service.get_item(task_id, item_id), output_path=output)
+        open_button = box.addButton('打开文件', QMessageBox.ButtonRole.ActionRole)
+        open_button.clicked.connect(lambda: self._open_item_file(item))
+        locate_button = box.addButton('定位文件', QMessageBox.ButtonRole.ActionRole)
+        locate_button.clicked.connect(lambda: self._locate_item_file(item))
+        box.exec()
 
     def _open_item_from_table(self, cell: QTableWidgetItem) -> None:
         task_id = getattr(self, "_detail_task_id", "")
@@ -2972,13 +3020,36 @@ class MainWindow(QMainWindow):
                     return
         raise KeyError(task_id)
 
-    def _open_task_directory(self, task: Task) -> None:
+    def _locate_task_output(self, task: Task) -> None:
+        paths = [Path(item.output_path) for item in self._service.list_items(task.id)
+                 if item.output_path and item.status is not ItemStatus.UNSELECTED]
         directory = Path(task.save_directory)
-        if directory.is_dir():
-            os.startfile(str(directory))
-            self._show_feedback("已打开保存位置")
-        else:
-            self._show_feedback("保存目录不存在")
+        target = None
+        if len(paths) == 1 and paths[0].is_file():
+            target = paths[0]
+        elif len(paths) > 1:
+            parents = {path.parent for path in paths}
+            if len(parents) == 1:
+                folder = next(iter(parents))
+                if folder.resolve() != directory.resolve() and folder.is_dir():
+                    target = folder
+            if target is None:
+                target = next((path for path in paths if path.is_file()), None)
+        try:
+            if target is not None:
+                os.spawnl(
+                    os.P_NOWAIT,
+                    os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "explorer.exe"),
+                    "explorer.exe", "/select,", str(target),
+                )
+                self._show_feedback("已在文件管理器中定位")
+            elif directory.is_dir():
+                os.startfile(str(directory))
+                self._show_feedback("文件尚未生成或已移走，已打开保存目录")
+            else:
+                self._show_feedback("文件及保存目录不存在")
+        except OSError as exc:
+            self._show_feedback(f"无法定位文件：{exc}")
 
     def _rename_task(self, task: Task) -> None:
         name, accepted = QInputDialog.getText(

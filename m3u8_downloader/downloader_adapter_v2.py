@@ -38,6 +38,23 @@ class ExistingDownloaderAdapter:
     def set_global_speed_limit(self, limit: int) -> None:
         self._global_pool.set_limit(limit)
 
+    def inspect_partial(self, task, item, *, stop_event, on_log):
+        downloader = self._recovery_downloader(task, item, stop_event, on_log)
+        return downloader.inspect_partial()
+
+    def export_partial(self, task, item, preview, *, stop_event, on_log):
+        downloader = self._recovery_downloader(task, item, stop_event, on_log)
+        return downloader.export_partial(preview)
+
+    def _recovery_downloader(self, task, item, stop_event, on_log):
+        downloader = self._factory(
+            url=item.source_url, output=item.output_path,
+            timeout=task.settings.timeout_seconds, max_retries=0,
+            proxy=task.settings.proxy or None, stop_event=stop_event, log_callback=on_log,
+        )
+        self._configure_session(downloader, task.settings)
+        return downloader
+
     @staticmethod
     def _refresh_page_access(task, stop_event) -> list:
         """重新访问来源页，为按来源页临时放行的媒体站刷新访问窗口。"""
@@ -88,6 +105,7 @@ class ExistingDownloaderAdapter:
             for attempt in range(2):
                 downloader = self._factory(
                     url=download_url,
+                    cache_source_url=item.source_url,
                     output=str(output_path),
                     workers=settings.segment_threads,
                     max_retries=settings.request_retries,

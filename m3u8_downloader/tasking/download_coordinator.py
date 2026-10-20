@@ -159,6 +159,26 @@ class DownloadCoordinator:
                     pass
             raise
 
+    def inspect_partial(self, task_id, item_id, *, stop_event=None, on_log=lambda _message: None):
+        task, item = self._partial_target(task_id, item_id)
+        return self._downloader.inspect_partial(
+            task, item, stop_event=stop_event or threading.Event(), on_log=on_log,
+        )
+
+    def export_partial(self, task_id, item_id, preview, *, stop_event=None, on_log=lambda _message: None):
+        task, item = self._partial_target(task_id, item_id)
+        # 导出不是 complete_item：原任务保持失败，可继续重试补齐。
+        return self._downloader.export_partial(
+            task, item, preview, stop_event=stop_event or threading.Event(), on_log=on_log,
+        )
+
+    def _partial_target(self, task_id, item_id):
+        task = self._service.get_task(task_id)
+        item = self._service.get_item(task_id, item_id)
+        if item.status is not ItemStatus.FAILED or not item.output_path:
+            raise RuntimeError('仅失败且保留保存路径的下载项可以合并已有片段')
+        return task, item
+
     @staticmethod
     def _is_retryable(error: Exception) -> bool:
         if isinstance(error, (ConnectionError, TimeoutError)):

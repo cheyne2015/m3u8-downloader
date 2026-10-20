@@ -443,6 +443,7 @@ class M3U8Downloader:
         log_callback: Optional[Callable[[str], None]] = None,
         speed_limit: int = 0,
         speed_limiter=None,
+        cache_source_url: Optional[str] = None,
     ) -> None:
         """初始化下载器.
 
@@ -457,8 +458,10 @@ class M3U8Downloader:
             no_proxy: 为 True 时所有请求直连、跳过系统代理环境变量.
             proxy: 手动指定代理地址（如 ``127.0.0.1:7897``）；与 no_proxy 互斥，
                 同时传入时 no_proxy 优先（直连）。
+            cache_source_url: 下载项原始媒体地址；刷新签名后仍可关联其分片缓存。
         """
         self._url = url
+        self._cache_source_url = cache_source_url or url
         self._output = output
         self._workers = workers
         self._max_retries = max_retries
@@ -658,6 +661,109 @@ class M3U8Downloader:
                 json.dump(expected, stream, ensure_ascii=False, separators=(",", ":"))
             os.replace(temp_manifest, manifest_path)
 
+        from .partial_download import save_recovery_snapshot
+        try:
+            save_recovery_snapshot(self._tmp_dir, playlist, self._cache_source_url)
+        except Exception as exc:
+            self._log(f'恢复信息保存失败（{type(exc).__name__}）；分片续传仍可使用，但离线合并可能需要重新读取清单')
+
+    def inspect_partial(self):
+        """预览已有分片；新缓存离线读取，旧缓存只重新获取播放列表。"""
+        from pathlib import Path
+        from .partial_download import (
+            load_partial_preview, output_cache_suffix, playlist_fingerprint,
+            read_partial_preview, save_recovery_snapshot,
+        )
+        try:
+            self._check_stopped()
+            preview = load_partial_preview(self._tmp_root, self._output, self._cache_source_url)
+            if preview is not None:
+                return preview
+            suffix = output_cache_suffix(self._output)
+            if not any(Path(self._tmp_root).glob(f'job-*-{suffix}')):
+                raise RuntimeError('没有找到该下载项的分片缓存')
+            self._log('旧缓存缺少恢复信息，正在重新读取播放列表；不会重下视频分片')
+            try:
+                playlist = self._resolve_playlist()
+                fingerprint = playlist_fingerprint(playlist)
+                directory = Path(self._tmp_root) / f'job-{fingerprint[:16]}-{suffix}'
+                preview = read_partial_preview(directory, playlist, fingerprint)
+            except DownloadCancelled:
+                raise
+            except (OSError, RuntimeError) as exc:
+                raise RuntimeError('旧缓存的播放列表无法读取或已变化，不能安全合并；缓存保留，请先重试失败项') from exc
+            save_recovery_snapshot(directory, playlist, self._cache_source_url)
+            return preview
+        finally:
+            self._session.close()
+
+    def export_partial(self, preview=None) -> str:
+        """手动导出可用片段；不覆盖完整文件，不清理续传缓存。"""
+        from pathlib import Path
+        import shutil
+        import uuid
+        from .partial_download import read_partial_preview, output_cache_suffix, merge_partial_media
+        from .merger import decrypt_segments
+
+        target = temporary = None
+        succeeded = False
+        try:
+            preview = preview or self.inspect_partial()
+            directory = preview.cache_directory.resolve()
+            if (
+                directory.parent != Path(self._tmp_root).resolve()
+                or directory.name != f'job-{preview.fingerprint[:16]}-{output_cache_suffix(self._output)}'
+            ):
+                raise RuntimeError('分片缓存路径不属于该下载项')
+            self._acquire_cache_job_lock(os.path.normcase(str(directory)))
+            self._tmp_dir = str(directory)
+            current = read_partial_preview(directory, preview.playlist, preview.fingerprint)
+            if current.available_indices != preview.available_indices:
+                raise RuntimeError('分片缓存已变化，请重新预览后确认')
+            self._check_stopped()
+            segments = [preview.playlist.segments[index] for index in preview.available_indices]
+            paths = [str(directory / f'seg_{index:05d}.ts') for index in preview.available_indices]
+            selected = M3U8Playlist(segments=segments, has_encryption=preview.playlist.has_encryption)
+            self._download_keys(selected)
+            paths = decrypt_segments(segments, paths)
+            if any(segment.init_section is not None for segment in segments):
+                init_paths = self._download_initialization_sections(
+                    preview.playlist, only_sections={segment.init_section for segment in segments},
+                )
+                paths = self._insert_initialization_sections(selected, paths, init_paths)
+            original = Path(self._output).absolute()
+            original.parent.mkdir(parents=True, exist_ok=True)
+            needed = sum(Path(path).stat().st_size for path in paths) * 2 + 64 * 1024 * 1024
+            if shutil.disk_usage(original.parent).free < needed:
+                raise RuntimeError('磁盘空间不足，无法导出；原始分片已保留')
+            for number in range(1, 10000):
+                suffix = '' if number == 1 else f'_{number:02d}'
+                candidate = original.with_name(f'{original.stem}_内容不完整{suffix}.mp4')
+                try:
+                    with candidate.open('xb'):
+                        pass
+                except FileExistsError:
+                    continue
+                target = candidate
+                break
+            if target is None:
+                raise RuntimeError('同名不完整文件过多，请先整理保存目录')
+            temporary = original.with_name(f'.partial-{uuid.uuid4().hex}.mp4')
+            self._log(f'正在合并已有分片：{preview.available_segments}/{preview.total_segments}；原缓存保留')
+            merge_partial_media(paths, temporary, self._stop_event)
+            self._check_stopped()
+            os.replace(temporary, target)
+            succeeded = True
+            self._log(f'已导出内容不完整文件：{target}；任务仍可重试补齐')
+            return str(target)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+            if target is not None and not succeeded and target.is_file() and target.stat().st_size == 0:
+                target.unlink()
+            self._session.close()
+            self._release_cache_job_lock()
+
     def _fetch_m3u8_content(self, url: str) -> str:
         """获取 m3u8 文件内容.
 
@@ -736,7 +842,7 @@ class M3U8Downloader:
                     )
                     seen_keys[key_uri] = segment.key.key
 
-    def _download_initialization_sections(self, playlist: M3U8Playlist) -> dict:
+    def _download_initialization_sections(self, playlist: M3U8Playlist, only_sections=None) -> dict:
         """下载分段 MP4 的初始化数据，并按清单中的对象返回本地路径。"""
         sections = list(dict.fromkeys(
             segment.init_section for segment in playlist.segments
@@ -744,8 +850,13 @@ class M3U8Downloader:
         ))
         paths = {}
         for index, section in enumerate(sections):
+            if only_sections is not None and section not in only_sections:
+                continue
             self._check_stopped()
             path = os.path.join(self._tmp_dir, f"init_{index:04d}.mp4")
+            if os.path.isfile(path) and not os.path.islink(path) and os.path.getsize(path) > 0:
+                paths[section] = path
+                continue
             headers = None
             if section.byte_range:
                 length_text, _, offset_text = section.byte_range.partition("@")

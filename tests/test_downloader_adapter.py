@@ -56,6 +56,7 @@ def test_adapter_passes_threads_retry_proxy_and_callbacks(tmp_path):
     )
 
     assert captured["url"] == item.source_url
+    assert captured["cache_source_url"] == item.source_url
     assert captured["workers"] == 12
     assert captured["max_retries"] == 4
     assert captured["proxy"] == "127.0.0.1:7897"

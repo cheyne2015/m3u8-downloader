@@ -35,6 +35,8 @@ class TaskBackgroundController(QObject):
     changed = Signal()
     log = Signal(str, str)
     parent_completed = Signal(str, str)
+    partial_preview_ready = Signal(str, str, object)
+    partial_exported = Signal(str, str, str)
 
     def __init__(
         self,
@@ -62,6 +64,7 @@ class TaskBackgroundController(QObject):
         self._completion_emitted: set[str] = set()
         self._pending_deletions: dict[str, bool] = {}
         self._pending_extraction_restarts: set[str] = set()
+        self._partial_results = {}
         self._timer = QTimer(self)
         self._timer.setInterval(max(10, poll_interval_ms))
         self._timer.timeout.connect(self.dispatch)
@@ -104,8 +107,44 @@ class TaskBackgroundController(QObject):
             self._extract_events[task_id].set()
         if task_id in self._download_events:
             self._download_events[task_id].set()
+        if task_id in self._repair_events:
+            self._repair_events[task_id].set()
         self._service.pause_task(task_id)
         self.changed.emit()
+
+    def inspect_partial(self, task_id: str, item_id: str) -> bool:
+        return self._start_partial('partial_preview', task_id, item_id)
+
+    def export_partial(self, task_id: str, item_id: str, preview) -> bool:
+        return self._start_partial('partial_export', task_id, item_id, preview)
+
+    def _start_partial(self, kind, task_id, item_id, preview=None):
+        if task_id in self._extracting or task_id in self._downloading or task_id in self._repairing:
+            return False
+        limit = self._service.load_app_settings().download_task_limit
+        if len(self._downloading) + len(self._repairing) >= limit:
+            return False
+        self._repairing.add(task_id)
+        event = threading.Event()
+        self._repair_events[task_id] = event
+
+        def operate():
+            from .downloader import DownloadCancelled
+            operation = self._download.inspect_partial if kind == 'partial_preview' else self._download.export_partial
+            arguments = () if kind == 'partial_preview' else (preview,)
+            try:
+                result = operation(
+                    task_id, item_id, *arguments, stop_event=event,
+                    on_log=lambda message: self._record_log(task_id, '分片导出', message),
+                )
+            except DownloadCancelled:
+                self._record_log(task_id, '分片导出', '已取消导出，原始分片缓存保留')
+                return
+            if not event.is_set():
+                self._partial_results[task_id] = (item_id, result)
+
+        self._submit(kind, task_id, operate)
+        return True
 
     def resume_task(self, task_id: str) -> None:
         self._service.resume_task(task_id)
@@ -208,12 +247,12 @@ class TaskBackgroundController(QObject):
                 ),
             )
         download_slots = max(
-            0, settings.download_task_limit - len(self._downloading)
+            0, settings.download_task_limit - len(self._downloading) - len(self._repairing)
         )
         for task_id in plan.start_download:
             if download_slots <= 0:
                 break
-            if task_id in self._downloading:
+            if task_id in self._downloading or task_id in self._repairing:
                 continue
             self._downloading.add(task_id)
             download_slots -= 1
@@ -238,6 +277,7 @@ class TaskBackgroundController(QObject):
         self._pool.start(worker)
 
     def _finished(self, kind: str, task_id: str, error: str) -> None:
+        partial_result = self._partial_results.pop(task_id, None) if kind.startswith('partial_') else None
         if kind == "extract":
             self._extracting.discard(task_id)
             self._extract_events.pop(task_id, None)
@@ -267,7 +307,8 @@ class TaskBackgroundController(QObject):
             self._service.retry_extraction(task_id)
             error = ""
         if error:
-            self._service.add_log(task_id, "错误", kind, error)
+            category = '分片导出' if kind.startswith('partial_') else kind
+            self._service.add_log(task_id, "错误", category, error)
             self.log.emit(task_id, f"操作失败：{error}")
         else:
             task = self._service.get_task(task_id)
@@ -278,6 +319,12 @@ class TaskBackgroundController(QObject):
                 self._completion_emitted.add(task.id)
                 self.parent_completed.emit(task.id, task.name)
         self.changed.emit()
+        if partial_result is not None and not error:
+            item_id, result = partial_result
+            if kind == 'partial_preview':
+                self.partial_preview_ready.emit(task_id, item_id, result)
+            else:
+                self.partial_exported.emit(task_id, item_id, str(result))
         if self._timer.isActive():
             QTimer.singleShot(0, self.dispatch)
 
