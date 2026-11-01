@@ -171,21 +171,11 @@ M3U8_QUOTED_RE = re.compile(
 )
 
 
-# ===== 异常体系 =====
-class ExtractError(RuntimeError):
-    """抽取层所有异常的基类."""
-
-
-class PageFetchError(ExtractError):
-    """网页拉取失败 / 返回的是 m3u8 直链而非 HTML."""
-
-
-class DeepModeUnavailableError(ExtractError):
-    """深度模式不可用（playwright 缺失或浏览器未安装）."""
-
-
-class NoCandidateFoundError(ExtractError):
-    """一个候选都没抽到."""
+# 保留旧导入入口；独立 worker 与主程序共用异常类型。
+from .extraction_errors import (
+    ExtractError, PageFetchError, DeepModeUnavailableError, NoCandidateFoundError,
+    LoginRequiredError, LoginGate, LOGIN_EVIDENCE_SCRIPT,
+)
 
 
 # ===== 候选数据类 =====
@@ -595,6 +585,8 @@ def _fetch_page(url: str, session: requests.Session, timeout: int) -> str:
         raise PageFetchError(f"网页拉取失败: {exc}") from exc
 
     status = int(getattr(response, "status_code", 200) or 200)
+    if status == 401:
+        raise LoginRequiredError()
     if status < 200 or status >= 300:
         raise PageFetchError(f"网页返回 HTTP {status}")
 
@@ -873,6 +865,7 @@ def _deep_extract_subprocess(
     stop_event: Optional[threading.Event] = None,
     on_candidate: Optional[Callable[[Candidate], None]] = None,
     on_title: Optional[Callable[[str], None]] = None,
+    browser_headers=None,
 ) -> Tuple[List[Candidate], str]:
     """子进程路线深度抽取：调用系统 Python 执行随包分发的 ``deep_worker.py``.
 
@@ -903,6 +896,16 @@ def _deep_extract_subprocess(
     bundled = _bundled_deep_runtime()
     if bundled is not None:
         worker, browsers_path = bundled
+        if browser_headers:
+            try:
+                metadata = json.loads((Path(worker).parent / "runtime.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                metadata = {}
+            required_version = 2 if "_browser_cookies" in browser_headers else 1
+            version = metadata.get("browser_session_version", 0)
+            if (not isinstance(version, int) or version < required_version
+                    or metadata.get("login_detection_version") != 1):
+                raise DeepModeUnavailableError("请更新深度提取组件到 1.1.6，以支持网页登录状态识别")
         cmd: List[str] = [worker]
         launcher_name = worker
     else:
@@ -962,6 +965,7 @@ def _deep_extract_subprocess(
                 service_cmd, env, url=url, timeout=timeout, wait_ms=wait_ms,
                 proxy=utils._normalize_proxy(proxy) if proxy else "",
                 stop_event=stop_event, on_candidate=report_raw, on_title=on_title,
+                **({"browser_headers": browser_headers} if browser_headers else {}),
             )
         except DeepServiceError as exc:
             raise DeepModeUnavailableError(str(exc)) from exc
@@ -971,6 +975,11 @@ def _deep_extract_subprocess(
             if normalized:
                 candidates.append(_new_candidate(normalized, "deep"))
         return _dedupe(candidates), title
+
+    if browser_headers:
+        env["M3U8_DEEP_BROWSER_HEADERS"] = json.dumps(browser_headers)
+    else:
+        env.pop("M3U8_DEEP_BROWSER_HEADERS", None)
 
     try:
         proc = subprocess.Popen(
@@ -1010,6 +1019,8 @@ def _deep_extract_subprocess(
     stdout = (proc.stdout.read() if proc.stdout else "") or ""
     stderr = (proc.stderr.read() if proc.stderr else "") or ""
 
+    if proc.returncode == 5:
+        raise LoginRequiredError()
     if proc.returncode != 0:
         raise DeepModeUnavailableError(
             _explain_worker_failure(int(proc.returncode), stderr)
@@ -1108,6 +1119,8 @@ def _read_deep_stream(
                             on_candidate(candidate)
             except (ValueError, TypeError, KeyError, AttributeError) as exc:
                 raise DeepModeUnavailableError("深度模式抓取脚本返回了无法解析的流式输出") from exc
+        if proc.returncode == 5:
+            raise LoginRequiredError()
         if proc.returncode != 0:
             raise DeepModeUnavailableError(_explain_worker_failure(proc.returncode, errors))
         if not final_seen:
@@ -1210,6 +1223,7 @@ def _deep_extract_inprocess(
     stop_event: Optional[threading.Event] = None,
     on_candidate: Optional[Callable[[Candidate], None]] = None,
     on_title: Optional[Callable[[str], None]] = None,
+    browser_headers=None,
 ) -> Tuple[List[Candidate], str]:
     """进程内深度抽取（当前进程已能 import playwright 时走这条路，最快）.
 
@@ -1237,6 +1251,7 @@ def _deep_extract_inprocess(
     collected: List[str] = []
     seen: set = set()
     _last_new = [time.time()]
+    gate = LoginGate()
     content = ""
     title = ""
     try:
@@ -1247,10 +1262,15 @@ def _deep_extract_inprocess(
                 headless=True,
                 args=["--disable-gpu", "--disable-dev-shm-usage", "--disable-extensions", "--no-first-run"],
             )
-            proxy_cfg: dict = {}
+            from .deep_worker import browser_context_options, browser_origin_cookies
+            proxy_cfg: dict = browser_context_options(browser_headers)
             if proxy:
                 proxy_cfg["proxy"] = {"server": utils._normalize_proxy(proxy)}
             page = browser.new_page(**proxy_cfg)
+            page.on("pageerror", gate.observe)
+            cookies = browser_origin_cookies(url, browser_headers)
+            if cookies:
+                page.context.add_cookies(cookies)
 
             # 「安全」请求拦截：只拦无助于 m3u8 发现的静态资源与分片。
             try:
@@ -1280,7 +1300,9 @@ def _deep_extract_inprocess(
             # 用 commit 而非 domcontentloaded：更早着手收集；导航失败也不直接抛异常，
             # 带着已收集的候选返回，尽可能多给结果。
             try:
-                page.goto(url, wait_until="commit", timeout=timeout * 1000)
+                navigation = page.goto(url, wait_until="commit", timeout=timeout * 1000)
+                if getattr(navigation, "status", None) == 401:
+                    gate.required = True
             except Exception as goto_exc:
                 print(
                     f"深度模式导航未完成，仍返回已收集的候选：{goto_exc}",
@@ -1345,6 +1367,13 @@ def _deep_extract_inprocess(
                 title = page.title() or title
             except Exception:
                 pass
+            if not collected:
+                gate.observe_title(title)
+                for frame in getattr(page, "frames", []):
+                    try:
+                        gate.observe(frame.evaluate(LOGIN_EVIDENCE_SCRIPT) or "")
+                    except Exception:
+                        pass
             browser.close()
     except Exception as exc:
         raise DeepModeUnavailableError(
@@ -1359,6 +1388,8 @@ def _deep_extract_inprocess(
 
     # 最终 DOM 文本也扫一遍（兼容脚本里拼接、但未走网络请求的情形）
     candidates.extend(_scan_text(content, url, "deep"))
+    if not candidates and gate.required and not (stop_event is not None and stop_event.is_set()):
+        raise LoginRequiredError()
     return _dedupe(candidates), title
 
 
@@ -1370,6 +1401,7 @@ def _deep_extract_with_title(
     stop_event: Optional[threading.Event] = None,
     on_candidate: Optional[Callable[[Candidate], None]] = None,
     on_title: Optional[Callable[[str], None]] = None,
+    browser_headers=None,
 ) -> Tuple[List[Candidate], str]:
     """无头浏览器深度抽取（playwright），额外返回页面标题.
 
@@ -1400,6 +1432,7 @@ def _deep_extract_with_title(
         return _deep_extract_subprocess(
             url, timeout, wait_ms, proxy=proxy, stop_event=stop_event,
             on_candidate=on_candidate, on_title=on_title,
+            **({"browser_headers": browser_headers} if browser_headers else {}),
         )
 
     if not _playwright_importable():
@@ -1407,7 +1440,7 @@ def _deep_extract_with_title(
         _inject_system_playwright()
 
     sync_playwright = _try_import_sync_playwright()
-    callback_args = {}
+    callback_args = {"browser_headers": browser_headers} if browser_headers else {}
     if on_candidate:
         callback_args["on_candidate"] = on_candidate
     if on_title:
@@ -1429,7 +1462,8 @@ def _deep_extract_with_title(
     # 无条件回退子进程。「无可用解释器」「worker 缺失」等具体诊断由
     # _deep_extract_subprocess 给出，比在此处笼统提示更精确。
     return _deep_extract_subprocess(url, timeout, wait_ms, proxy=proxy, stop_event=stop_event,
-                                    on_candidate=on_candidate, on_title=on_title)
+                                    on_candidate=on_candidate, on_title=on_title,
+                                    **({"browser_headers": browser_headers} if browser_headers else {}))
 
 
 def _deep_extract(
@@ -1581,8 +1615,14 @@ def extract_m3u8_from_page_with_title(
         if deep:
             # no_proxy 优先：直连时不给 headless 浏览器传代理
             proxy_for_deep = None if no_proxy else proxy
+            prepared = session.prepare_request(requests.Request("GET", page_url))
+            browser_headers = {key: value for key, value in prepared.headers.items()
+                               if key.lower() in {"user-agent", "referer", "cookie"}}
+            if getattr(session, "_m3u8_browser_cookies", None):
+                browser_headers["_browser_cookies"] = session._m3u8_browser_cookies
             candidates, title = _deep_extract_with_title(
                 page_url, timeout, proxy=proxy_for_deep, stop_event=stop_event,
+                **({"browser_headers": browser_headers} if browser_headers else {}),
                 **({"on_candidate": report} if on_candidate else {}),
                 **({"on_title": on_title} if on_title else {}),
             )
@@ -1637,6 +1677,10 @@ def extract_m3u8_from_page_with_title(
             return candidates, title
 
         if not candidates:
+            gate = LoginGate()
+            gate.observe_title(title)
+            if gate.required:
+                raise LoginRequiredError()
             if deep:
                 raise NoCandidateFoundError(
                     "深度模式仍未在该页面找到任何 m3u8 链接，"

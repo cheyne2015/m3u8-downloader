@@ -489,6 +489,18 @@ class SQLiteTaskRepository:
             eta_seconds=float(row["eta_seconds"]),
         )
 
+    def save_renamed_task(self, task: Task, items: Iterable[DownloadItem]) -> None:
+        """改名只更新名称和路径，在一个事务内提交，保留并发进度更新。"""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE tasks SET name=?, name_edited=?, updated_at=? WHERE id=?",
+                (task.name, int(task.name_edited), task.updated_at.isoformat(), task.id),
+            )
+            connection.executemany(
+                "UPDATE download_items SET output_path=? WHERE id=? AND task_id=?",
+                [(item.output_path, item.id, task.id) for item in items],
+            )
+
     def save_items(self, items: Iterable[DownloadItem]) -> None:
         rows = [(
             item.source_url, item.label, item.output_index, item.status.value,

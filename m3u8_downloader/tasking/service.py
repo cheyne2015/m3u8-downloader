@@ -92,10 +92,12 @@ class TaskService:
                         preferred_extraction_mode=profile.preferred_extraction_mode,
                         proxy=profile.proxy, referer=profile.referer,
                         user_agent=profile.user_agent,
-                        protected_cookie=profile.protected_cookie,
+                        protected_cookie=settings.protected_cookie or profile.protected_cookie,
                         timeout_seconds=profile.timeout_seconds,
                         request_retries=profile.request_retries,
                     )
+                if not settings.protected_cookie:
+                    settings = replace(settings, protected_cookie=self._site_login_cookie(address))
             tasks.append(Task(
                 id=self._id_factory(),
                 source_url=address,
@@ -159,6 +161,23 @@ class TaskService:
     def _site_hostname(url: str) -> str:
         return (urlsplit(url).hostname or "").casefold().rstrip(".")
 
+    def _site_login_cookie(self, url: str) -> str:
+        """Reuse encrypted credentials only within the exact source hostname."""
+        hostname = self._site_hostname(url)
+        if not hostname:
+            return ""
+        profile = self._repository.get_site_profile(hostname)
+        if profile is not None and profile.protected_cookie:
+            return profile.protected_cookie
+        # Older versions stored manually entered login information only on tasks.
+        matching = [task for task in self._repository.list_tasks()
+                    if task.source_kind is SourceKind.WEB_PAGE
+                    and self._site_hostname(task.source_url) == hostname
+                    and task.settings.protected_cookie]
+        if not matching:
+            return ""
+        return max(matching, key=lambda task: task.updated_at).settings.protected_cookie
+
     def save_site_profile(
         self, url: str, settings, *, preferred_mode: str = "",
     ) -> SiteExtractionProfile:
@@ -195,8 +214,13 @@ class TaskService:
             error=error, updated_at=self._clock(),
         )
         if success:
+            settings = task.settings
+            existing = self._repository.get_site_profile(self._site_hostname(task.source_url))
+            if existing is not None and existing.protected_cookie:
+                # A task started before a login update must not restore stale credentials.
+                settings = replace(settings, protected_cookie=existing.protected_cookie)
             profile = self.save_site_profile(
-                task.source_url, task.settings, preferred_mode=effective_mode,
+                task.source_url, settings, preferred_mode=effective_mode,
             )
             preference = "深度模式" if effective_mode == "deep" else "普通模式"
             self.add_log(
@@ -323,6 +347,12 @@ class TaskService:
 
     def start_extraction(self, task_id: str) -> Task:
         task = self._repository.get_task(task_id)
+        if task.source_kind is SourceKind.WEB_PAGE and not task.settings.protected_cookie:
+            cookie = self._site_login_cookie(task.source_url)
+            if cookie:
+                task = replace(task, settings=replace(
+                    task.settings, protected_cookie=cookie,
+                ))
         task = replace(
             task,
             extraction_status=ExtractionStatus.RUNNING,
@@ -350,15 +380,67 @@ class TaskService:
         name = _INVALID_FILE_CHARS.sub("_", name).strip(" ._")
         if not name:
             raise ValueError("任务名称不能为空")
-        task = replace(
-            self._repository.get_task(task_id),
-            name=name,
-            name_edited=True,
-            updated_at=self._clock(),
-        )
-        self._repository.save_many([task])
-        self._clear_unstarted_output_paths(task_id)
-        return task
+        with self._task_locks[task_id]:
+            task = replace(
+                self._repository.get_task(task_id), name=name, name_edited=True,
+                updated_at=self._clock(),
+            )
+            self._rename_completed_outputs(task, self._repository.list_items(task_id))
+            return task
+
+    def _rename_completed_outputs(self, task, items, only_ids=None):
+        """已完成文件分两阶段改名；在途文件与分片缓存保持原路径。"""
+        selected = [item for item in items if item.valid and item.status not in {
+            ItemStatus.UNSELECTED, ItemStatus.SKIPPED,
+        }]
+        sources = {
+            Path(item.output_path) for item in selected
+            if item.status is ItemStatus.COMPLETED and item.output_path
+            and (only_ids is None or item.id in only_ids)
+            and Path(item.output_path).is_file()
+        }
+        reserved = set()
+        updated = []
+        moves = []
+        for index, item in enumerate(selected, 1):
+            if not item.output_path or Path(item.output_path) not in sources:
+                continue
+            source = Path(item.output_path)
+            stem = task.name if len(selected) == 1 else f"{task.name}_{index:02d}"
+            suffix = source.suffix or ".mp4"
+            target = source.with_name(stem + suffix)
+            counter = 1
+            while target in reserved or (target.exists() and target not in sources):
+                target = source.with_name(f"{stem} ({counter}){suffix}")
+                counter += 1
+            reserved.add(target)
+            updated.append(replace(item, output_path=str(target)))
+            if str(source) != str(target):
+                moves.append([source, source.with_name(f".rename-{uuid.uuid4().hex}.tmp"), target, 0])
+        try:
+            for move in moves:
+                move[0].rename(move[1])
+                move[3] = 1
+            for move in moves:
+                move[1].rename(move[2])
+                move[3] = 2
+            self._repository.save_renamed_task(task, updated)
+        except Exception:
+            # 先退回各自的暂存名，再还原原名，兼容文件名互换的情形。
+            for move in reversed(moves):
+                if move[3] == 2:
+                    move[2].rename(move[1])
+                    move[3] = 1
+            for move in reversed(moves):
+                if move[3] == 1:
+                    move[1].rename(move[0])
+            raise
+        return updated
+
+    @staticmethod
+    def _has_output_cache(path: Path) -> bool:
+        fingerprint = hashlib.sha256(os.path.abspath(path).lower().encode("utf-8")).hexdigest()[:8]
+        return any(entry.is_dir() for entry in (path.parent / ".tmp").glob(f"job-*-{fingerprint}"))
 
     def _clear_unstarted_output_paths(self, task_id: str) -> None:
         items = self._repository.list_items(task_id)
@@ -372,12 +454,27 @@ class TaskService:
         self._repository.save_items(changed)
 
     def update_task_settings(self, task_id: str, settings) -> Task:
+        previous = self._repository.get_task(task_id)
         task = replace(
-            self._repository.get_task(task_id),
+            previous,
             settings=settings,
             updated_at=self._clock(),
         )
         self._repository.save_many([task])
+        if (
+            task.source_kind is SourceKind.WEB_PAGE
+            and settings.protected_cookie
+            and settings.protected_cookie != previous.settings.protected_cookie
+        ):
+            hostname = self._site_hostname(task.source_url)
+            profile = self._repository.get_site_profile(hostname)
+            if profile is None:
+                self.save_site_profile(task.source_url, settings)
+            else:
+                self._repository.save_site_profile(replace(
+                    profile, protected_cookie=settings.protected_cookie,
+                    updated_at=self._clock(),
+                ))
         return task
 
     def fail_extraction(self, task_id: str, error: str) -> Task:
@@ -421,6 +518,10 @@ class TaskService:
         return self.finish_parent_if_handled(task_id)
 
     def prepare_output_paths(self, task_id: str, planner) -> List[DownloadItem]:
+        with self._task_locks[task_id]:
+            return self._prepare_output_paths_locked(task_id, planner)
+
+    def _prepare_output_paths_locked(self, task_id: str, planner) -> List[DownloadItem]:
         task = self._repository.get_task(task_id)
         items = self._repository.list_items(task_id)
         desired_paths = planner.plan(
@@ -438,7 +539,9 @@ class TaskService:
                     continue
                 current = Path(item.output_path) if item.output_path else None
                 output_path = current or target
-                should_replan = current is None or not current.exists()
+                should_replan = current is None or (
+                    not current.exists() and not self._has_output_cache(current)
+                )
                 should_migrate = (
                     multiple
                     and current is not None
@@ -464,6 +567,10 @@ class TaskService:
         return updated
 
     def start_item(self, task_id: str, item_id: str) -> DownloadItem:
+        with self._task_locks[task_id]:
+            return self._start_item_locked(task_id, item_id)
+
+    def _start_item_locked(self, task_id: str, item_id: str) -> DownloadItem:
         item = replace(self.get_item(task_id, item_id), status=ItemStatus.DOWNLOADING)
         self._repository.save_items([item])
         task = replace(
@@ -541,6 +648,11 @@ class TaskService:
         self._repository.update_item_progress(item)
 
     def complete_item(self, task_id: str, item_id: str, output_path) -> DownloadItem:
+        with self._task_locks[task_id]:
+            return self._complete_item_locked(task_id, item_id, output_path)
+
+    def _complete_item_locked(self, task_id: str, item_id: str, output_path) -> DownloadItem:
+        previous = self.get_item(task_id, item_id)
         size = os.path.getsize(output_path) if os.path.isfile(output_path) else 0
         item = replace(
             self.get_item(task_id, item_id),
@@ -554,6 +666,14 @@ class TaskService:
         )
         self._repository.save_items([item])
         task = self._repository.get_task(task_id)
+        if task.name_edited and previous.status is not ItemStatus.COMPLETED:
+            try:
+                self._rename_completed_outputs(
+                    task, self._repository.list_items(task_id), only_ids={item_id},
+                )
+                item = self.get_item(task_id, item_id)
+            except OSError as exc:
+                self.add_log(task_id, "警告", "文件", f"下载已完成，文件改名失败，保留原文件：{exc}")
         if task.retry_count or task.retry_at is not None or task.last_error:
             self._repository.save_many([replace(
                 task, retry_count=0, retry_at=None, last_error="", updated_at=self._clock()

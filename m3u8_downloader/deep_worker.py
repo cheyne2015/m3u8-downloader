@@ -44,8 +44,54 @@ import os
 import re
 import sys
 import time
+from http.cookies import SimpleCookie
 from typing import Callable, List, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
+
+try:
+    from m3u8_downloader.extraction_errors import LoginRequiredError, LoginGate, LOGIN_EVIDENCE_SCRIPT
+except ImportError:
+    from extraction_errors import LoginRequiredError, LoginGate, LOGIN_EVIDENCE_SCRIPT
+
+
+_DESKTOP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+)
+
+
+def browser_context_options(headers=None):
+    """只传递浏览器必需的请求设置，不把 Cookie 作为全局请求头。"""
+    headers = {str(key).lower(): str(value) for key, value in (headers or {}).items()}
+    options = {"user_agent": headers.get("user-agent") or _DESKTOP_USER_AGENT}
+    if headers.get("referer"):
+        options["extra_http_headers"] = {"Referer": headers["referer"]}
+    return options
+
+
+def browser_origin_cookies(url, headers=None):
+    """请求头仅绑定原主机；JSON 导出保留其原有站点域名范围。"""
+    exported = (headers or {}).get("_browser_cookies")
+    if isinstance(exported, list):
+        host = (urlsplit(url).hostname or "").lower()
+        return [cookie for cookie in exported if isinstance(cookie, dict)
+                and isinstance(cookie.get("domain"), str)
+                and (host == cookie["domain"].lstrip(".").lower()
+                     or (cookie["domain"].startswith(".")
+                         and host.endswith(cookie["domain"].lower())))]
+    raw = next((str(value) for key, value in (headers or {}).items()
+                if str(key).lower() == "cookie"), "")
+    if not raw:
+        return []
+    parsed = SimpleCookie()
+    try:
+        parsed.load(raw)
+    except Exception:
+        return []
+    parts = urlsplit(url)
+    origin = f"{parts.scheme}://{parts.netloc}/"
+    return [{"name": name, "value": morsel.value, "url": origin}
+            for name, morsel in parsed.items()]
 
 # 只检查已完成的小型文本响应，不额外请求接口或读取媒体分片。
 _PLAYLIST_MIMES = frozenset({"application/vnd.apple.mpegurl", "application/x-mpegurl", "audio/mpegurl", "audio/x-mpegurl", "application/m3u8", "video/mpegurl", "video/x-mpegurl"})
@@ -271,7 +317,8 @@ def _safe_abort(route) -> None:
 
 def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "",
                   on_candidate: Optional[Callable[[str], None]] = None,
-                  on_title: Optional[Callable[[str], None]] = None) -> Tuple[List[str], str]:
+                  on_title: Optional[Callable[[str], None]] = None,
+                  browser_headers=None) -> Tuple[List[str], str]:
     """用 playwright 打开页面并收集 m3u8 链接.
 
     收集两条路：网络响应中的 URL + 最终 DOM 文本扫描（兼容脚本拼接但
@@ -296,6 +343,7 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "",
     # 延迟导入：让「模块缺失」与「运行失败」可区分
     from playwright.sync_api import sync_playwright  # type: ignore[import-not-found]
 
+    gate = LoginGate()
     found: List[str] = []
     seen: set = set()
     title = ""
@@ -329,10 +377,14 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "",
             args=["--disable-gpu", "--disable-dev-shm-usage", "--disable-extensions", "--no-first-run"],
         )
         try:
-            proxy_cfg: dict = {}
+            proxy_cfg: dict = browser_context_options(browser_headers)
             if proxy:
                 proxy_cfg["proxy"] = {"server": _normalize_proxy(proxy)}
             page = browser.new_page(**proxy_cfg)
+            page.on("pageerror", gate.observe)
+            cookies = browser_origin_cookies(url, browser_headers)
+            if cookies:
+                page.context.add_cookies(cookies)
 
             # 「安全」请求拦截：只拦无助于 m3u8 发现的静态资源与分片，
             # 其余一律放行，避免误杀无扩展名的 m3u8 播放列表。
@@ -357,7 +409,9 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "",
             # 更早拿到首屏发起的 m3u8 请求；导航失败（404/超时/无网）也不直接抛
             # 异常，而是带着已收集到的候选返回，尽可能多给结果。
             try:
-                page.goto(url, wait_until="commit", timeout=int(timeout) * 1000)
+                navigation = page.goto(url, wait_until="commit", timeout=int(timeout) * 1000)
+                if getattr(navigation, "status", None) == 401:
+                    gate.required = True
             except Exception as goto_exc:
                 _log(f"[deep_worker] 导航未完成，仍返回已收集的候选：{goto_exc}")
             # 标题尽早回传：导航 commit 后立即取一次；若为空，在静默收集循环里
@@ -419,6 +473,13 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "",
                 title = page.title() or title
             except Exception:
                 pass
+            if not found:
+                gate.observe_title(title)
+                for frame in getattr(page, "frames", []):
+                    try:
+                        gate.observe(frame.evaluate(LOGIN_EVIDENCE_SCRIPT) or "")
+                    except Exception:
+                        pass
         finally:
             try:
                 browser.close()
@@ -430,6 +491,8 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "",
         _add(match.group(0))
     for match in M3U8_QUOTED_RE.finditer(content):
         _add(match.group(1))
+    if not found and gate.required:
+        raise LoginRequiredError()
     return found, title
 
 
@@ -485,8 +548,10 @@ async def _safe_abort_async(route) -> None:
 async def _collect_urls_async(
     browser, url: str, timeout: int, wait_ms: int, proxy: str,
     on_candidate: Callable[[str], None], on_title: Callable[[str], None],
+    browser_headers=None,
 ) -> Tuple[List[str], str]:
     """在共享浏览器的独立 context 中提取一个网页。"""
+    gate = LoginGate()
     found: List[str] = []
     seen: set = set()
     title = ""
@@ -507,7 +572,7 @@ async def _collect_urls_async(
             last_new[0] = time.monotonic()
             on_candidate(cleaned)
 
-    context_args = {}
+    context_args = browser_context_options(browser_headers)
     if proxy:
         context_args["proxy"] = {"server": _normalize_proxy(proxy)}
     context = await browser.new_context(**context_args)
@@ -536,7 +601,11 @@ async def _collect_urls_async(
         task.add_done_callback(inspections.discard)
 
     try:
+        cookies = browser_origin_cookies(url, browser_headers)
+        if cookies:
+            await context.add_cookies(cookies)
         page = await context.new_page()
+        page.on("pageerror", gate.observe)
         try:
             await page.route("**/*", _safe_abort_async)
         except Exception:
@@ -547,7 +616,9 @@ async def _collect_urls_async(
         context.on("request", lambda request: pending_requests.append(request.url)
                    if _is_m3u8_like(request.url) else None)
         try:
-            await page.goto(url, wait_until="commit", timeout=int(timeout) * 1000)
+            navigation = await page.goto(url, wait_until="commit", timeout=int(timeout) * 1000)
+            if getattr(navigation, "status", None) == 401:
+                gate.required = True
         except Exception as goto_exc:
             _log(f"[deep_worker] 导航未完成，仍返回已收集的候选：{goto_exc}")
 
@@ -600,6 +671,13 @@ async def _collect_urls_async(
             title = (await page.title()) or title
         except Exception:
             pass
+        if not found:
+            gate.observe_title(title)
+            for frame in page.frames:
+                try:
+                    gate.observe((await frame.evaluate(LOGIN_EVIDENCE_SCRIPT)) or "")
+                except Exception:
+                    pass
     finally:
         context.remove_listener("requestfinished", schedule_inspection)
         for task in inspections:
@@ -612,6 +690,8 @@ async def _collect_urls_async(
         add(match.group(0))
     for match in M3U8_QUOTED_RE.finditer(content):
         add(match.group(1))
+    if not found and gate.required:
+        raise LoginRequiredError()
     return found, title
 
 
@@ -711,6 +791,8 @@ async def _run_server(args) -> int:
                             lambda value: _emit_service({
                                 "event": "title", "request_id": request_id, "title": value,
                             }),
+                            **({"browser_headers": request["browser_headers"]}
+                               if request.get("browser_headers") else {}),
                         )
                     finally:
                         await pool.release(browser_index)
@@ -724,6 +806,7 @@ async def _run_server(args) -> int:
             except Exception as exc:
                 _emit_service({
                     "event": "error", "request_id": request_id, "message": str(exc),
+                    **({"code": "login_required"} if isinstance(exc, LoginRequiredError) else {}),
                 })
             finally:
                 tasks.pop(request_id, None)
@@ -811,8 +894,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         urls, title = _collect_urls(
             args.url, args.timeout, args.wait_ms, proxy=proxy,
+            **({"browser_headers": json.loads(os.environ["M3U8_DEEP_BROWSER_HEADERS"])}
+               if os.environ.get("M3U8_DEEP_BROWSER_HEADERS") else {}),
             **({"on_candidate": emit_candidate, "on_title": emit_title} if args.stream else {}),
         )
+    except LoginRequiredError:
+        _log("需要登录：请填写或更新网站登录信息后重试")
+        return 5
     except ImportError as exc:
         _log(f"[deep_worker] 缺少 playwright：{exc}")
         _log("[deep_worker] 请在系统 Python 中执行：pip install playwright")

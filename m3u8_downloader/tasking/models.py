@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from ..extraction_errors import LOGIN_REQUIRED_PREFIX
 
 
 class SourceKind(str, Enum):
@@ -196,6 +197,14 @@ class Task:
     completed_at: datetime | None = None
     selection_mode: SelectionMode = SelectionMode.AUTO
     settings: TaskSettings = field(default_factory=TaskSettings)
+
+    @property
+    def login_required(self) -> bool:
+        return (
+            self.extraction_status is ExtractionStatus.FAILED
+            and self.download_status is not DownloadStatus.COMPLETED
+            and self.last_error.startswith(LOGIN_REQUIRED_PREFIX)
+        )
 
 
 @dataclass(frozen=True)

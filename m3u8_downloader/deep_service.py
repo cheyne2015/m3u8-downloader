@@ -13,6 +13,9 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional, Tuple, List
 
 
+from .extraction_errors import LoginRequiredError
+
+
 class DeepServiceError(RuntimeError):
     """常驻深度服务启动或通信失败。"""
 
@@ -141,6 +144,7 @@ class DeepWorkerService:
         proxy: str = "", stop_event: Optional[threading.Event] = None,
         on_candidate: Optional[Callable[[str], None]] = None,
         on_title: Optional[Callable[[str], None]] = None,
+        browser_headers=None,
     ) -> Tuple[List[str], str]:
         with self._lock:
             self._leases += 1
@@ -164,6 +168,7 @@ class DeepWorkerService:
             self._send({
                 "command": "extract", "request_id": request_id, "url": url,
                 "timeout": int(timeout), "wait_ms": int(wait_ms), "proxy": proxy,
+                **({"browser_headers": browser_headers} if browser_headers else {}),
             })
             while True:
                 if stop_event is not None and stop_event.is_set():
@@ -212,6 +217,8 @@ class DeepWorkerService:
                 elif event == "cancelled":
                     return list(found), title
                 elif event == "error":
+                    if payload.get("code") == "login_required":
+                        raise LoginRequiredError()
                     raise DeepServiceError(str(payload.get("message") or "深度提取失败"))
                 elif event == "service_stopped":
                     detail = self._stderr.strip()[-2000:]

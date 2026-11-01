@@ -37,6 +37,7 @@ class TaskBackgroundController(QObject):
     parent_completed = Signal(str, str)
     partial_preview_ready = Signal(str, str, object)
     partial_exported = Signal(str, str, str)
+    login_required = Signal(str)
 
     def __init__(
         self,
@@ -101,6 +102,11 @@ class TaskBackgroundController(QObject):
 
         self._submit("repair", task_id, repair_all)
         return True
+
+    def rename_task(self, task_id: str, name: str):
+        if task_id in self._repairing:
+            raise ValueError("文件正在校验修复或导出，请完成后再重命名任务")
+        return self._service.rename_task(task_id, name)
 
     def pause_task(self, task_id: str) -> None:
         if task_id in self._extract_events:
@@ -325,6 +331,8 @@ class TaskBackgroundController(QObject):
                 self.partial_preview_ready.emit(task_id, item_id, result)
             else:
                 self.partial_exported.emit(task_id, item_id, str(result))
+        if kind == "extract" and self._service.get_task(task_id).login_required:
+            self.login_required.emit(task_id)
         if self._timer.isActive():
             QTimer.singleShot(0, self.dispatch)
 

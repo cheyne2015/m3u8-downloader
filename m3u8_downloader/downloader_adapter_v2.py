@@ -4,6 +4,7 @@ from pathlib import Path
 
 from .downloader import M3U8Downloader, PlaylistFetchError, _SpeedLimiter
 from .secrets_v2 import unprotect_secret
+from .cookie_input import apply_cookie_input
 
 
 class _SharedGlobalSpeedPool:
@@ -52,32 +53,39 @@ class ExistingDownloaderAdapter:
             timeout=task.settings.timeout_seconds, max_retries=0,
             proxy=task.settings.proxy or None, stop_event=stop_event, log_callback=on_log,
         )
-        self._configure_session(downloader, task.settings)
+        self._configure_session(downloader, task.settings, task.source_url)
         return downloader
 
     @staticmethod
     def _refresh_page_access(task, stop_event) -> list:
         """重新访问来源页，为按来源页临时放行的媒体站刷新访问窗口。"""
         from .extractor import extract_m3u8_from_page_with_title
+        from .utils import create_http_session
 
         settings = task.settings
-        candidates, _title = extract_m3u8_from_page_with_title(
-            task.source_url,
-            deep=True,
-            timeout=settings.timeout_seconds,
-            estimate=False,
-            max_workers=1,
-            proxy=settings.proxy or None,
-            stop_event=stop_event,
-        )
-        return candidates
+        session = create_http_session(settings.timeout_seconds, proxy=settings.proxy or None)
+        try:
+            if settings.referer:
+                session.headers["Referer"] = settings.referer
+            if settings.user_agent:
+                session.headers["User-Agent"] = settings.user_agent
+            if settings.protected_cookie:
+                apply_cookie_input(session, unprotect_secret(settings.protected_cookie), task.source_url)
+            candidates, _title = extract_m3u8_from_page_with_title(
+                task.source_url, session=session,
+                deep=True, timeout=settings.timeout_seconds, estimate=False,
+                max_workers=1, proxy=settings.proxy or None, stop_event=stop_event,
+            )
+            return candidates
+        finally:
+            session.close()
 
     @staticmethod
     def _is_web_task(task) -> bool:
         return getattr(task.source_kind, "value", task.source_kind) == "web_page"
 
     @staticmethod
-    def _configure_session(downloader, settings) -> None:
+    def _configure_session(downloader, settings, page_url="") -> None:
         session = getattr(downloader, "_session", None)
         if session is None:
             return
@@ -86,7 +94,7 @@ class ExistingDownloaderAdapter:
         if settings.user_agent:
             session.headers["User-Agent"] = settings.user_agent
         if settings.protected_cookie:
-            session.headers["Cookie"] = unprotect_secret(settings.protected_cookie)
+            apply_cookie_input(session, unprotect_secret(settings.protected_cookie), page_url)
 
     @staticmethod
     def _run_and_wait(downloader):
@@ -117,7 +125,7 @@ class ExistingDownloaderAdapter:
                     progress_callback=on_progress,
                     log_callback=on_log,
                 )
-                self._configure_session(downloader, settings)
+                self._configure_session(downloader, settings, task.source_url)
                 try:
                     return Path(self._run_and_wait(downloader))
                 except PlaylistFetchError as exc:

@@ -340,7 +340,7 @@ def test_deep_mode_proxy_nulled_when_no_proxy(monkeypatch):
     """no_proxy=True 时，深度模式不应拿到代理（直连优先）."""
     called = {"proxy": "UNSET"}
 
-    def _fake_deep(url, timeout=30, wait_ms=5000, proxy=None, stop_event=None):
+    def _fake_deep(url, timeout=30, wait_ms=5000, proxy=None, stop_event=None, browser_headers=None):
         called["proxy"] = proxy
         return [extractor._new_candidate(url, "deep")], ""
 
@@ -357,7 +357,7 @@ def test_deep_mode_proxy_forwarded_when_no_proxy_false(monkeypatch):
     """no_proxy=False 且有代理时，深度模式应收到代理."""
     called = {"proxy": "UNSET"}
 
-    def _fake_deep(url, timeout=30, wait_ms=5000, proxy=None, stop_event=None):
+    def _fake_deep(url, timeout=30, wait_ms=5000, proxy=None, stop_event=None, browser_headers=None):
         called["proxy"] = proxy
         return [extractor._new_candidate(url, "deep")], ""
 

@@ -28,6 +28,7 @@ a = Analysis(
     binaries=[(ffmpeg, ".")],
     datas=[
         ("m3u8_downloader/deep_worker.py", "m3u8_downloader"),
+        ("m3u8_downloader/extraction_errors.py", "m3u8_downloader"),
         ("m3u8_downloader/assets", "m3u8_downloader/assets"),
     ],
     hiddenimports=hiddenimports,

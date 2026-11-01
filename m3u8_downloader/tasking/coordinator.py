@@ -9,6 +9,7 @@ import zlib
 from .models import Candidate
 from .service import TaskService
 from ..content_verifier import ContentDuplicateVerifier
+from ..extraction_errors import LoginRequiredError, LOGIN_REQUIRED_MESSAGE
 
 
 class TaskCoordinator:
@@ -152,6 +153,11 @@ class TaskCoordinator:
                     last_error = exc
                     if stop_event.is_set():
                         return self._service.get_task(task_id)
+                    if isinstance(exc, LoginRequiredError):
+                        task = self._service.fail_extraction(task_id, LOGIN_REQUIRED_MESSAGE)
+                        self._service.add_log(task_id, "警告", "提取", LOGIN_REQUIRED_MESSAGE)
+                        record_result(False, "deep" if deep else "normal", LOGIN_REQUIRED_MESSAGE)
+                        return task
 
                 retry_number = attempt_index + 1
                 if attempt_index < 2 and self._is_retryable(last_error):

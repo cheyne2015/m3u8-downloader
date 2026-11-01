@@ -62,6 +62,7 @@ from .tasking import (
     TaskSettings,
 )
 from .secrets_v2 import protect_secret
+from .cookie_input import normalize_cookie_input
 from . import __version__
 from .temp_files import TempFileManager, TempScan
 from .update_checker import UpdateChecker, is_newer_version, should_check_for_updates
@@ -198,6 +199,8 @@ QSpinBox::down-arrow {{ image: url(\"{down}\"); width: 12px; height: 8px; }}
 
 
 def _task_status(task: Task) -> str:
+    if task.login_required:
+        return "需要登录"
     if task.last_error.startswith("疑似重复内容:"):
         return "待处理"
     extraction = {
@@ -534,6 +537,7 @@ class NewTaskDialog(QDialog):
         self.user_agent_edit = QLineEdit()
         self.cookie_edit = QLineEdit()
         self.cookie_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.cookie_edit.setPlaceholderText("支持 Cookie 请求头或浏览器导出的 JSON")
         self.speed_limit_edit = QLineEdit()
         self.speed_limit_edit.setPlaceholderText("字节/秒；留空使用全局设置")
         self.speed_limit_edit.setValidator(QIntValidator(0, 1_000_000_000, self))
@@ -587,13 +591,20 @@ class NewTaskDialog(QDialog):
             self.directory_edit.setFocus()
             return
         app_settings = self._service.load_app_settings()
+        try:
+            cookie_input = normalize_cookie_input(self.cookie_edit.text())
+        except ValueError as exc:
+            self.validation_label.setText(str(exc))
+            self.validation_label.show()
+            self.cookie_edit.setFocus()
+            return
         task_settings = TaskSettings(
             auto_download_threshold=app_settings.auto_download_threshold,
             extraction_mode=self.extraction_mode.currentData(),
             proxy=self.proxy_edit.text().strip(),
             referer=self.referer_edit.text().strip(),
             user_agent=self.user_agent_edit.text().strip(),
-            protected_cookie=protect_secret(self.cookie_edit.text()),
+            protected_cookie=protect_secret(cookie_input),
             speed_limit=int(self.speed_limit_edit.text() or 0),
             segment_threads=app_settings.segment_threads,
             request_retries=app_settings.request_retries,
@@ -656,7 +667,7 @@ class TaskSettingsDialog(QDialog):
         self.referer = QLineEdit(task.settings.referer)
         self.user_agent = QLineEdit(task.settings.user_agent)
         self.cookie = QLineEdit(); self.cookie.setEchoMode(QLineEdit.EchoMode.Password)
-        self.cookie.setPlaceholderText("留空则保持原登录信息")
+        self.cookie.setPlaceholderText("支持请求头或导出 JSON；留空保持原登录信息")
         for label, widget in [
             ("网页提取模式", self.extraction_mode),
             ("自动下载候选阈值", self.threshold), ("分片线程", self.threads),
@@ -674,10 +685,19 @@ class TaskSettingsDialog(QDialog):
         actions.addWidget(cancel); actions.addWidget(save); root.addLayout(actions)
         _install_button_cursors(self)
 
+    def accept(self) -> None:
+        try:
+            normalize_cookie_input(self.cookie.text())
+        except ValueError as exc:
+            QMessageBox.warning(self, "登录信息格式不正确", str(exc))
+            self.cookie.setFocus()
+            return
+        super().accept()
+
     def settings(self) -> TaskSettings:
         protected_cookie = self._original.protected_cookie
         if self.cookie.text():
-            protected_cookie = protect_secret(self.cookie.text())
+            protected_cookie = protect_secret(normalize_cookie_input(self.cookie.text()))
         return replace(
             self._original,
             extraction_mode=self.extraction_mode.currentData(),
@@ -697,6 +717,8 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self._service = service
         self._force_exit = False
+        self._login_prompted_sites: set[str] = set()
+        self._login_prompt_box = None
         self._log_session_start_id = self._service.latest_log_id()
         self._log_render_key = None
         self._log_rendered_ids: list[int] = []
@@ -2578,6 +2600,8 @@ class MainWindow(QMainWindow):
                     self._reextract_task_copies(completed_web)
 
         menu = QMenu(self)
+        if len(selected_tasks) == 1 and task.login_required:
+            menu.addAction("填写登录信息", lambda: self._edit_login_info(task.id))
         if pausable:
             menu.addAction("暂停", self._pause_current_task)
         if resumable:
@@ -2643,6 +2667,64 @@ class MainWindow(QMainWindow):
         menu.addAction("删除任务", lambda: self._delete_tasks(selected_tasks, False))
         menu.addAction("彻底删除文件", lambda: self._delete_tasks(selected_tasks, True))
         menu.exec(task_list.mapToGlobal(position))
+
+    def _prompt_for_login(self, task_id: str) -> None:
+        try:
+            task = self._service.get_task(task_id)
+        except KeyError:
+            return
+        if not task.login_required:
+            return
+        site = (urlsplit(task.source_url).hostname or "该网站").lower()
+        if site in self._login_prompted_sites:
+            return
+        if self._login_prompt_box is not None:
+            self._show_feedback("还有任务需要登录，可在任务右键菜单中填写登录信息")
+            return
+        self._login_prompted_sites.add(site)
+        box = QMessageBox(self)
+        self._login_prompt_box = box
+        box.setWindowTitle("网站需要登录")
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setText(
+            f"网站 {site} 明确要求登录。\n任务：{task.name[:120]}\n\n"
+            "可填写浏览器导出的 Cookie JSON 或请求头，保存后自动重新提取。\n"
+            "暂不填写时，任务保留为“需要登录”。"
+        )
+        fill = box.addButton("填写登录信息", QMessageBox.ButtonRole.AcceptRole)
+        later = box.addButton("暂不填写", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(later)
+
+        def finished(_result):
+            should_fill = box.clickedButton() is fill
+            self._login_prompt_box = None
+            box.deleteLater()
+            if should_fill:
+                self._edit_login_info(task_id)
+
+        box.finished.connect(finished)
+        box.open()
+
+    def _edit_login_info(self, task_id: str) -> None:
+        try:
+            task = self._service.get_task(task_id)
+        except KeyError:
+            self._show_feedback("该任务已删除")
+            return
+        if not task.login_required:
+            return
+        dialog = TaskSettingsDialog(task, self)
+        dialog.setWindowTitle("填写登录信息（保存后重新提取）")
+        dialog.cookie.setFocus()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        settings = dialog.settings()
+        if not settings.protected_cookie:
+            self._show_feedback("尚未填写登录信息，任务仍等待处理")
+            return
+        self._service.update_task_settings(task.id, settings)
+        self._after_task_action(task.id, "登录信息已加密保存，准备重新提取")
+        self._retry_extraction(task.id)
 
     def _edit_task_settings(self, task: Task) -> None:
         dialog = TaskSettingsDialog(task, self)
@@ -3056,8 +3138,15 @@ class MainWindow(QMainWindow):
             self, "重命名任务", "任务名称", text=task.name
         )
         if accepted and name.strip():
-            self._service.rename_task(task.id, name)
-            self._after_task_action(task.id, f"任务已重命名为 {name.strip()}")
+            try:
+                controller = getattr(self, "background_controller", None)
+                (self._service.rename_task if controller is None else controller.rename_task)(task.id, name)
+            except (OSError, ValueError) as exc:
+                QMessageBox.warning(self, "无法重命名", str(exc))
+                return
+            self._after_task_action(
+                task.id, f"任务已改名为 {name.strip()}，现有完成文件已同步；在途文件完成后应用新名称",
+            )
 
     def _move_task(self, task_id: str, direction: str) -> None:
         self._service.move_task(task_id, direction)
@@ -3164,6 +3253,7 @@ def run_gui_v2(service: TaskService) -> int:
     controller.changed.connect(window.refresh_tasks)
     controller.log.connect(lambda _task_id, _message: window._refresh_logs())
     window.background_controller = controller
+    controller.login_required.connect(window._prompt_for_login)
     window.global_speed_limit_changed = downloader_adapter.set_global_speed_limit
     tray = QSystemTrayIcon(window.windowIcon(), window)
     tray.setToolTip("m3u8 下载器")

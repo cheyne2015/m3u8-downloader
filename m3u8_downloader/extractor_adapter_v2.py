@@ -5,6 +5,7 @@ from __future__ import annotations
 from . import extractor, utils
 from .tasking import Candidate
 from .secrets_v2 import unprotect_secret
+from .cookie_input import apply_cookie_input
 
 
 def _map_candidate(candidate) -> Candidate:
@@ -33,13 +34,12 @@ class ExistingExtractorAdapter:
             session.headers["Referer"] = settings.referer
         if settings.user_agent:
             session.headers["User-Agent"] = settings.user_agent
-        if settings.protected_cookie:
-            session.headers["Cookie"] = unprotect_secret(settings.protected_cookie)
-
         def report(candidate) -> None:
             on_candidate(_map_candidate(candidate))
 
         try:
+            if settings.protected_cookie:
+                apply_cookie_input(session, unprotect_secret(settings.protected_cookie), task.source_url)
             candidates, title = self._extract(
                 task.source_url,
                 session=session,
