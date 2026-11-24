@@ -65,7 +65,10 @@ from .secrets_v2 import protect_secret
 from .cookie_input import normalize_cookie_input
 from . import __version__
 from .temp_files import TempFileManager, TempScan
-from .update_checker import UpdateChecker, is_newer_version, should_check_for_updates
+from .update_checker import (
+    UpdateChecker, deep_update_available, installed_deep_version,
+    is_newer_version, should_check_for_updates,
+)
 from .resource_stats import RuntimeStatisticsTracker, DownloadSpeedTracker
 
 
@@ -1406,23 +1409,43 @@ class MainWindow(QMainWindow):
             settings,
             last_update_check_at=datetime.now(timezone.utc).isoformat(),
         ))
-        if is_newer_version(release.version, __version__):
-            self.update_status_label.setText(
-                f"发现新版本：{release.version}（当前 {__version__}）"
-            )
+        main_update = is_newer_version(release.version, __version__)
+        directory = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
+        installed = installed_deep_version(directory)
+        deep_update = deep_update_available(release, installed)
+        if main_update or deep_update:
+            updates = []
+            if main_update:
+                updates.append(f"主程序 {__version__} → {release.version}")
+            if deep_update:
+                current = installed or "安装不完整"
+                updates.append(f"深度组件 {current} → {release.deep_version}")
+            self.update_status_label.setText("发现更新：" + "；".join(updates))
             box = QMessageBox(self)
             box.setWindowTitle("发现新版本")
-            box.setText(f"发现 m3u8 下载器 {release.version}")
-            box.setInformativeText(f"当前版本：{__version__}")
+            box.setText("\n".join(updates))
+            box.setInformativeText("下载后请退出程序，再将对应压缩包解压到安装位置。")
+            downloads = {}
+            if main_update and release.main_download:
+                downloads[box.addButton("下载主程序", QMessageBox.ButtonRole.ActionRole)] = release.main_download
+            if deep_update:
+                downloads[box.addButton("下载深度组件", QMessageBox.ButtonRole.ActionRole)] = release.deep_download
             open_release = box.addButton("打开下载页面", QMessageBox.ButtonRole.AcceptRole)
             box.addButton("稍后", QMessageBox.ButtonRole.RejectRole)
             box.exec()
             if box.clickedButton() is open_release:
                 QDesktopServices.openUrl(QUrl(release.url))
+            elif address := downloads.get(box.clickedButton()):
+                QDesktopServices.openUrl(QUrl(address))
         else:
-            self.update_status_label.setText(f"当前版本：{__version__}（已是最新）")
+            self.update_status_label.setText(f"主程序：{__version__}（已是最新）")
             if manual:
-                QMessageBox.information(self, "检查更新", "当前已经是最新版本。")
+                if installed is None:
+                    QMessageBox.information(self, "检查更新", "主程序已经是最新版本。深度组件未安装。")
+                elif not release.deep_version:
+                    QMessageBox.information(self, "检查更新", "主程序已经是最新版本。未能确认深度组件的最新版本。")
+                else:
+                    QMessageBox.information(self, "检查更新", "主程序和深度组件已经是最新版本。")
 
     def _apply_theme(self, theme: str) -> None:
         if theme == "system":

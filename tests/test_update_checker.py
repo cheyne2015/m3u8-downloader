@@ -6,6 +6,8 @@ from m3u8_downloader.update_checker import (
     ReleaseInfo,
     UpdateCheckError,
     UpdateChecker,
+    deep_update_available,
+    installed_deep_version,
     is_newer_version,
     should_check_for_updates,
 )
@@ -94,3 +96,32 @@ def test_automatic_check_waits_24_hours_but_manual_check_does_not():
     assert should_check_for_updates("2026-09-13T11:59:59+00:00", now=now)
     assert not should_check_for_updates("2026-09-13T12:00:01+00:00", now=now)
     assert should_check_for_updates("", now=now)
+
+
+def test_current_app_still_offers_new_deep_runtime(tmp_path):
+    base = "https://github.com/cheyne2015/m3u8-downloader/releases"
+    name = "m3u8-downloader-deep-runtime-1.1.7-windows-x64.zip"
+    address = f"{base}/download/v2.2.5/{name}"
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"tag_name": "v2.2.5", "html_url": f"{base}/tag/v2.2.5",
+                    "assets": [{"name": name, "browser_download_url": address}]}
+
+    release = UpdateChecker(request=lambda *args, **kwargs: Response()).fetch_latest()
+    assert release.deep_download == address
+    assert not is_newer_version(release.version, "2.2.5")
+    assert not deep_update_available(release, installed_deep_version(tmp_path))
+    runtime = tmp_path / "deep-runtime"
+    runtime.mkdir()
+    assert deep_update_available(release, installed_deep_version(tmp_path))
+    (runtime / "deep-worker.exe").touch()
+    (runtime / "browsers").mkdir()
+    manifest = runtime / "runtime.json"
+    manifest.write_text('{"runtime_version":"1.1.6"}', encoding="utf-8")
+    assert deep_update_available(release, installed_deep_version(tmp_path))
+    manifest.write_text('{"runtime_version":"1.1.7"}', encoding="utf-8")
+    assert not deep_update_available(release, installed_deep_version(tmp_path))

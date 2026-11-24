@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import re
+import json
+from pathlib import Path
 
 import requests
 
@@ -24,6 +26,29 @@ class ReleaseInfo:
     version: str
     url: str
     name: str = ""
+    main_download: str = ""
+    deep_version: str = ""
+    deep_download: str = ""
+
+
+def installed_deep_version(program_directory: Path) -> str | None:
+    runtime = program_directory / "deep-runtime"
+    if not runtime.is_dir():
+        return None
+    try:
+        if not (runtime / "deep-worker.exe").is_file() or not (runtime / "browsers").is_dir():
+            return ""
+        version = json.loads((runtime / "runtime.json").read_text(encoding="utf-8-sig"))["runtime_version"]
+        _version_parts(version)
+        return version
+    except (OSError, ValueError, KeyError, AttributeError, TypeError):
+        return ""
+
+
+def deep_update_available(release: ReleaseInfo, installed: str | None) -> bool:
+    return bool(release.deep_version and installed is not None and (
+        not installed or is_newer_version(release.deep_version, installed)
+    ))
 
 
 def _version_parts(value: str) -> tuple[int, ...]:
@@ -76,7 +101,20 @@ class UpdateChecker:
             _version_parts(version)
             if not url.startswith("https://github.com/cheyne2015/m3u8-downloader/"):
                 raise ValueError("发布页地址无效")
-            return ReleaseInfo(version, url, str(payload.get("name") or "").strip())
+            main_download = deep_download = deep_version = ""
+            base = f"https://github.com/cheyne2015/m3u8-downloader/releases/download/{payload['tag_name']}/"
+            for asset in payload.get("assets") or []:
+                name = asset.get("name", "")
+                address = asset.get("browser_download_url", "")
+                if address != base + name:
+                    continue
+                if name == f"m3u8-downloader-{version}-windows-x64.zip":
+                    main_download = address
+                match = re.fullmatch(r"m3u8-downloader-deep-runtime-(\d+(?:\.\d+)+)-windows-x64\.zip", name)
+                if match and (not deep_version or is_newer_version(match[1], deep_version)):
+                    deep_version, deep_download = match[1], address
+            return ReleaseInfo(version, url, str(payload.get("name") or "").strip(),
+                               main_download, deep_version, deep_download)
         except Exception as exc:
             api_error = exc
 
