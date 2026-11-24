@@ -72,6 +72,7 @@ class AppSettings:
     window_height: int = 0
     item_table_header_state: str = ""
     check_updates_on_startup: bool = True
+    skip_unknown_estimates: bool = True
     last_update_check_at: str = ""
 
     def __post_init__(self) -> None:
@@ -118,6 +119,10 @@ class TaskSettings:
     retry_delay_seconds: int = 30
     timeout_seconds: int = 30
     allow_content_duplicate: bool = False
+    # 旧任务未记录该字段时保留原行为；界面新建任务使用全局默认值。
+    skip_unknown_estimates: bool = False
+    failed_recovery_ids: tuple[str, ...] = ()
+    preserve_completed_paths: bool = False
 
     def __post_init__(self) -> None:
         ranges = {

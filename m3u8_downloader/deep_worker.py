@@ -49,6 +49,11 @@ from typing import Callable, List, Optional, Tuple
 from urllib.parse import urljoin, urlsplit
 
 try:
+    from m3u8_downloader.douyin import video_id, find_video_record, find_rendered_video, playback_urls
+except ImportError:
+    from douyin import video_id, find_video_record, find_rendered_video, playback_urls
+
+try:
     from m3u8_downloader.extraction_errors import LoginRequiredError, LoginGate, LOGIN_EVIDENCE_SCRIPT
 except ImportError:
     from extraction_errors import LoginRequiredError, LoginGate, LOGIN_EVIDENCE_SCRIPT
@@ -353,7 +358,7 @@ def _collect_urls(url: str, timeout: int, wait_ms: int, proxy: str = "",
     def _add(raw: str, verified: bool = False) -> None:
         """加入一条命中（清洗 + 去重），回调里抛异常会被 playwright 吞掉."""
         try:
-            cleaned = raw if verified and len(raw) <= _MAX_URL_LEN and raw.startswith(("http://", "https://")) else _is_m3u8_like(raw or "")
+            cleaned = raw if verified and len(raw) <= 4096 and raw.startswith(("http://", "https://")) else _is_m3u8_like(raw or "")
             if cleaned:
                 cleaned = urljoin(url, cleaned)
         except Exception:
@@ -552,6 +557,7 @@ async def _collect_urls_async(
 ) -> Tuple[List[str], str]:
     """在共享浏览器的独立 context 中提取一个网页。"""
     gate = LoginGate()
+    target_id = video_id(url)
     found: List[str] = []
     seen: set = set()
     title = ""
@@ -559,7 +565,7 @@ async def _collect_urls_async(
 
     def add(raw: str, verified: bool = False) -> None:
         try:
-            cleaned = raw if verified and len(raw) <= _MAX_URL_LEN and raw.startswith(("http://", "https://")) else _is_m3u8_like(raw or "")
+            cleaned = raw if verified and len(raw) <= 4096 and raw.startswith(("http://", "https://")) else _is_m3u8_like(raw or "")
             if cleaned:
                 cleaned = urljoin(url, cleaned)
         except Exception:
@@ -585,6 +591,19 @@ async def _collect_urls_async(
             response = await request.response()
             if response is None:
                 return
+            if target_id and request.resource_type in {"xhr", "fetch"}:
+                headers = response.headers
+                host = urlsplit(response.url).hostname or ""
+                if (host == "douyin.com" or host.endswith(".douyin.com")) and "json" in headers.get("content-type", ""):
+                    length = int(headers.get("content-length", "0") or "0")
+                    if length <= 4 * 1024 * 1024:
+                        body = await response.body()
+                        if len(body) <= 4 * 1024 * 1024:
+                            record = find_video_record(json.loads(body), target_id)
+                            if record:
+                                urls = playback_urls(record)
+                                if urls:
+                                    add(urls[0], verified=True)
             kind = _playlist_response_kind(response)
             if kind == "typed":
                 add(response.url, verified=True)
@@ -637,8 +656,19 @@ async def _collect_urls_async(
         await try_title()
         deadline = time.monotonic() + int(wait_ms) / 1000.0
         started = time.monotonic()
+        previous_render_data = None
         while time.monotonic() < deadline:
             await try_title()
+            if target_id and not found:
+                try:
+                    render_data = await page.evaluate("document.querySelector('#RENDER_DATA')?.textContent")
+                except Exception:
+                    render_data = None
+                if render_data and render_data != previous_render_data:
+                    previous_render_data = render_data
+                    record = find_rendered_video(render_data, target_id)
+                    if record and (urls := playback_urls(record)):
+                        add(urls[0], verified=True)
             while pending_requests:
                 add(pending_requests.pop(0))
             for frame in page.frames:
@@ -892,12 +922,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         def emit_title(t: str) -> None:
             print(json.dumps({"event": "title", "title": t}, ensure_ascii=False), flush=True)
 
-        urls, title = _collect_urls(
-            args.url, args.timeout, args.wait_ms, proxy=proxy,
-            **({"browser_headers": json.loads(os.environ["M3U8_DEEP_BROWSER_HEADERS"])}
-               if os.environ.get("M3U8_DEEP_BROWSER_HEADERS") else {}),
-            **({"on_candidate": emit_candidate, "on_title": emit_title} if args.stream else {}),
-        )
+        headers = json.loads(os.environ["M3U8_DEEP_BROWSER_HEADERS"]) if os.environ.get("M3U8_DEEP_BROWSER_HEADERS") else None
+        if video_id(args.url):
+            from playwright.async_api import async_playwright
+
+            async def collect_douyin():
+                async with async_playwright() as playwright:
+                    async with await playwright.chromium.launch() as browser:
+                        return await _collect_urls_async(
+                            browser, args.url, args.timeout, args.wait_ms, proxy,
+                            emit_candidate if args.stream else lambda _: None,
+                            emit_title if args.stream else lambda _: None,
+                            browser_headers=headers,
+                        )
+
+            urls, title = asyncio.run(collect_douyin())
+        else:
+            urls, title = _collect_urls(
+                args.url, args.timeout, args.wait_ms, proxy=proxy,
+                **({"browser_headers": headers} if headers else {}),
+                **({"on_candidate": emit_candidate, "on_title": emit_title} if args.stream else {}),
+            )
     except LoginRequiredError:
         _log("需要登录：请填写或更新网站登录信息后重试")
         return 5

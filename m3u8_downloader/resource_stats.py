@@ -20,6 +20,32 @@ class RuntimeStatistics:
     memory_bytes: int
 
 
+class DownloadSpeedTracker:
+    """没有新增下载字节时让旧速度过期，不把最后一次回报当作实时速度。"""
+
+    def __init__(self, *, clock=time.monotonic, idle_seconds=2.0):
+        self._clock = clock
+        self._idle_seconds = idle_seconds
+        self._samples = {}
+
+    def update(self, items):
+        now = self._clock()
+        speeds = {}
+        active = set()
+        for item in items:
+            if item.status.value != "downloading":
+                speeds[item.id] = 0.0
+                continue
+            active.add(item.id)
+            old = self._samples.get(item.id)
+            changed_at = now if old is None or old[0] != item.downloaded_bytes else old[1]
+            self._samples[item.id] = (item.downloaded_bytes, changed_at)
+            speeds[item.id] = (max(0.0, item.speed_bps)
+                               if now - changed_at < self._idle_seconds else 0.0)
+        self._samples = {key: value for key, value in self._samples.items() if key in active}
+        return speeds
+
+
 class _ProcessResourceSampler:
     def __init__(self) -> None:
         self._last_wall = time.monotonic()

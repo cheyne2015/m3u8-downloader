@@ -62,7 +62,7 @@ runtime = COLLECT(
 )
 
 manifest = {
-    "runtime_version": "1.1.6",
+    "runtime_version": "1.1.7",
     "login_detection_version": 1,
     "browser_session_version": 2,
     "protocol_version": 1,

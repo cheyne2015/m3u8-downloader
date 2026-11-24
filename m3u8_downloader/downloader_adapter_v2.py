@@ -5,6 +5,7 @@ from pathlib import Path
 from .downloader import M3U8Downloader, PlaylistFetchError, _SpeedLimiter
 from .secrets_v2 import unprotect_secret
 from .cookie_input import apply_cookie_input
+from .youtube import canonical_video_url, run_youtube
 
 
 class _SharedGlobalSpeedPool:
@@ -107,6 +108,35 @@ class ExistingDownloaderAdapter:
 
     def download(self, task, item, output_path, *, stop_event, on_progress, on_log):
         settings = task.settings
+        if canonical_video_url(item.source_url):
+            from .ffmpeg_v2 import resolve_ffmpeg_executable
+            from .merger import validate_media_file
+            from .downloader import DownloadCancelled
+
+            output = Path(output_path).resolve()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            staged = output.with_name(output.stem + ".youtube.mp4")
+            on_log("正在下载 YouTube 视频并合并音视频")
+            arguments = [
+                "--ffmpeg-location", resolve_ffmpeg_executable(),
+                "-f", "bv[ext=mp4]+ba[ext=m4a]/b[ext=mp4]",
+                "--merge-output-format", "mp4",
+                "--socket-timeout", str(settings.timeout_seconds),
+                "--retries", str(settings.request_retries),
+                "-o", str(staged).replace("%", "%%"),
+            ]
+            if settings.speed_limit:
+                arguments.extend(["--limit-rate", str(settings.speed_limit)])
+            run_youtube(item.source_url, arguments, stop_event=stop_event, proxy=settings.proxy)
+            try:
+                validate_media_file(str(staged))
+            except Exception:
+                staged.unlink(missing_ok=True)
+                raise
+            if stop_event.is_set():
+                raise DownloadCancelled("用户停止")
+            staged.replace(output)
+            return output
         global_limiter = self._global_pool.acquire()
         download_url = item.source_url
         try:

@@ -30,6 +30,90 @@ class RecordingDownloader:
         return output_path
 
 
+@pytest.mark.parametrize('error', [RuntimeError('无法读取媒体'), ConnectionError('连接失败')])
+def test_failed_middle_item_does_not_block_remaining_downloads(tmp_path, error):
+    service = TaskService(SQLiteTaskRepository(tmp_path / 'tasks.db'))
+    task = service.create_tasks(CreateTaskRequest(
+        addresses='https://example.test/watch', save_directory=str(tmp_path),
+        settings=TaskSettings(task_retries=0),
+    ))[0]
+    service.add_candidates(task.id, [Candidate(f'https://cdn.test/{i}.m3u8') for i in range(3)])
+    service.finish_extraction(task.id)
+
+    class FailingMiddle(RecordingDownloader):
+        def download(self, task, item, output_path, **kwargs):
+            if item.source_url == 'https://cdn.test/1.m3u8':
+                self.calls.append(item.source_url)
+                raise error
+            return super().download(task, item, output_path, **kwargs)
+
+    downloader = FailingMiddle()
+    result = DownloadCoordinator(service, downloader=downloader).run_parent(task.id)
+    assert downloader.calls == ['https://cdn.test/0.m3u8', 'https://cdn.test/1.m3u8',
+                                'https://cdn.test/2.m3u8']
+    assert [item.status for item in service.list_items(task.id)] == [
+        ItemStatus.COMPLETED, ItemStatus.FAILED, ItemStatus.COMPLETED,
+    ]
+    assert result.download_status is DownloadStatus.PARTIAL_FAILURE
+
+
+def test_restart_requeues_only_remaining_items_of_a_stalled_partial_failure(tmp_path):
+    repository = SQLiteTaskRepository(tmp_path / 'tasks.db')
+    service = TaskService(repository)
+    task = service.create_tasks(CreateTaskRequest(
+        addresses='https://example.test/watch', save_directory=str(tmp_path),
+    ))[0]
+    service.add_candidates(task.id, [Candidate(f'https://cdn.test/{i}.m3u8') for i in range(3)])
+    service.finish_extraction(task.id)
+    first, second, third = service.list_items(task.id)
+    service.complete_item(task.id, first.id, tmp_path / 'first.mp4')
+    service.fail_item(task.id, second.id, '失败')
+    restored = TaskService(repository)
+    restored.restore_tasks_after_restart()
+    assert restored.get_task(task.id).download_status is DownloadStatus.WAITING
+    downloader = RecordingDownloader()
+    result = DownloadCoordinator(restored, downloader=downloader).run_parent(task.id)
+    assert downloader.calls == [third.source_url]
+    assert restored.get_item(task.id, second.id).status is ItemStatus.FAILED
+    assert result.download_status is DownloadStatus.PARTIAL_FAILURE
+
+
+@pytest.mark.parametrize('first_transient', [False, True])
+def test_later_items_keep_their_own_retry_budget_after_an_earlier_failure(tmp_path, first_transient):
+    now = [datetime(2026, 11, 4, 12)]
+    service = TaskService(SQLiteTaskRepository(tmp_path / 'tasks.db'), clock=lambda: now[0])
+    task = service.create_tasks(CreateTaskRequest(
+        addresses='https://example.test/watch', save_directory=str(tmp_path),
+        settings=TaskSettings(task_retries=1, retry_delay_seconds=30),
+    ))[0]
+    service.add_candidates(task.id, [Candidate(f'https://cdn.test/{i}.m3u8') for i in range(3)])
+    service.finish_extraction(task.id)
+
+    class FailingDownloader(RecordingDownloader):
+        def download(self, task, item, output_path, **kwargs):
+            attempts = self.calls.count(item.source_url)
+            if item.source_url.endswith('/0.m3u8'):
+                self.calls.append(item.source_url)
+                raise ConnectionError('连接失败') if first_transient else RuntimeError('媒体无效')
+            if item.source_url.endswith('/1.m3u8') and attempts == 0:
+                self.calls.append(item.source_url)
+                raise ConnectionError('暂时断线')
+            return super().download(task, item, output_path, **kwargs)
+
+    downloader = FailingDownloader()
+    coordinator = DownloadCoordinator(service, downloader=downloader)
+    for _ in range(2 if first_transient else 1):
+        assert coordinator.run_parent(task.id).download_status is DownloadStatus.RETRY_WAIT
+        now[0] += timedelta(seconds=30)
+        assert [task.id for task in service.promote_due_retries()] == [task.id]
+    result = coordinator.run_parent(task.id)
+    assert downloader.calls.count('https://cdn.test/1.m3u8') == 2
+    assert [item.status for item in service.list_items(task.id)] == [
+        ItemStatus.FAILED, ItemStatus.COMPLETED, ItemStatus.COMPLETED,
+    ]
+    assert result.download_status is DownloadStatus.PARTIAL_FAILURE
+
+
 def test_parent_downloads_selected_children_one_by_one_then_completes(tmp_path):
     repository = SQLiteTaskRepository(tmp_path / "tasks.db")
     service = TaskService(repository, id_factory=lambda: "parent")

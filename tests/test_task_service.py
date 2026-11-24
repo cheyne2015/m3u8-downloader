@@ -21,6 +21,34 @@ from m3u8_downloader.tasking import (
 )
 
 
+@pytest.mark.parametrize('remaining, expected', [
+    ('waiting', DownloadStatus.WAITING),
+    ('downloading', DownloadStatus.RUNNING),
+    ('retry_wait', DownloadStatus.RETRY_WAIT),
+    ('paused', DownloadStatus.PAUSED),
+])
+def test_skipping_last_failure_restores_remaining_download_state(tmp_path, remaining, expected):
+    service = TaskService(SQLiteTaskRepository(tmp_path / 'tasks.db'))
+    task = service.create_tasks(CreateTaskRequest(
+        addresses='https://example.test/watch', save_directory=str(tmp_path),
+    ))[0]
+    service.start_extraction(task.id)
+    service.add_candidates(task.id, [Candidate('https://cdn.test/a.m3u8'),
+                                     Candidate('https://cdn.test/b.m3u8')])
+    service.finish_extraction(task.id)
+    failed, other = service.list_items(task.id)
+    if remaining == 'downloading':
+        service.start_item(task.id, other.id)
+    elif remaining == 'paused':
+        service.pause_item(task.id, other.id)
+    elif remaining == 'retry_wait':
+        service.schedule_item_retry(task.id, other.id, '暂时失败')
+    service.fail_item(task.id, failed.id, '失败')
+    service.finish_parent_if_handled(task.id)
+    assert service.skip_item(task.id, failed.id).download_status is expected
+    assert service.get_item(task.id, other.id).status.value == remaining
+
+
 def test_batch_queue_move_preserves_selected_relative_order(tmp_path):
     ids = iter(["one", "two", "three", "four"])
     service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"), id_factory=ids.__next__)

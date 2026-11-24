@@ -46,6 +46,134 @@ def capture_menu(monkeypatch, action=None):
     return captured
 
 
+def test_sidebar_local_merge_opens_dialog(menu_window, monkeypatch):
+    from m3u8_downloader.local_merge_gui import LocalMergeDialog
+    window, _ = menu_window
+    opened = []
+    monkeypatch.setattr(LocalMergeDialog, 'exec', lambda self: opened.append(self.windowTitle()))
+    window.local_merge_button.click()
+    assert opened == ['本地合并']
+
+
+def test_multi_item_download_menu_preserves_unselected_items(menu_window, tmp_path, monkeypatch):
+    from PySide6.QtCore import QItemSelectionModel
+    window, service = menu_window
+    task = service.create_tasks(CreateTaskRequest(
+        addresses='https://example.test/watch', save_directory=str(tmp_path),
+    ))[0]
+    service.add_candidates(task.id, [Candidate(f'https://cdn.test/{i}.m3u8') for i in range(4)])
+    service.finish_extraction(task.id)
+    window.refresh_tasks()
+    window.task_list.setCurrentRow(0)
+    for row in (0, 1):
+        window.item_table.selectionModel().select(window.item_table.model().index(row, 0),
+            QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+    actions = capture_menu(monkeypatch, '下载')
+    window.item_table.customContextMenuRequested.emit(
+        window.item_table.visualItemRect(window.item_table.item(0, 0)).center())
+    assert {'下载', '跳过', '复制 m3u8 链接'} <= {a.text() for a in actions}
+    assert [item.status for item in service.list_items(task.id)] == [
+        ItemStatus.WAITING, ItemStatus.WAITING, ItemStatus.UNSELECTED, ItemStatus.UNSELECTED]
+
+
+@pytest.mark.parametrize('count', [1, 2])
+def test_parent_menu_distinguishes_refresh_links_from_plain_retry(menu_window, tmp_path, monkeypatch, count):
+    window, service = menu_window
+    tasks = service.create_tasks(CreateTaskRequest(
+        addresses='\n'.join(f'https://example.test/{i}' for i in range(count)),
+        save_directory=str(tmp_path),
+    ))
+    for task in tasks:
+        service.add_candidates(task.id, [Candidate(f'https://cdn.test/{task.id}.m3u8')])
+        service.finish_extraction(task.id)
+        service.fail_item(task.id, service.list_items(task.id)[0].id, '失败')
+    window.refresh_tasks()
+    for row in range(count):
+        window.task_list.item(row).setSelected(True)
+    actions = capture_menu(monkeypatch, '提取并下载')
+    window.task_list.customContextMenuRequested.emit(
+        window.task_list.visualItemRect(window.task_list.item(0)).center())
+    assert {'重新提取', '重试失败项', '提取并下载', '跳过失败项'} <= {a.text() for a in actions}
+    assert all(service.get_task(task.id).settings.failed_recovery_ids for task in tasks)
+    assert all(service.list_items(task.id)[0].status is ItemStatus.FAILED for task in tasks)
+
+
+@pytest.mark.parametrize('target_row', [1, 4])
+def test_selected_download_items_can_be_skipped_together_from_root_menu(
+    menu_window, tmp_path, monkeypatch, qtbot, target_row,
+):
+    from PySide6.QtCore import QItemSelectionModel
+    window, service = menu_window
+    task = service.create_tasks(CreateTaskRequest(
+        addresses='https://example.test/watch', save_directory=str(tmp_path),
+    ))[0]
+    service.start_extraction(task.id)
+    service.add_candidates(task.id, [Candidate(f'https://cdn.test/{i}.m3u8') for i in range(5)])
+    service.finish_extraction(task.id)
+    items = service.list_items(task.id)
+    service.select_items_for_download(task.id, [item.id for item in items])
+    service.complete_item(task.id, items[0].id, tmp_path / 'done.mp4')
+    service.fail_item(task.id, items[1].id, '测试失败')
+    service.skip_item(task.id, items[3].id)
+    window.refresh_tasks()
+    window.task_list.setCurrentRow(0)
+    table = window.item_table
+    for row in range(4):
+        table.selectionModel().select(table.model().index(row, 0),
+            QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+    actions = capture_menu(monkeypatch, '跳过')
+    point = table.visualItemRect(table.item(target_row, 0)).center()
+    qtbot.mouseClick(table.viewport(), Qt.MouseButton.RightButton, pos=point)
+    assert len(table.selectionModel().selectedRows()) == (4 if target_row == 1 else 1)
+    table.customContextMenuRequested.emit(point)
+    assert '跳过' in {action.text() for action in actions}
+    assert ('更多操作' in {action.text() for action in actions}) == (target_row == 1)
+    expected = [
+        ItemStatus.COMPLETED, ItemStatus.SKIPPED, ItemStatus.SKIPPED,
+        ItemStatus.SKIPPED, ItemStatus.WAITING,
+    ] if target_row == 1 else [
+        ItemStatus.COMPLETED, ItemStatus.FAILED, ItemStatus.WAITING,
+        ItemStatus.SKIPPED, ItemStatus.SKIPPED,
+    ]
+    assert [item.status for item in service.list_items(task.id)] == expected
+    expected_status = DownloadStatus.WAITING if target_row == 1 else DownloadStatus.PARTIAL_FAILURE
+    assert service.get_task(task.id).download_status is expected_status
+
+
+@pytest.mark.parametrize('count', [1, 2])
+def test_parent_root_menu_skips_failed_items_and_finishes_selected_tasks(
+    menu_window, tmp_path, monkeypatch, count,
+):
+    window, service = menu_window
+    tasks = service.create_tasks(CreateTaskRequest(
+        addresses='\n'.join(f'https://example.test/{i}.m3u8' for i in range(count + 1)),
+        save_directory=str(tmp_path),
+    ))
+    for task in tasks:
+        item = service.list_items(task.id)[0]
+        service.fail_item(task.id, item.id, '测试失败')
+        service.finish_parent_if_handled(task.id)
+    notified = []
+    window.notify_parent_completed = lambda task_id, name: notified.append(task_id)
+    window.refresh_tasks()
+    selected_ids = []
+    for row in range(count):
+        selected = window.task_list.item(row)
+        selected.setSelected(True)
+        selected_ids.append(selected.data(Qt.ItemDataRole.UserRole).id)
+    actions = capture_menu(monkeypatch, '跳过失败项')
+    window.task_list.customContextMenuRequested.emit(
+        window.task_list.visualItemRect(window.task_list.item(0)).center())
+    assert '跳过失败项' in {action.text() for action in actions}
+    for task in tasks:
+        if task.id in selected_ids:
+            assert service.list_items(task.id)[0].status is ItemStatus.SKIPPED
+            assert service.get_task(task.id).download_status is DownloadStatus.COMPLETED
+        else:
+            assert service.list_items(task.id)[0].status is ItemStatus.FAILED
+    assert set(notified) == set(selected_ids) and len(notified) == count
+
+
 @pytest.mark.parametrize('state, present, absent', [
     ('waiting', {'暂停', '停止提取'}, {'继续', '重新提取'}),
     ('paused', {'继续', '重新提取'}, {'暂停', '停止提取'}),
@@ -68,6 +196,7 @@ def test_single_parent_menu_only_offers_applicable_controls(
         window.task_list.item(0)).center())
     labels = {action.text() for action in actions}
     assert present <= labels
+    assert '跳过失败项' not in labels
     assert not absent & labels
     assert {'更多操作', '删除任务'} <= labels
     assert not {'查看下载项', '查看详情', '任务设置', '调整队列'} & labels
@@ -93,7 +222,7 @@ def test_multi_menu_preserves_selection_and_copies_all_links(
     window.refresh_tasks()
     for index in range(2):
         window.task_list.item(index).setSelected(True)
-    actions = capture_menu(monkeypatch, '复制全部原始链接')
+    actions = capture_menu(monkeypatch, '复制链接')
     window._show_task_menu(window.task_list, window.task_list.visualItemRect(
         window.task_list.item(0)).center())
     assert len(window.task_list.selectedItems()) == 2
@@ -141,9 +270,9 @@ def test_missing_completed_file_offers_relink_without_rename(
 
 @pytest.mark.parametrize('state, control, advanced', [
     ('unselected', '下载', None),
-    ('waiting', '暂停', '跳过'),
-    ('downloading', '暂停', '跳过'),
-    ('retry_wait', '暂停', '跳过'),
+    ('waiting', '下载', None),
+    ('downloading', '暂停', None),
+    ('retry_wait', '暂停', None),
     ('paused', '继续', None),
     ('failed', '重试', '合并已下载片段'),
     ('skipped', '重试', None),
@@ -187,7 +316,8 @@ def test_item_menu_controls_and_advanced_actions_are_separate(
     labels = {entry.text() for entry in actions}
     assert actions[0].text() == control
     assert actions[-1].text() == '复制 m3u8 链接'
-    assert not {'跳过', '合并已下载片段', '校验并修复'} & labels
+    assert ('跳过' in labels) == (state not in {'skipped', 'completed'})
+    assert not {'合并已下载片段', '校验并修复'} & labels
     if advanced:
         more = next(entry.menu() for entry in actions if entry.text() == '更多操作')
         assert [entry.text() for entry in more.actions()] == [advanced]
@@ -215,11 +345,44 @@ def test_completed_parent_leaves_file_operations_to_download_items(
     window.completed_list.customContextMenuRequested.emit(window.completed_list.visualItemRect(
         window.completed_list.item(0)).center())
     labels = {entry.text() for entry in actions}
-    assert {'重新下载', '定位文件', '重命名任务', '复制原始链接', '更多操作'} <= labels
+    assert {'重新下载', '定位文件', '重命名任务', '复制链接'} <= labels
     assert not {'打开文件', '打开保存位置', '重命名文件', '合并已下载片段',
                 '查看详情', '查看下载项', '校验并修复'} & labels
-    more = next(entry.menu() for entry in actions if entry.text() == '更多操作')
-    assert [entry.text() for entry in more.actions()] == ['校验并修复']
+    assert '更多操作' not in labels
+
+
+def test_bottom_retry_button_only_requeues_selected_parents_failed_items(menu_window, tmp_path):
+    window, service = menu_window
+    tasks = service.create_tasks(CreateTaskRequest(
+        addresses='\n'.join(f'https://example.test/{i}' for i in range(3)),
+        save_directory=str(tmp_path),
+    ))
+    for task in tasks:
+        service.add_candidates(task.id, [Candidate(f'https://cdn.test/{task.id}/{i}.m3u8') for i in range(2)])
+        service.finish_extraction(task.id)
+        first, second = service.list_items(task.id)
+        output = tmp_path / f'{task.id}.mp4'
+        output.write_bytes(b'completed')
+        service.complete_item(task.id, first.id, output)
+        service.fail_item(task.id, second.id, '分片响应中断')
+        service.finish_parent_if_handled(task.id)
+    window.refresh_tasks()
+    window.task_list.clearSelection()
+    assert not window.retry_failed_button.isEnabled()
+    selected_ids = set()
+    for row in range(2):
+        cell = window.task_list.item(row)
+        cell.setSelected(True)
+        selected_ids.add(cell.data(Qt.ItemDataRole.UserRole).id)
+    assert window.retry_failed_button.text() == '重试失败项'
+    assert window.retry_failed_button.isEnabled()
+    window.retry_failed_button.click()
+    for task in tasks:
+        first, second = service.list_items(task.id)
+        assert first.status is ItemStatus.COMPLETED
+        assert Path(first.output_path).read_bytes() == b'completed'
+        assert second.status is (ItemStatus.WAITING if task.id in selected_ids else ItemStatus.FAILED)
+    assert not window.retry_failed_button.isEnabled()
 
 
 @pytest.mark.parametrize('action', ['暂停', '继续', '重新提取', '重试失败项'])

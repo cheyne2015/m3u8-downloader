@@ -108,9 +108,11 @@ class DownloadCoordinator:
                         on_log(
                             f"下载暂时失败，将在 {task.settings.retry_delay_seconds} 秒后自动重试"
                         )
+                        break
                 else:
                     self._service.fail_item(task_id, item.id, str(exc))
-                break
+                on_log("当前下载项失败，已保留失败记录，继续处理后续下载项")
+                continue
         return self._service.finish_parent_if_handled(task_id)
 
     def validate_and_repair(
@@ -181,6 +183,9 @@ class DownloadCoordinator:
 
     @staticmethod
     def _is_retryable(error: Exception) -> bool:
+        retryable = getattr(error, "retryable", None)
+        if retryable is not None:
+            return bool(retryable)
         if isinstance(error, (ConnectionError, TimeoutError)):
             return True
         message = str(error).casefold()

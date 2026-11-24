@@ -443,7 +443,7 @@ def test_multi_selected_completed_tasks_offer_batch_redownload_and_validation(
     )
 
     assert "重新下载" in labels
-    assert "校验并修复" in labels
+    assert "校验并修复" not in labels
     assert "删除任务" in labels
     assert "彻底删除文件" in labels
 
@@ -1275,6 +1275,8 @@ def test_select_all_tracks_none_partial_and_all_candidate_checks(qtbot, tmp_path
     window.task_list.setCurrentRow(0)
 
     assert window.select_all_checkbox.isEnabled()
+    assert window.select_all_checkbox.checkState() is Qt.CheckState.Checked
+    qtbot.mouseClick(window.select_all_checkbox, Qt.MouseButton.LeftButton)
     assert window.select_all_checkbox.checkState() is Qt.CheckState.Unchecked
 
     qtbot.mouseClick(window.select_all_checkbox, Qt.MouseButton.LeftButton)
@@ -1818,8 +1820,8 @@ def test_content_duplicate_locate_keeps_new_task_pending_review(
     assert window.task_list.currentItem().data(Qt.ItemDataRole.UserRole).id == existing.id
 
 
-def test_completed_task_detail_can_start_background_validation_and_repair(
-    qtbot, tmp_path,
+def test_completed_item_menu_can_start_background_validation_and_repair(
+    qtbot, tmp_path, monkeypatch,
 ):
     service = TaskService(SQLiteTaskRepository(tmp_path / "tasks.db"))
     task = service.create_tasks(CreateTaskRequest(
@@ -1847,8 +1849,16 @@ def test_completed_task_detail_can_start_background_validation_and_repair(
     qtbot.mouseClick(window.completed_button, Qt.MouseButton.LeftButton)
     window.completed_list.setCurrentRow(0)
 
-    assert window.repair_task_button.isEnabled()
-    qtbot.mouseClick(window.repair_task_button, Qt.MouseButton.LeftButton)
+    assert not window.retry_failed_button.isEnabled()
+    from PySide6.QtWidgets import QMenu
+    class RepairMenu(QMenu):
+        def exec(self, *_args):
+            more = next(action.menu() for action in self.actions() if action.text() == '更多操作')
+            next(action for action in more.actions() if action.text() == '校验并修复').trigger()
+    monkeypatch.setattr('m3u8_downloader.gui_v2.QMenu', RepairMenu)
+    window.item_table.selectRow(0)
+    window.item_table.customContextMenuRequested.emit(
+        window.item_table.visualItemRect(window.item_table.item(0, 0)).center())
 
     assert controller.calls == [(task.id, [item.id])]
     assert "正在后台校验" in window.feedback_label.text()
@@ -2125,12 +2135,15 @@ def test_pending_task_can_queue_checked_download_items(qtbot, tmp_path):
     ])
     service.finish_extraction(task.id)
     window = MainWindow(service)
+    window._force_exit = True
     qtbot.addWidget(window)
     window.show()
     window.task_list.setCurrentRow(0)
 
     window.item_table.item(0, 0).setCheckState(Qt.CheckState.Checked)
     window.item_table.item(2, 0).setCheckState(Qt.CheckState.Checked)
+    window.item_table.item(1, 0).setCheckState(Qt.CheckState.Unchecked)
+    window.item_table.item(3, 0).setCheckState(Qt.CheckState.Unchecked)
     qtbot.mouseClick(window.download_selected_button, Qt.MouseButton.LeftButton)
 
     assert service.get_task(task.id).download_status is DownloadStatus.WAITING

@@ -635,7 +635,9 @@ class SQLiteTaskRepository:
 
     @staticmethod
     def _from_row(row: sqlite3.Row) -> Task:
-        settings = TaskSettings(**json.loads(row["settings_json"]))
+        settings_values = json.loads(row["settings_json"])
+        settings_values["failed_recovery_ids"] = tuple(settings_values.get("failed_recovery_ids", ()))
+        settings = TaskSettings(**settings_values)
         return Task(
             id=row["id"],
             source_url=row["source_url"],

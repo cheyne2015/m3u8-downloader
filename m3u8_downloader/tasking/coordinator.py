@@ -38,13 +38,16 @@ class TaskCoordinator:
         jitter = zlib.crc32(f"{task_id}:{retry_number}".encode("utf-8")) % spread_ms
         return base + jitter / 1000.0
 
-    def run_extraction(self, task_id: str, stop_event=None):
+    def run_extraction(self, task_id: str, stop_event=None, *, failed_item_ids=None):
         """同步执行一次提取；图形界面负责把本方法放入工作线程。"""
         stop_event = stop_event or threading.Event()
         task = self._service.start_extraction(task_id)
+        if failed_item_ids is None and task.settings.failed_recovery_ids:
+            failed_item_ids = tuple(task.settings.failed_recovery_ids)
         started_at = time.monotonic()
         recorded = False
         observed_urls: set[str] = set()
+        recovery_candidates = {}
 
         def record_result(success: bool, mode: str, error: str = "") -> None:
             nonlocal recorded
@@ -62,10 +65,14 @@ class TaskCoordinator:
 
         def on_candidate(candidate: Candidate) -> None:
             observed_urls.add(candidate.url)
-            self._service.add_candidates(task_id, [candidate])
+            if failed_item_ids is not None:
+                recovery_candidates[candidate.url] = candidate
+            else:
+                self._service.add_candidates(task_id, [candidate])
 
         def on_title(title: str) -> None:
-            self._service.apply_page_title(task_id, title)
+            if failed_item_ids is None:
+                self._service.apply_page_title(task_id, title)
 
         mode = task.settings.extraction_mode
         if mode == "smart":
@@ -81,6 +88,7 @@ class TaskCoordinator:
             )
             for attempt_index in range(3):
                 observed_urls.clear()
+                recovery_candidates.clear()
                 attempt_started = time.monotonic()
                 try:
                     try:
@@ -92,7 +100,10 @@ class TaskCoordinator:
                             stop_event=stop_event,
                         ) or [])
                         observed_urls.update(candidate.url for candidate in candidates)
-                        self._service.add_candidates(task_id, candidates)
+                        if failed_item_ids is not None:
+                            recovery_candidates.update({candidate.url: candidate for candidate in candidates})
+                        else:
+                            self._service.add_candidates(task_id, candidates)
                     finally:
                         items = self._service.list_items(task_id)
                         self._service.add_log(
@@ -104,7 +115,14 @@ class TaskCoordinator:
                         )
                     if stop_event.is_set():
                         return self._service.get_task(task_id)
-                    if any(item.valid for item in self._service.list_items(task_id)):
+                    has_candidates = (any(candidate.valid for candidate in recovery_candidates.values())
+                                      if failed_item_ids is not None
+                                      else any(item.valid for item in self._service.list_items(task_id)))
+                    if has_candidates:
+                        if failed_item_ids is not None:
+                            result = self._service.apply_failed_recovery(task_id, recovery_candidates.values(), failed_item_ids)
+                            record_result(True, "deep" if deep else "normal")
+                            return result
                         self._service.finish_extraction(task_id)
                         finalized_items = self._service.list_items(task_id)
                         self._service.add_log(

@@ -295,7 +295,7 @@ def _normalize_candidate_url(raw: str, base_url: str, *, verified: bool = False)
     Returns:
         归一化后的绝对 URL；非 http/https、超长或未确认的非 .m3u8 返回 None.
     """
-    cleaned = raw.strip() if verified and raw and len(raw) <= MAX_CANDIDATE_URL_LEN else _is_m3u8_like(raw)
+    cleaned = raw.strip() if verified and raw and len(raw) <= 4096 else _is_m3u8_like(raw)
     if cleaned is None:
         return None
     joined = urljoin(base_url, cleaned) if base_url else cleaned

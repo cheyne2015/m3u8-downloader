@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from threading import Event
 from typing import Callable, Dict, List, Optional
+from urllib.parse import urlsplit
 
 import requests
 
@@ -334,6 +335,20 @@ def estimate_size(
         session = create_http_session(timeout)
 
     try:
+        from .douyin import is_playback_url
+        if is_playback_url(target_url) and not urlsplit(target_url).path.lower().endswith(".m3u8"):
+            with session.get(target_url, headers={"Range": "bytes=0-0", "Referer": "https://www.douyin.com/"},
+                             stream=True, timeout=timeout) as response:
+                response.raise_for_status()
+                if response.headers.get("Content-Type", "").split(";")[0].strip().lower() != "video/mp4":
+                    estimate.error = "媒体响应不是 MP4"
+                    return estimate
+                total = response.headers.get("Content-Range", "").rpartition("/")[2]
+                if not total and response.status_code == 200:
+                    total = response.headers.get("Content-Length", "")
+                if total.isdecimal():
+                    estimate.size_bytes = int(total)
+            return estimate
         text = _fetch_text(session, target_url, timeout)
         if not _is_m3u8_text(text):
             estimate.error = "不是有效的 m3u8"

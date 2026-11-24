@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """m3u8 下载器文件夹式正式包。"""
 
+import os
 import shutil
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules
@@ -29,6 +30,7 @@ a = Analysis(
     datas=[
         ("m3u8_downloader/deep_worker.py", "m3u8_downloader"),
         ("m3u8_downloader/extraction_errors.py", "m3u8_downloader"),
+        ("m3u8_downloader/douyin.py", "m3u8_downloader"),
         ("m3u8_downloader/assets", "m3u8_downloader/assets"),
     ],
     hiddenimports=hiddenimports,
@@ -69,3 +71,5 @@ app = COLLECT(
     name="m3u8-downloader",
 )
 shutil.copy2("README.md", Path(DISTPATH) / "m3u8-downloader" / "README.md")
+if youtube_tool := os.environ.get("M3U8_YOUTUBE_TOOL"):
+    shutil.copy2(youtube_tool, Path(DISTPATH) / "m3u8-downloader" / "yt-dlp.exe")

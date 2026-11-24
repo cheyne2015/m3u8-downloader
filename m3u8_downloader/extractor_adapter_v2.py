@@ -6,6 +6,7 @@ from . import extractor, utils
 from .tasking import Candidate
 from .secrets_v2 import unprotect_secret
 from .cookie_input import apply_cookie_input
+from .youtube import canonical_video_url, inspect_video
 
 
 def _map_candidate(candidate) -> Candidate:
@@ -26,6 +27,15 @@ class ExistingExtractorAdapter:
 
     def extract(self, task, *, deep, on_candidate, on_title, stop_event):
         settings = task.settings
+        if address := canonical_video_url(task.source_url):
+            info = inspect_video(address, stop_event=stop_event,
+                                 timeout=settings.timeout_seconds, proxy=settings.proxy)
+            title = info.get("title") or ""
+            if title:
+                on_title(title)
+            candidate = Candidate(address, label=title, duration_seconds=info.get("duration"))
+            on_candidate(candidate)
+            return [candidate]
         session = utils.create_http_session(
             settings.timeout_seconds,
             proxy=settings.proxy or None,

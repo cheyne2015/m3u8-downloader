@@ -65,6 +65,7 @@ class TaskBackgroundController(QObject):
         self._completion_emitted: set[str] = set()
         self._pending_deletions: dict[str, bool] = {}
         self._pending_extraction_restarts: set[str] = set()
+        self._pending_failed_link_retries: set[str] = set()
         self._partial_results = {}
         self._timer = QTimer(self)
         self._timer.setInterval(max(10, poll_interval_ms))
@@ -109,6 +110,7 @@ class TaskBackgroundController(QObject):
         return self._service.rename_task(task_id, name)
 
     def pause_task(self, task_id: str) -> None:
+        self._pending_failed_link_retries.discard(task_id)
         if task_id in self._extract_events:
             self._extract_events[task_id].set()
         if task_id in self._download_events:
@@ -171,6 +173,7 @@ class TaskBackgroundController(QObject):
         self.dispatch()
 
     def delete_task(self, task_id: str, *, delete_outputs: bool) -> None:
+        self._pending_failed_link_retries.discard(task_id)
         self._pending_extraction_restarts.discard(task_id)
         extract_event = self._extract_events.get(task_id)
         download_event = self._download_events.get(task_id)
@@ -198,7 +201,10 @@ class TaskBackgroundController(QObject):
         event = self._extract_events.get(task_id)
         if event is not None:
             event.set()
-        task = self._service.stop_extraction(task_id)
+        if self._service.get_task(task_id).settings.failed_recovery_ids:
+            task = self._service.pause_task(task_id)
+        else:
+            task = self._service.stop_extraction(task_id)
         if (
             task.download_status.value == "completed"
             and task.id not in self._completion_emitted
@@ -209,6 +215,7 @@ class TaskBackgroundController(QObject):
         self.dispatch()
 
     def retry_extraction(self, task_id: str) -> bool:
+        self._pending_failed_link_retries.discard(task_id)
         if task_id in self._extracting:
             self._pending_extraction_restarts.add(task_id)
             event = self._extract_events.get(task_id)
@@ -219,6 +226,15 @@ class TaskBackgroundController(QObject):
         self._service.retry_extraction(task_id)
         self.changed.emit()
         self.dispatch()
+        return True
+
+    def refresh_failed_links(self, task_id: str) -> bool:
+        if task_id in self._extracting or task_id in self._downloading or task_id in self._repairing:
+            self._pending_failed_link_retries.add(task_id)
+            return False
+        if self._service.prepare_failed_recovery(task_id):
+            self.changed.emit()
+            self.dispatch()
         return True
 
     def dispatch(self) -> None:
@@ -312,6 +328,11 @@ class TaskBackgroundController(QObject):
             self._pending_extraction_restarts.discard(task_id)
             self._service.retry_extraction(task_id)
             error = ""
+        if (task_id in self._pending_failed_link_retries
+                and task_id not in self._extracting and task_id not in self._downloading
+                and task_id not in self._repairing):
+            self._pending_failed_link_retries.discard(task_id)
+            self._service.prepare_failed_recovery(task_id)
         if error:
             category = '分片导出' if kind.startswith('partial_') else kind
             self._service.add_log(task_id, "错误", category, error)
@@ -341,6 +362,7 @@ class TaskBackgroundController(QObject):
         self.log.emit(task_id, message)
 
     def pause_all(self) -> None:
+        self._pending_failed_link_retries.clear()
         for task in self._service.list_tasks():
             self.pause_task(task.id)
 

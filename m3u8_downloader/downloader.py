@@ -1,18 +1,22 @@
 """核心下载逻辑模块：多线程并发下载、断点续传、HTTP 重试、加密密钥下载."""
 
 import copy
+import errno
 import hashlib
 import json
 import os
 import re
 import threading
 import time
+from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Callable, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 import requests
 
 from m3u8_downloader.parser import M3U8Playlist, M3U8Segment, M3U8Key
+from m3u8_downloader.douyin import is_playback_url
 from m3u8_downloader.utils import (
     ProgressBar,
     create_http_session,
@@ -27,8 +31,49 @@ DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_DELAY = 1.0  # 秒
 DEFAULT_BACKOFF_FACTOR = 2.0
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
+PROGRESS_REPORT_INTERVAL = 0.5
 CANCEL_POLL_INTERVAL = 0.1
 CACHE_MANIFEST_NAME = ".m3u8-download.json"
+
+
+class _SegmentTransferMeter:
+    """工作线程仅累加字节，协调线程定时取样并向界面上报。"""
+
+    def __init__(self, tasks):
+        self._lock = threading.Lock()
+        self._sizes = {}
+        for _segment, path in tasks:
+            cached = path if os.path.isfile(path) else path + '.part'
+            try:
+                self._sizes[path] = os.path.getsize(cached)
+            except FileNotFoundError:
+                self._sizes[path] = 0
+        self._received = 0
+        self._last_receive = time.monotonic()
+        self._samples = deque([(self._last_receive, 0)])
+
+    def record(self, path, count, current_size):
+        with self._lock:
+            self._received += count
+            self._sizes[path] = current_size
+            self._last_receive = time.monotonic()
+
+    def complete(self, path, size):
+        with self._lock:
+            self._sizes[path] = size
+
+    def sample(self):
+        now = time.monotonic()
+        with self._lock:
+            received = self._received
+            size = sum(self._sizes.values())
+            idle = now - self._last_receive
+        self._samples.append((now, received))
+        while len(self._samples) > 2 and self._samples[1][0] <= now - 1:
+            self._samples.popleft()
+        previous_time, previous_bytes = self._samples[0]
+        speed = (received - previous_bytes) / max(0.001, now - previous_time)
+        return size, speed if idle < 1 else 0.0
 
 
 class _SpeedLimiter:
@@ -108,6 +153,15 @@ def active_cache_job_paths() -> set[str]:
 
 class DownloadCancelled(RuntimeError):
     """下载被调用方主动停止。"""
+
+
+class SegmentDownloadError(RuntimeError):
+    """保留分片失败的可恢复性，供父任务按现有重试设置处理。"""
+
+    def __init__(self, count, *, retryable, message=None):
+        self.failed_segments = count
+        self.retryable = retryable
+        super().__init__(message or f"有 {count} 个片段下载失败")
 
 
 class PlaylistFetchError(RuntimeError):
@@ -212,6 +266,7 @@ def _download_with_retry(
     timeout: int = 30,
     stop_event: Optional[threading.Event] = None,
     speed_limiter=None,
+    on_bytes=None,
 ) -> Tuple[bool, int]:
     """带重试机制的文件下载.
 
@@ -288,6 +343,8 @@ def _download_with_retry(
                             speed_limiter.consume(len(chunk), stop_event)
                         f.write(chunk)
                         response_bytes += len(chunk)
+                        if on_bytes is not None:
+                            on_bytes(len(chunk), (offset if append else 0) + response_bytes)
 
             declared_length = response.headers.get("Content-Length")
             content_encoding = response.headers.get("Content-Encoding", "identity").lower()
@@ -387,6 +444,7 @@ def _download_segment_task(
     timeout: int = 30,
     stop_event: Optional[threading.Event] = None,
     speed_limiter=None,
+    on_bytes=None,
 ) -> Tuple[int, bool, int]:
     """下载单个 TS 片段（供线程池调用）.
 
@@ -412,6 +470,7 @@ def _download_segment_task(
         timeout=timeout,
         stop_event=stop_event,
         speed_limiter=speed_limiter,
+        on_bytes=on_bytes,
     )
     return segment.sequence, success, size
 
@@ -469,6 +528,7 @@ class M3U8Downloader:
         self._use_ffmpeg = use_ffmpeg
         self._stop_event = stop_event or threading.Event()
         self._progress_callback = progress_callback
+        self._transfer_meter = None
         self._log_callback = log_callback
         local_limiter = _SpeedLimiter(speed_limit) if speed_limit > 0 else None
         self._speed_limiter = (
@@ -905,10 +965,12 @@ class M3U8Downloader:
     def _download_one_segment(
         self, segment: M3U8Segment, seg_path: str,
     ) -> Tuple[int, bool, int]:
+        meter = self._transfer_meter
         return _download_segment_task(
             self._get_worker_session(), segment, seg_path,
             self._max_retries, self._timeout, self._stop_event,
             self._speed_limiter,
+            on_bytes=(lambda count, size: meter.record(seg_path, count, size)) if meter else None,
         )
 
     def _download_segments(self, playlist: M3U8Playlist) -> List[str]:
@@ -939,8 +1001,12 @@ class M3U8Downloader:
         # 统计变量
         success_count = 0
         fail_count = 0
+        retryable_failure = False
+        last_failure = None
         total_bytes = 0
         start_time = time.time()
+        self._transfer_meter = meter = _SegmentTransferMeter(tasks)
+        last_report = time.monotonic()
 
         progress = ProgressBar(
             total=total, desc="下载进度", unit="个",
@@ -969,25 +1035,33 @@ class M3U8Downloader:
                         if success:
                             success_count += 1
                             total_bytes += size
+                            meter.complete(seg_path, size)
                         else:
                             fail_count += 1
+                            retryable_failure = True
                             self._log(f"片段 {seg_path} 下载失败")
                     except DownloadCancelled:
                         raise
                     except Exception as e:
                         fail_count += 1
+                        last_failure = e
                         self._log(f"片段 {seg_path} 下载异常: {e}")
+                        if isinstance(e, OSError) and getattr(e, "errno", None) == errno.ENOSPC:
+                            raise
                         if _is_permanent_request_error(e):
                             for pending in pending_futures:
                                 pending.cancel()
-                            raise RuntimeError(
-                                f"媒体片段无法访问：{e}"
-                            ) from e
+                            raise SegmentDownloadError(1, retryable=False,
+                                message=f"媒体片段无法访问：{e}") from e
+                        retryable_failure |= isinstance(e, requests.RequestException)
 
                     progress.update(1)
-                    completed = success_count + fail_count
+                completed = success_count + fail_count
+                now = time.monotonic()
+                if now - last_report >= PROGRESS_REPORT_INTERVAL or not pending_futures:
+                    last_report = now
                     elapsed_now = time.time() - start_time
-                    speed_now = total_bytes / elapsed_now if elapsed_now > 0 else 0
+                    downloaded_bytes, speed_now = meter.sample()
                     eta = (
                         elapsed_now / completed * (total - completed)
                         if completed > 0 else 0
@@ -999,7 +1073,7 @@ class M3U8Downloader:
                             "total": total,
                             "speed": speed_now,
                             "eta": eta,
-                            "total_bytes": total_bytes,
+                            "total_bytes": downloaded_bytes,
                         })
         except DownloadCancelled:
             for pending in futures:
@@ -1040,7 +1114,7 @@ class M3U8Downloader:
                   f"耗时 {format_duration(elapsed)}")
 
         if fail_count > 0:
-            raise RuntimeError(f"有 {fail_count} 个片段下载失败")
+            raise SegmentDownloadError(fail_count, retryable=retryable_failure) from last_failure
 
         # 按顺序返回路径列表
         segment_paths = [seg_path for _, seg_path in tasks]
@@ -1060,6 +1134,33 @@ class M3U8Downloader:
             except OSError as e:
                 self._log(f"清理临时文件失败: {e}")
 
+    def _download_mp4(self) -> str:
+        from m3u8_downloader.merger import validate_media_file
+
+        output = os.path.abspath(self._output)
+        os.makedirs(os.path.dirname(output), exist_ok=True)
+        staged = output + ".download.mp4"
+        if is_playback_url(self._url):
+            self._session.headers.setdefault("Referer", "https://www.douyin.com/")
+        self._log("正在下载 MP4 文件…")
+        if not os.path.isfile(staged):
+            success, _ = _download_with_retry(
+                self._session, self._url, staged, max_retries=self._max_retries,
+                timeout=self._timeout, stop_event=self._stop_event,
+                speed_limiter=self._speed_limiter,
+            )
+            if not success:
+                raise RuntimeError("MP4 下载失败")
+        self._check_stopped()
+        try:
+            validate_media_file(staged)
+        except Exception:
+            os.remove(staged)
+            raise
+        self._check_stopped()
+        os.replace(staged, output)
+        return output
+
     def download(self) -> str:
         """执行完整的下载流程.
 
@@ -1072,6 +1173,9 @@ class M3U8Downloader:
         start_time = time.time()
         try:
             self._check_stopped()
+            path = urlsplit(self._url).path.lower()
+            if path.endswith(".mp4") or (not path.endswith(".m3u8") and is_playback_url(self._url)):
+                return self._download_mp4()
             self._log(f"正在解析 m3u8: {self._url}")
             playlist = self._resolve_playlist()
             self._log(f"解析完成: {len(playlist.segments)} 个片段, "

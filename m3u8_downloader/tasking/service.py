@@ -272,6 +272,11 @@ class TaskService:
                 extraction_status = ExtractionStatus.PAUSED
             if download_status in active_download_states:
                 download_status = DownloadStatus.PAUSED
+            elif download_status is DownloadStatus.PARTIAL_FAILURE and any(
+                item.status is ItemStatus.WAITING
+                for item in self._repository.list_items(task.id)
+            ):
+                download_status = DownloadStatus.WAITING
             if (extraction_status, download_status) != (
                 task.extraction_status, task.download_status
             ):
@@ -494,6 +499,7 @@ class TaskService:
         self._repository.delete_items(task_id)
         task = replace(
             task,
+            settings=replace(task.settings, failed_recovery_ids=(), preserve_completed_paths=False),
             extraction_status=ExtractionStatus.WAITING,
             download_status=DownloadStatus.NOT_READY,
             last_error="",
@@ -533,6 +539,9 @@ class TaskService:
         moved: list[tuple[Path, Path]] = []
         try:
             for item in items:
+                if task.settings.preserve_completed_paths and item.status is ItemStatus.COMPLETED and item.output_path:
+                    updated.append(item)
+                    continue
                 target = desired_paths.get(item.id)
                 if target is None:
                     updated.append(item)
@@ -698,6 +707,8 @@ class TaskService:
             task,
             download_status=DownloadStatus.PARTIAL_FAILURE,
             last_error=str(error),
+            retry_count=0,
+            retry_at=None,
             updated_at=self._clock(),
         )
         self._repository.save_many([task])
@@ -764,6 +775,47 @@ class TaskService:
         self._repository.save_many([task])
         return task
 
+    def prepare_failed_recovery(self, task_id: str) -> tuple[str, ...]:
+        task = self.get_task(task_id)
+        targets = tuple(item.id for item in self.list_items(task_id) if item.status is ItemStatus.FAILED)
+        if not targets:
+            return ()
+        if task.source_kind is not SourceKind.WEB_PAGE:
+            raise ValueError("直接 m3u8 任务请使用重试失败项")
+        self._repository.save_many([replace(task, extraction_status=ExtractionStatus.WAITING,
+            download_status=DownloadStatus.NOT_READY, retry_count=0, retry_at=None,
+            settings=replace(task.settings, failed_recovery_ids=targets, preserve_completed_paths=True),
+            completed_at=None, updated_at=self._clock())])
+        return targets
+
+    def apply_failed_recovery(self, task_id: str, candidates, target_ids) -> Task:
+        from .failed_recovery import match_failed_candidates
+        items = self.list_items(task_id)
+        targets = {item.id for item in items if item.id in target_ids and item.status is ItemStatus.FAILED}
+        matches = match_failed_candidates(items, candidates, targets)
+        changed = []
+        for item in items:
+            candidate = matches.get(item.id)
+            if candidate is not None:
+                changed.append(replace(item, source_url=candidate.url, status=ItemStatus.WAITING,
+                    estimated_bytes=candidate.estimated_bytes or item.estimated_bytes,
+                    duration_seconds=candidate.duration_seconds or item.duration_seconds,
+                    segment_count=candidate.segment_count or item.segment_count,
+                    bandwidth=candidate.bandwidth or item.bandwidth, valid=True,
+                    speed_bps=0.0, eta_seconds=0.0))
+        self._repository.save_items(changed)
+        task = self.get_task(task_id)
+        has_waiting = bool(changed) or any(item.status is ItemStatus.WAITING for item in items)
+        task = replace(task, extraction_status=ExtractionStatus.COMPLETED,
+            settings=replace(task.settings, failed_recovery_ids=()),
+            download_status=DownloadStatus.WAITING if has_waiting else DownloadStatus.PARTIAL_FAILURE,
+            last_error="" if len(matches) == len(targets) else "部分失败项未能唯一匹配到新链接，请手动检查",
+            updated_at=self._clock())
+        self._repository.save_many([task])
+        self.add_log(task_id, "信息" if len(matches) == len(targets) else "警告", "提取",
+                     f"刷新链接完成：已重新排队 {len(matches)} 个失败项，未匹配 {len(targets) - len(matches)} 个；已完成项保持不变")
+        return task
+
     def schedule_item_retry(self, task_id: str, item_id: str, error: str) -> Task:
         task = self._repository.get_task(task_id)
         if task.retry_count >= task.settings.task_retries:
@@ -825,7 +877,7 @@ class TaskService:
             updated_at=now,
             original_title=source_task.original_title,
             name_edited=True,
-            settings=source_task.settings,
+            settings=replace(source_task.settings, failed_recovery_ids=(), preserve_completed_paths=False),
         )
         item = DownloadItem(
             id=self._item_id_factory(),
@@ -853,6 +905,7 @@ class TaskService:
         now = self._clock()
         task = replace(
             source_task,
+            settings=replace(source_task.settings, failed_recovery_ids=(), preserve_completed_paths=False),
             id=self._id_factory(),
             extraction_status=ExtractionStatus.NOT_REQUIRED,
             download_status=DownloadStatus.WAITING,
@@ -1147,7 +1200,14 @@ class TaskService:
             if item.status is not ItemStatus.UNSELECTED
         ]
         if any(item.status is ItemStatus.FAILED for item in selected):
-            status = DownloadStatus.PARTIAL_FAILURE
+            if task.download_status is DownloadStatus.PAUSED:
+                status = DownloadStatus.PAUSED
+            elif task.download_status is DownloadStatus.RETRY_WAIT and any(
+                item.status is ItemStatus.RETRY_WAIT for item in selected
+            ):
+                status = DownloadStatus.RETRY_WAIT
+            else:
+                status = DownloadStatus.PARTIAL_FAILURE
         elif selected and all(
             item.status in {ItemStatus.COMPLETED, ItemStatus.SKIPPED} for item in selected
         ):
@@ -1161,6 +1221,17 @@ class TaskService:
             )
         else:
             status = task.download_status
+            if status is DownloadStatus.PARTIAL_FAILURE:
+                # Skipping the last failed item must release the remaining queue.
+                for item_status, parent_status in (
+                    (ItemStatus.DOWNLOADING, DownloadStatus.RUNNING),
+                    (ItemStatus.WAITING, DownloadStatus.WAITING),
+                    (ItemStatus.RETRY_WAIT, DownloadStatus.RETRY_WAIT),
+                    (ItemStatus.PAUSED, DownloadStatus.PAUSED),
+                ):
+                    if any(item.status is item_status for item in selected):
+                        status = parent_status
+                        break
         now = self._clock()
         task = replace(
             task,
@@ -1200,6 +1271,38 @@ class TaskService:
             ),
             updated_at=self._clock(),
         )
+        self._repository.save_many([task])
+        return task
+
+    def queue_items_for_download(self, task_id: str, item_ids: List[str], *, replace_selection: bool = True) -> Task:
+        """显式下载选择，支持未开始、已暂停、失败和已跳过项。"""
+        task = self.get_task(task_id)
+        if task.settings.failed_recovery_ids and task.extraction_status in {
+            ExtractionStatus.WAITING, ExtractionStatus.RUNNING,
+        }:
+            raise ValueError("正在刷新失败项链接，请等待刷新完成后下载")
+        if task.download_status is DownloadStatus.RETRY_WAIT:
+            raise ValueError("该任务正在等待自动重试，当前队列会按设置继续")
+        if (task.source_kind is SourceKind.WEB_PAGE
+                and task.extraction_status is ExtractionStatus.NOT_REQUIRED):
+            return self._restart_legacy_web_redownload(task_id)
+        selected = set(item_ids)
+        items = self._keep_largest_candidate_per_duration(self.list_items(task_id))
+        updated = []
+        for item in items:
+            if item.valid and item.id in selected and item.status not in {
+                ItemStatus.COMPLETED, ItemStatus.DOWNLOADING, ItemStatus.RETRY_WAIT,
+            }:
+                item = replace(item, status=ItemStatus.WAITING, speed_bps=0.0, eta_seconds=0.0)
+            elif replace_selection and item.status is ItemStatus.WAITING and item.id not in selected:
+                item = replace(item, status=ItemStatus.UNSELECTED)
+            updated.append(item)
+        self._repository.save_items(updated)
+        status = (DownloadStatus.RUNNING if any(i.status is ItemStatus.DOWNLOADING for i in updated)
+                  else DownloadStatus.WAITING if any(i.status is ItemStatus.WAITING for i in updated)
+                  else task.download_status)
+        task = replace(task, selection_mode=SelectionMode.MANUAL, download_status=status,
+                       retry_count=0, retry_at=None, updated_at=self._clock())
         self._repository.save_many([task])
         return task
 
@@ -1292,7 +1395,13 @@ class TaskService:
         task = self._repository.get_task(task_id)
         items = self._repository.list_items(task_id)
         items = self._keep_largest_candidate_per_duration(items)
-        valid_items = [item for item in items if item.valid]
+        if task.settings.skip_unknown_estimates and task.selection_mode is SelectionMode.AUTO:
+            items = [replace(item, status=ItemStatus.SKIPPED)
+                     if item.valid and item.status in {ItemStatus.UNSELECTED, ItemStatus.WAITING}
+                     and not (item.estimated_bytes or item.total_bytes) and not item.duration_seconds
+                     else item for item in items]
+            self._repository.save_items(items)
+        valid_items = [item for item in items if item.valid and item.status is not ItemStatus.SKIPPED]
         if (
             task.selection_mode is SelectionMode.AUTO
             and valid_items
@@ -1300,7 +1409,7 @@ class TaskService:
         ):
             items = [
                 replace(item, status=ItemStatus.WAITING)
-                if item.valid else item
+                if item.valid and item.status is not ItemStatus.SKIPPED else item
                 for item in items
             ]
             download_status = DownloadStatus.WAITING
