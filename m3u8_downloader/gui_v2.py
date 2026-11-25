@@ -1591,8 +1591,13 @@ class MainWindow(QMainWindow):
             self.quick_address_edit.setFocus()
             self._show_feedback("请输入网页链接或 m3u8 链接")
             return
-        normalized = address if "://" in address else "https://" + address
-        parts = urlsplit(normalized)
+        links = self._service._normalize_addresses(address)
+        if len(links) != 1:
+            self.quick_address_edit.setFocus()
+            self._show_feedback("快捷开始需要一个有效链接。多个链接请使用新建任务。")
+            return
+        address = links[0]
+        parts = urlsplit(address)
         host = parts.hostname or ""
         if (
             parts.scheme.lower() not in {"http", "https"}

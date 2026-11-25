@@ -33,16 +33,32 @@ def canonical_video_url(url: str) -> str | None:
     return None
 
 
+def supported_video_url(url: str) -> str | None:
+    if address := canonical_video_url(url):
+        return address
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    host = parsed.hostname
+    path = parsed.path.rstrip("/")
+    if host in {"www.tiktok.com", "tiktok.com", "m.tiktok.com"}:
+        if re.fullmatch(r"/@[^/]+/video/[0-9]+", path) or re.fullmatch(r"/t/[A-Za-z0-9]+", path):
+            return f"https://{host}{path}"
+    if host in {"vm.tiktok.com", "vt.tiktok.com"} and re.fullmatch(r"/[A-Za-z0-9]+", path):
+        return f"https://{host}{path}/"
+    return None
+
+
 def run_youtube(url, arguments, *, stop_event, timeout=None, proxy=""):
     from .downloader import DownloadCancelled
 
-    address = canonical_video_url(url)
+    address = supported_video_url(url)
     if address is None:
-        raise ValueError("请选择单个 YouTube 视频")
+        raise ValueError("请选择单个 YouTube 或 TikTok 视频")
     bundled = Path(sys.executable).parent / "yt-dlp.exe"
     executable = str(bundled) if bundled.is_file() else shutil.which("yt-dlp")
     if not executable:
-        raise RuntimeError("缺少 YouTube 下载组件 yt-dlp")
+        raise RuntimeError("缺少视频下载组件 yt-dlp")
     command = [executable, "--ignore-config", "--no-playlist", "--no-progress",
                "--match-filter", "!is_live"]
     if node := shutil.which("node"):
@@ -62,9 +78,13 @@ def run_youtube(url, arguments, *, stop_event, timeout=None, proxy=""):
                     if stop_event.wait(0.2):
                         raise DownloadCancelled("用户停止")
                     if timeout is not None and time.monotonic() - start >= timeout:
-                        raise TimeoutError("YouTube 提取超时")
+                        raise TimeoutError("视频提取超时")
                 if process.returncode:
-                    raise RuntimeError("YouTube 组件未能处理此视频")
+                    stderr.seek(0)
+                    error = stderr.read().decode("utf-8", errors="replace")
+                    if "Your IP address is blocked" in error:
+                        raise RuntimeError("平台限制了当前网络对这条视频的访问")
+                    raise RuntimeError("视频组件未能处理此视频")
                 stdout.seek(0)
                 return stdout.read().decode("utf-8", errors="replace")
             finally:

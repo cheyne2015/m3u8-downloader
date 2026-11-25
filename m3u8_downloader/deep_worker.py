@@ -49,9 +49,9 @@ from typing import Callable, List, Optional, Tuple
 from urllib.parse import urljoin, urlsplit
 
 try:
-    from m3u8_downloader.douyin import video_id, find_video_record, find_rendered_video, playback_urls
+    from m3u8_downloader.douyin import video_id, find_video_record, find_rendered_video, playback_urls, is_share_link
 except ImportError:
-    from douyin import video_id, find_video_record, find_rendered_video, playback_urls
+    from douyin import video_id, find_video_record, find_rendered_video, playback_urls, is_share_link
 
 try:
     from m3u8_downloader.extraction_errors import LoginRequiredError, LoginGate, LOGIN_EVIDENCE_SCRIPT
@@ -558,6 +558,7 @@ async def _collect_urls_async(
     """在共享浏览器的独立 context 中提取一个网页。"""
     gate = LoginGate()
     target_id = video_id(url)
+    share_link = is_share_link(url)
     found: List[str] = []
     seen: set = set()
     title = ""
@@ -585,6 +586,13 @@ async def _collect_urls_async(
     content = ""
     inspections = set()
     sniffed = set()
+    matched_douyin = False
+
+    def add_douyin_record(record) -> None:
+        nonlocal matched_douyin
+        if not matched_douyin and record and (urls := playback_urls(record)):
+            add(urls[0], verified=True)
+            matched_douyin = urls[0] in seen
 
     async def inspect_finished(request):
         try:
@@ -599,11 +607,7 @@ async def _collect_urls_async(
                     if length <= 4 * 1024 * 1024:
                         body = await response.body()
                         if len(body) <= 4 * 1024 * 1024:
-                            record = find_video_record(json.loads(body), target_id)
-                            if record:
-                                urls = playback_urls(record)
-                                if urls:
-                                    add(urls[0], verified=True)
+                            add_douyin_record(find_video_record(json.loads(body), target_id))
             kind = _playlist_response_kind(response)
             if kind == "typed":
                 add(response.url, verified=True)
@@ -658,17 +662,17 @@ async def _collect_urls_async(
         started = time.monotonic()
         previous_render_data = None
         while time.monotonic() < deadline:
+            if share_link and target_id is None:
+                target_id = video_id(page.url)
             await try_title()
-            if target_id and not found:
+            if target_id and not matched_douyin:
                 try:
                     render_data = await page.evaluate("document.querySelector('#RENDER_DATA')?.textContent")
                 except Exception:
                     render_data = None
                 if render_data and render_data != previous_render_data:
                     previous_render_data = render_data
-                    record = find_rendered_video(render_data, target_id)
-                    if record and (urls := playback_urls(record)):
-                        add(urls[0], verified=True)
+                    add_douyin_record(find_rendered_video(render_data, target_id))
             while pending_requests:
                 add(pending_requests.pop(0))
             for frame in page.frames:
@@ -923,7 +927,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(json.dumps({"event": "title", "title": t}, ensure_ascii=False), flush=True)
 
         headers = json.loads(os.environ["M3U8_DEEP_BROWSER_HEADERS"]) if os.environ.get("M3U8_DEEP_BROWSER_HEADERS") else None
-        if video_id(args.url):
+        if video_id(args.url) or is_share_link(args.url):
             from playwright.async_api import async_playwright
 
             async def collect_douyin():

@@ -20,9 +20,14 @@ m3u8-downloader\m3u8-dl.exe
 
 发布版是文件夹程序，`_internal` 中包含 Qt 运行库、程序资源和 ffmpeg。请保留整个文件夹，不要只复制 EXE。
 
-直接 M3U8 下载和普通网页提取不要求用户安装 Python、Qt 或 ffmpeg。需要深度网页提取时，下载 [深度提取组件 1.1.7](https://github.com/cheyne2015/m3u8-downloader/releases/download/v2.2.6/m3u8-downloader-deep-runtime-1.1.7-windows-x64.zip)，把两个压缩包解压到同一位置。
+直接 M3U8 下载和普通网页提取不要求用户安装 Python、Qt 或 ffmpeg。需要深度网页提取时，下载 [深度提取组件 1.1.8](https://github.com/cheyne2015/m3u8-downloader/releases/download/v2.2.7/m3u8-downloader-deep-runtime-1.1.8-windows-x64.zip)，把两个压缩包解压到同一位置。
 
 **2.2.5 的抖音支持需要深度组件 1.1.7。** 组件包含 Playwright 和 Chromium 无界面内核，无需另行安装 Python 或浏览器环境。请先完全退出程序，再替换程序文件和 `deep-runtime` 文件夹；保留自己的 `portable.flag` 和 `data`（如有）。
+
+### 2.2.7 更新
+
+- 新建任务及快捷开始支持整段抖音分享文案。短链跳转后按作品编号提取，需配套深度组件 1.1.8。
+- 实验性支持 TikTok 单作品页与分享短链。当前环境遭遇平台访问限制，真实下载尚未验收。
 
 ### 2.2.6 更新
 

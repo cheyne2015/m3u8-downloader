@@ -1470,14 +1470,19 @@ class TaskService:
             address = line.strip()
             if not address:
                 continue
-            if "://" not in address:
-                address = "https://" + address
-            parts = urlsplit(address)
-            normalized = urlunsplit((parts.scheme.lower(), parts.netloc.lower(),
-                                     parts.path, parts.query, parts.fragment))
-            if normalized not in seen:
-                seen.add(normalized)
-                addresses.append(normalized)
+            address = re.sub(r"(https?)\\://", r"\1://", address, flags=re.IGNORECASE)
+            links = re.findall(r'https?://[^\s"<>\\，。；！？、【】《》]+', address, re.IGNORECASE)
+            if not links and any(character.isspace() for character in address):
+                continue
+            for address in links or [address]:
+                if "://" not in address:
+                    address = "https://" + address
+                parts = urlsplit(address)
+                normalized = urlunsplit((parts.scheme.lower(), parts.netloc.lower(),
+                                         parts.path, parts.query, parts.fragment))
+                if normalized not in seen:
+                    seen.add(normalized)
+                    addresses.append(normalized)
         return addresses
 
     @staticmethod

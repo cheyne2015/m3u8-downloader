@@ -4,6 +4,11 @@ import json
 from urllib.parse import parse_qs, unquote, urlsplit
 
 
+def is_share_link(url: str) -> bool:
+    parsed = urlsplit(url)
+    return parsed.scheme in {"http", "https"} and parsed.hostname == "v.douyin.com"
+
+
 def find_rendered_video(text: str, target_id: str) -> dict | None:
     if not text or len(text) > 4 * 1024 * 1024:
         return None
